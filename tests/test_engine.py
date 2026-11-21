@@ -14,6 +14,7 @@ from git_ez.config import Config
 from git_ez.engine import Engine
 from git_ez.errors import EzError
 from git_ez.git import Git
+from git_ez.options import RebaseOptions
 from tests.fakes import FakeResolver
 
 pytestmark = pytest.mark.integration
@@ -1042,3 +1043,118 @@ def test_rebase_onto_rejects_a_result_missing_the_new_base(repo, mocker):
     assert audit.manifest["status"] == "failed"
     assert "does not contain" in audit.manifest["error"]
     assert repo.git.branch_oid("feature") == repo.source_oid
+
+
+@pytest.mark.parametrize("policy", ["drop", "keep", "stop"])
+@pytest.mark.parametrize("empty_message", [False, True])
+def test_empty_policy_after_conflict_resolution(repo, policy, empty_message):
+    if empty_message:
+        repo.git.run("commit", "--amend", "--allow-empty-message", "-m", "")
+    original_author = repo.git.text("show", "-s", "--format=%an <%ae>%n%aI", "HEAD")
+    repo.resolver = FakeResolver(content="parent\n")
+    audit = integrate(repo, rebase_options=RebaseOptions(empty=policy))
+    assert len(repo.resolver.calls) == 1
+    assert audit.manifest["rebase_options"]["empty"] == policy
+    assert audit.manifest["empty_commits"][0]["policy"] == policy
+    assert "Empty conflict resolutions" in (audit.directory / "report.md").read_text()
+    if policy == "stop":
+        assert audit.manifest["status"] == "failed"
+        assert not audit.manifest["integrated"]
+        assert repo.git.rebase_active()
+        assert "resolution is empty" in audit.manifest["error"]
+    else:
+        assert audit.manifest["status"] == "succeeded", audit.manifest
+        assert not repo.git.operation_active()
+        if policy == "keep":
+            assert repo.git.text("rev-parse", "HEAD^") == repo.parent_oid
+            assert repo.git.text("show", "-s", "--format=%B", "HEAD") == (
+                "" if empty_message else "source change"
+            )
+            assert repo.git.text("show", "-s", "--format=%an <%ae>%n%aI", "HEAD") == original_author
+            assert repo.git.run("diff", "HEAD^", "HEAD").stdout == b""
+        else:
+            assert repo.git.branch_oid("feature") == repo.parent_oid
+
+
+@pytest.mark.parametrize("policy", ["drop", "keep", "stop"])
+def test_reapply_cherry_picks_obeys_empty_policy_without_model(repo, policy):
+    repo.git.run("checkout", "main")
+    repo.file.write_text("source\n")
+    repo.git.run("commit", "-am", "equivalent change")
+    target = repo.git.text("rev-parse", "HEAD")
+    repo.git.run("checkout", "feature")
+    audit = integrate(repo, rebase_options=RebaseOptions(empty=policy, reapply_cherry_picks=True))
+    assert repo.resolver.calls == []
+    if policy == "stop":
+        assert audit.manifest["status"] == "failed"
+        assert repo.git.rebase_active()
+        assert not audit.manifest["integrated"]
+    else:
+        assert audit.manifest["status"] == "succeeded", audit.manifest
+        if policy == "keep":
+            assert repo.git.text("rev-parse", "HEAD^") == target
+            assert repo.git.run("diff", "HEAD^", "HEAD").stdout == b""
+        else:
+            assert repo.git.branch_oid("feature") == target
+
+
+@pytest.mark.parametrize("keep", [None, True, False])
+def test_rebase_controls_initially_empty_commits(repo, keep):
+    repo.git.run("checkout", "-b", "empty", repo.base_oid)
+    repo.git.run("commit", "--allow-empty", "-m", "intentional empty commit")
+    audit = integrate(repo, rebase_options=RebaseOptions(keep_empty=keep))
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.resolver.calls == []
+    if keep is False:
+        assert repo.git.branch_oid("empty") == repo.parent_oid
+    else:
+        assert repo.git.text("rev-parse", "HEAD^") == repo.parent_oid
+        assert repo.git.text("show", "-s", "--format=%s", "HEAD") == "intentional empty commit"
+
+
+@pytest.mark.parametrize("force", [True, False])
+def test_force_rebase_controls_replay_of_unchanged_series(repo, monkeypatch, force):
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2001-01-01T00:00:00+00:00")
+    audit = integrate(repo, target=repo.base_oid, rebase_options=RebaseOptions(force_rebase=force))
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert (repo.git.branch_oid("feature") != repo.source_oid) is force
+    assert repo.resolver.calls == []
+
+
+def test_empty_keep_honors_commit_hook_failure(repo):
+    repo.resolver = FakeResolver(content="parent\n")
+    hook = repo.root / ".git/hooks/pre-commit"
+    hook.write_text("#!/bin/sh\necho empty-commit-rejected >&2\nexit 1\n")
+    hook.chmod(0o755)
+    audit = integrate(repo, rebase_options=RebaseOptions(empty="keep"))
+    assert audit.manifest["status"] == "failed"
+    assert "Cannot retain empty commit" in audit.manifest["error"]
+    assert repo.git.rebase_active()
+    assert "empty-commit-rejected" in (audit.directory / "integration.log").read_text()
+
+
+def test_merge_rejects_rebase_options(repo):
+    with pytest.raises(EzError, match="only supported for rebase"):
+        integrate(repo, "merge", rebase_options=RebaseOptions(empty="keep"))
+    assert not (repo.root / ".git/ez").exists()
+
+
+@pytest.mark.parametrize("reapply", [True, False])
+def test_reapply_cherry_picks_controls_equivalent_commit_replay(repo, reapply):
+    repo.git.run("checkout", "-b", "equivalent", repo.base_oid)
+    repo.file.write_text("source\n")
+    repo.git.run("commit", "-am", "upstream equivalent")
+    target = repo.git.text("rev-parse", "HEAD")
+    repo.git.run("checkout", "feature")
+    audit = integrate(
+        repo,
+        target="equivalent",
+        rebase_options=RebaseOptions(empty="keep", reapply_cherry_picks=reapply),
+    )
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.resolver.calls == []
+    if reapply:
+        assert repo.git.text("rev-parse", "HEAD^") == target
+        assert repo.git.text("show", "-s", "--format=%s", "HEAD") == "source change"
+    else:
+        assert repo.git.branch_oid("feature") == target

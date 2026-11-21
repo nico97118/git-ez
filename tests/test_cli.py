@@ -239,7 +239,7 @@ def test_merge_fast_forward_policy_syntax(arguments, expected):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("flag", ["--ff", "--no-ff", "--ff-only"])
+@pytest.mark.parametrize("flag", ["--ff-only"])
 def test_merge_fast_forward_policies_are_not_rebase_options(flag):
     with pytest.raises(SystemExit) as error:
         parser().parse_args(["rebase", "main", flag])
@@ -285,3 +285,30 @@ def test_cli_rebase_onto_reaches_engine(cli_repo, monkeypatch, capsys):
     assert main(["rebase", "HEAD", "--onto", "main"]) == 0
     assert "Status: succeeded" in capsys.readouterr().out
     assert cli_repo.branch_oid("feature") == cli_repo.branch_oid("main")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("flag", ["--force-rebase", "-f", "--no-ff"])
+def test_rebase_force_aliases_and_reset(flag):
+    assert parser().parse_args(["rebase", "main", flag]).force_rebase is True
+    assert parser().parse_args(["rebase", "main", flag, "--ff"]).force_rebase is False
+
+
+@pytest.mark.integration
+def test_cli_rebase_empty_options_reach_engine(cli_repo, monkeypatch, capsys):
+    monkeypatch.chdir(cli_repo.path)
+    cli_repo.run("commit", "--allow-empty", "-m", "empty")
+    assert (
+        main(["rebase", "main", "--empty=keep", "--no-keep-empty", "--reapply-cherry-picks"]) == 0
+    )
+    assert "Status: succeeded" in capsys.readouterr().out
+    assert cli_repo.text("show", "-s", "--format=%s", "HEAD") != "empty"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "arguments", [["rebase", "main", "--empty=unknown"], ["merge", "main", "--empty=keep"]]
+)
+def test_invalid_rebase_policies_are_rejected(arguments):
+    with pytest.raises(SystemExit):
+        parser().parse_args(arguments)

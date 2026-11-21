@@ -12,6 +12,7 @@ from . import __version__
 from .config import Config
 from .engine import Engine
 from .errors import EzError
+from .options import RebaseOptions
 
 
 def parser() -> argparse.ArgumentParser:
@@ -27,6 +28,22 @@ def parser() -> argparse.ArgumentParser:
         run.add_argument("target", help="Git revision to integrate into the current branch")
         if operation == "rebase":
             run.add_argument("--onto", help="Replay commits after target onto this revision")
+            run.add_argument("--empty", choices=("drop", "keep", "stop"))
+            run.add_argument("--keep-empty", action=argparse.BooleanOptionalAction, default=None)
+            run.add_argument(
+                "--reapply-cherry-picks", action=argparse.BooleanOptionalAction, default=None
+            )
+            run.add_argument(
+                "--force-rebase",
+                "-f",
+                "--no-ff",
+                dest="force_rebase",
+                action="store_const",
+                const=True,
+                default=None,
+                help="Replay commits even when unchanged",
+            )
+            run.add_argument("--ff", dest="force_rebase", action="store_const", const=False)
         if operation == "merge":
             for flag, help_text in (
                 ("ff", "Allow fast-forward; otherwise create a merge commit"),
@@ -78,6 +95,13 @@ def main(argv: list[str] | None = None) -> int:
             validation=tuple(args.check or ()),
             merge_ff=getattr(args, "merge_ff", None),
             onto=getattr(args, "onto", None),
+            rebase_options=(
+                RebaseOptions(
+                    args.empty, args.keep_empty, args.reapply_cherry_picks, args.force_rebase
+                )
+                if args.command == "rebase"
+                else None
+            ),
         )
         print(f"Status: {audit.manifest['status']}")
         print(f"Report: {audit.directory / 'report.md'}")

@@ -342,3 +342,13 @@ verify orchestration without a server. These internal interfaces are not a plugi
 
 Exit codes: `0` = successful local integration, displayed report, or compatible probe;
 `1` = failed run/probe; `2` = configuration, CLI, or precondition error.
+
+## License
+
+Copyright (c) 2026 git-ez contributors.
+
+Licensed under the GNU General Public License, version 3 only
+(`GPL-3.0-only`). See [LICENSE](LICENSE) for the full terms. This license covers
+git-ez; it does not change the license of repositories processed by the tool.
+Third-party dependencies retain their own licenses. See the
+[dependency licensing review](docs/licensing.md) for the current scope and open item.

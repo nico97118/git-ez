@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 git-ez contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Git plumbing with literal paths, pinned revisions, and no shell interpolation."""
 
 import os

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 git-ez contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Thin integration boundary around the Deep Agents Python harness."""
 
 from typing import Any, Protocol

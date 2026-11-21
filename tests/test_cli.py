@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 git-ez contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 """The installed git-ez extension uses Git configuration and the real agent runtime."""
 
 import os

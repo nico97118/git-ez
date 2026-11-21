@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 git-ez contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Exercise actual LangChain HTTP adapters with a deterministic HTTP transport."""
 
 import json

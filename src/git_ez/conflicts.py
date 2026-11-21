@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 git-ez contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Provider-neutral inputs and strictly validated model decisions."""
 
 import math

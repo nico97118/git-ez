@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 git-ez contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Verify a built wheel in a fresh environment outside the source checkout."""
 
 import os
@@ -47,6 +50,15 @@ def main() -> None:
         ).strip()
         if distribution != "git-ez-ai":
             raise RuntimeError(f"Unexpected installed distribution: {distribution}")
+        license_expression = run(
+            str(python),
+            "-I",
+            "-c",
+            "from importlib.metadata import metadata; "
+            "print(metadata('git-ez-ai')['License-Expression'])",
+        ).strip()
+        if license_expression != "GPL-3.0-only":
+            raise RuntimeError(f"Unexpected installed license: {license_expression}")
         installed = Path(
             run(str(python), "-I", "-c", "import git_ez; print(git_ez.__file__)").strip()
         )

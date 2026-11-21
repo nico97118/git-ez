@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 git-ez contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Git caller settings are preserved while checkout redirections are excluded."""
 
 from git_ez.git import Git

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 git-ez contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Deep Agents adapter: native backends, LangGraph checkpoints, and local audit hooks."""
 
 import json

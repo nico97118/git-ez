@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 git-ez contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Native Git configuration works independently of the git-ez checkout and TOML files."""
 
 import json

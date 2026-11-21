@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 git-ez contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Probe the actual SDK/model protocol without opening a repository or running commands."""
 
 from pathlib import Path

@@ -51,6 +51,9 @@ changing a behavior. Keep this map accurate when moving responsibilities.
 - Use Python 3.11-compatible code, type annotations, and the existing strict mypy
   configuration. Ruff defines formatting and lint conventions, including 100-column
   lines. Use pytest functions and fixtures for tests.
+- Project-owned code is licensed under `GPL-3.0-only`. Preserve SPDX notices and
+  review license compatibility when adding or updating dependencies. Keep third-party
+  licensing concerns in `docs/licensing.md`; do not relabel third-party code.
 - Manage dependencies with uv. Update `pyproject.toml` and `uv.lock` together when
   dependencies change. Keep unrelated dependency versions unchanged.
 - Keep Git orchestration in the engine. The resolver proposes file changes and

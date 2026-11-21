@@ -33,3 +33,17 @@ def test_git_environment_keeps_configuration_and_identity_but_not_repository_rou
     assert git.text("var", "GIT_AUTHOR_IDENT").startswith(
         "Author from environment <author@example.invalid>"
     )
+
+
+def test_oversized_git_blobs_are_rejected_before_loading_content(tmp_path):
+    from git_ez.errors import EzError
+    from git_ez.git import Stage
+
+    git = Git(tmp_path)
+    git.run("init", "-b", "main")
+    content = tmp_path / "large.txt"
+    content.write_text("large content")
+    oid = git.text("hash-object", "-w", str(content))
+    with pytest.raises(EzError, match="exceeds configured size limit"):
+        git.blob(Stage("100644", oid), limit=4)
+    assert git.blob(Stage("100644", oid), limit=100) == b"large content"

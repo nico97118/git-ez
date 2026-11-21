@@ -152,7 +152,14 @@ class IntegrationMiddleware(AgentMiddleware[Any, Any, Any]):
         size = len(json.dumps(messages_to_dict(request.messages), default=str).encode())
         if size > self.config.agent_max_context_bytes:
             raise EzError("Agent context byte budget exceeded")
-        return handler(request)
+        try:
+            return handler(request)
+        except Exception as exc:
+            # LangGraph checkpoints persist task exceptions; sanitize before that boundary.
+            self.log.event("model_request_failed", **error_info(exc))
+            raise EzError(
+                f"Model request failed ({type(exc).__name__}); inspect local events"
+            ) from None
 
     def wrap_tool_call(self, request: ToolCallRequest, handler: Callable[..., Any]) -> Any:
         # LangGraph may schedule a batch concurrently. Serialize worktree access so
@@ -329,13 +336,21 @@ def run_agent(
         raise EzError(f"Deep Agents failed ({type(exc).__name__}); inspect local events") from exc
     finally:
         session.update(tool_calls=log.tools, model_calls=log.conflicts)
+        capture_failure: Exception | None = None
         try:
             audit.capture_worktree(git, directory, config.max_file_bytes, paths, reference=head)
         except (EzError, OSError, ValueError) as exc:
             session["capture_error"] = str(exc)
+            if session["status"] == "resolved":
+                session["status"] = "failed"
+                capture_failure = exc
         write_json(
             directory / "messages.json", messages_to_dict(result.get("messages", log.messages))
         )
         # Callbacks + checkpoints retain the full trajectory even when invoke raises.
         log.event("session_finished", status=session["status"])
         audit.save()
+        if capture_failure is not None:
+            raise EzError(
+                "Agent session audit capture failed; inspect the report"
+            ) from capture_failure

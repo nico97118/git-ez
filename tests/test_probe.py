@@ -17,7 +17,7 @@ from git_ez.llm import base_url, create_chat_model
 from git_ez.probe import probe
 
 
-def run_probe(mocker, monkeypatch, tmp_path: Path, provider="openai", broken_tools=False):
+def run_probe(mocker, monkeypatch, tmp_path: Path, provider="openai", failure=None):
     requests = []
 
     def respond(request):
@@ -27,7 +27,7 @@ def run_probe(mocker, monkeypatch, tmp_path: Path, provider="openai", broken_too
         index = len(requests)
         message = {"role": "assistant", "content": marker}
         reason = "stop"
-        if index == 2 and (not broken_tools):
+        if index == 2 and failure != "missing_tool":
             message = {
                 "role": "assistant",
                 "content": "",
@@ -45,6 +45,16 @@ def run_probe(mocker, monkeypatch, tmp_path: Path, provider="openai", broken_too
                 ],
             }
             reason = "tool_calls"
+        if (index == 1 and failure == "chat") or (index == 3 and failure == "tool_result"):
+            message["content"] = "unrelated response"
+        if index == 2 and "tool_calls" in message:
+            call = message["tool_calls"][0]
+            if failure == "tool_name":
+                call["function"]["name"] = "different_tool"
+            elif failure == "tool_arguments":
+                call["function"]["arguments"] = json.dumps({"value": "wrong marker"})
+            elif failure == "tool_id":
+                call["id"] = ""
         if provider == "ollama":
             body = {"model": "test-qwen", "message": message, "done": True, "done_reason": "stop"}
         else:
@@ -103,7 +113,7 @@ def test_real_ollama_sdk_three_step_roundtrip(monkeypatch, mocker, tmp_path: Pat
 
 @pytest.mark.integration
 def test_plain_chat_success_does_not_prove_tool_compatibility(monkeypatch, mocker, tmp_path: Path):
-    report, requests = run_probe(mocker, monkeypatch, tmp_path, broken_tools=True)
+    report, requests = run_probe(mocker, monkeypatch, tmp_path, failure="missing_tool")
     assert report["status"] == "failed"
     assert report["checks"][0]["ok"]
     assert not report["checks"][1]["ok"]
@@ -213,3 +223,42 @@ def test_ollama_reasoning_and_generation_options_reach_the_sdk():
         assert model.temperature == 0.2
     finally:
         model._client._client.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "failure,stage,request_count",
+    [
+        ("chat", "chat", 1),
+        ("tool_result", "tool_result_roundtrip", 3),
+        ("tool_name", "tool_call", 2),
+        ("tool_arguments", "tool_call", 2),
+        ("tool_id", "tool_call", 2),
+    ],
+)
+def test_probe_rejects_incomplete_or_incorrect_protocol_roundtrips(
+    mocker,
+    monkeypatch,
+    tmp_path,
+    failure,
+    stage,
+    request_count,
+):
+    report, requests = run_probe(mocker, monkeypatch, tmp_path, failure=failure)
+    assert report["status"] == "failed"
+    assert report["checks"][-1]["name"] == stage
+    assert report["checks"][-1]["ok"] is False
+    assert report["error"]["type"] == "EzError"
+    assert len(requests) == request_count
+
+
+@pytest.mark.unit
+def test_probe_does_not_archive_unexpected_provider_exception_contents(mocker, tmp_path):
+    secret = "provider-echoed-secret-token"
+    mocker.patch("git_ez.probe.create_chat_model", side_effect=RuntimeError(secret))
+    report_file = tmp_path / "probe.json"
+    report = probe(Config(model="test"), report_file)
+    assert report["status"] == "failed"
+    assert report["error"] == {"type": "RuntimeError", "status_code": None}
+    assert report["checks"] == []
+    assert secret not in report_file.read_text()

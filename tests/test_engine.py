@@ -469,15 +469,25 @@ def test_interruption_preserves_partial_edits_and_the_active_operation(repo, moc
     assert (audit.directory / "exit/files.json").is_file()
 
 
-def test_validation_timeout_retains_output_and_the_integrated_commit(repo):
-    from dataclasses import replace
+def test_validation_timeout_retains_output_and_the_integrated_commit(repo, mocker):
+    import subprocess
 
-    repo.config = replace(repo.config, timeout=1)
-    script = (
-        "import sys,time; print('validation started',flush=True); "
-        "print('validation progress',file=sys.stderr,flush=True); time.sleep(30)"
-    )
-    audit = integrate(repo, validation=(sys.executable, "-c", script))
+    original = subprocess.run
+    validation = ("project-validation",)
+
+    def run(command, **kwargs):
+        if tuple(command) == validation:
+            assert kwargs["timeout"] == repo.config.timeout
+            raise subprocess.TimeoutExpired(
+                command,
+                timeout=kwargs["timeout"],
+                output=b"validation started\n",
+                stderr=b"validation progress\n",
+            )
+        return original(command, **kwargs)
+
+    mocker.patch("git_ez.engine.subprocess.run", side_effect=run)
+    audit = integrate(repo, validation=validation)
     assert audit.manifest["status"] == "failed"
     assert audit.manifest["integrated"]
     assert "Validation command timed out" in audit.manifest["error"]
@@ -557,3 +567,278 @@ def test_audit_distinguishes_deleted_and_unavailable_paths_without_following_lin
         assert records[name]["state"] == "unavailable"
         assert "artifact" not in records[name]
     assert outside.read_text() == "private content"
+
+
+def test_non_utf8_proposal_is_a_recorded_failure_not_an_unfinished_run(repo, mocker):
+    def propose(*args):
+        repo.file.write_bytes(b"invalid \xff\n")
+        return {"rationale": "Attempted resolution", "confidence": 0.95}
+
+    mocker.patch.object(repo.resolver, "run", side_effect=propose)
+    audit = integrate(repo)
+    assert audit.manifest["status"] == "failed"
+    assert "Non-UTF-8" in audit.manifest["error"]
+    assert not audit.manifest["integrated"]
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert repo.file.read_bytes() == b"invalid \xff\n"
+    assert json.loads((audit.directory / "run.json").read_text())["status"] == "failed"
+    snapshot = json.loads((audit.directory / "exit/files.json").read_text())
+    record = next(item for item in snapshot["files"] if item["path"] == "file.txt")
+    assert (audit.directory / "exit" / record["artifact"]).read_bytes() == b"invalid \xff\n"
+
+
+def test_final_audit_capture_failure_does_not_report_overall_success(repo, mocker):
+    mocker.patch("git_ez.audit.Audit.capture_worktree", side_effect=OSError("disk full"))
+    audit = integrate(repo)
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["integrated"]
+    assert "audit capture failed" in audit.manifest["error"]
+    assert audit.manifest["capture_error"] == "disk full"
+    assert repo.git.branch_oid("feature") == audit.manifest["result_oid"]
+    assert not repo.git.operation_active()
+    saved = json.loads((audit.directory / "run.json").read_text())
+    assert saved["status"] == "failed"
+    assert "Final capture failed: disk full" in (audit.directory / "report.md").read_text()
+
+
+@pytest.mark.parametrize("change", ["branch", "commit"])
+def test_preflight_race_is_detected_before_git_integration(repo, mocker, change):
+    engine = Engine(repo.root, repo.config, repo.resolver)
+    prepare = engine._prepare_run
+    changed_head = []
+
+    def concurrent_change(*args):
+        audit = prepare(*args)
+        if change == "branch":
+            repo.git.run("checkout", "main")
+        else:
+            repo.git.run("commit", "--allow-empty", "-m", "Concurrent user commit")
+        changed_head.append(repo.git.text("rev-parse", "HEAD"))
+        return audit
+
+    mocker.patch.object(engine, "_prepare_run", side_effect=concurrent_change)
+    audit = engine.run("main")
+    assert audit.manifest["status"] == "failed"
+    assert "Current branch changed before integration" in audit.manifest["error"]
+    assert repo.resolver.calls == []
+    assert not repo.git.operation_active()
+    assert repo.git.text("rev-parse", "HEAD") == changed_head[0]
+    assert not (audit.directory / "integration.log").exists()
+
+
+def test_literal_target_oid_can_be_resolved_without_a_symbolic_target_ref(repo):
+    audit = integrate(repo, target=repo.parent_oid)
+    assert audit.manifest["status"] == "succeeded"
+    assert audit.manifest["target_ref"] is None
+    assert len(repo.resolver.calls) == 1
+    repo.git.run("merge-base", "--is-ancestor", repo.parent_oid, "HEAD")
+    assert repo.git.text("show", "HEAD:file.txt") == "combined"
+
+
+def test_validation_switching_branch_at_the_same_commit_is_detected(repo):
+    validation = (
+        sys.executable,
+        "-c",
+        "import subprocess; subprocess.run(['git','checkout','-b','other'],check=True)",
+    )
+    audit = integrate(repo, validation=validation)
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["integrated"]
+    assert "Checked-out branch changed" in audit.manifest["error"]
+    assert repo.git.text("rev-parse", "HEAD") == audit.manifest["result_oid"]
+    assert repo.git.text("branch", "--show-current") == "other"
+    assert repo.git.branch_oid("feature") == audit.manifest["result_oid"]
+
+
+def test_replacing_merge_result_with_target_does_not_lose_the_original_branch_silently(
+    repo, mocker
+):
+    engine = Engine(repo.root, repo.config, repo.resolver)
+    record = engine._record_result
+
+    def concurrent_reset(audit):
+        repo.git.run("reset", "--hard", "main")
+        record(audit)
+
+    mocker.patch.object(engine, "_record_result", side_effect=concurrent_reset)
+    audit = engine.run("main", "merge")
+    assert audit.manifest["status"] == "failed"
+    assert "does not contain the original branch" in audit.manifest["error"]
+    assert audit.manifest["result_oid"] == repo.parent_oid
+    assert repo.git.branch_oid("feature") == repo.parent_oid
+    assert (audit.directory / "report.md").is_file()
+
+
+def test_final_capture_error_does_not_replace_the_original_resolver_failure(repo, mocker):
+    repo.resolver = FakeResolver(error="model unavailable")
+    mocker.patch("git_ez.audit.Audit.capture_worktree", side_effect=OSError("disk full"))
+    audit = integrate(repo)
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["error"] == "model unavailable"
+    assert audit.manifest["capture_error"] == "disk full"
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+
+
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+def test_modify_delete_conflicts_preserve_stage_meaning_and_apply_deletion(repo, operation):
+    repo.git.run("rm", "file.txt")
+    repo.git.run("commit", "--amend", "-m", "Delete on feature")
+    before = repo.git.branch_oid("feature")
+    repo.resolver = FakeResolver(action="delete")
+    audit = integrate(repo, operation)
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert len(repo.resolver.calls) == 1
+    conflict = repo.resolver.calls[0]
+    assert conflict.base == "base\n"
+    assert (conflict.ours, conflict.theirs) == (
+        ("parent\n", None) if operation == "rebase" else (None, "parent\n")
+    )
+    assert not repo.file.exists()
+    assert not repo.git.operation_active()
+    assert not repo.git.conflicts()
+    repo.git.run("merge-base", "--is-ancestor", repo.parent_oid, "HEAD")
+    if operation == "merge":
+        repo.git.run("merge-base", "--is-ancestor", before, "HEAD")
+    assert audit.manifest["conflicts"][0]["resolution"]["action"] == "delete"
+
+
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+def test_rename_rename_conflict_can_keep_one_path_without_resurrecting_the_original(
+    repo,
+    mocker,
+    operation,
+):
+    for branch, name in (("feature", "source.txt"), ("main", "target.txt")):
+        repo.git.run("checkout", "-B", branch, repo.base_oid)
+        repo.git.run("mv", "file.txt", name)
+        repo.git.run("commit", "-m", f"Rename to {name}")
+    repo.git.run("checkout", "feature")
+    target = repo.git.branch_oid("main")
+    before = repo.git.branch_oid("feature")
+
+    def resolve(git, audit, round_number, paths, check):
+        assert set(paths) == {"file.txt", "source.txt", "target.txt"}
+        for name in ("file.txt", "source.txt"):
+            (git.path / name).unlink(missing_ok=True)
+        (git.path / "target.txt").write_text("base\n")
+        return {
+            "rationale": "Keep the target path without duplicating the file",
+            "confidence": 0.95,
+        }
+
+    mocker.patch.object(repo.resolver, "run", side_effect=resolve)
+    audit = integrate(repo, operation)
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.git.text("ls-tree", "--name-only", "HEAD") == "target.txt"
+    assert repo.git.text("show", "HEAD:target.txt") == "base"
+    assert not repo.git.run("status", "--porcelain").stdout
+    assert not repo.git.operation_active()
+    repo.git.run("merge-base", "--is-ancestor", target, "HEAD")
+    if operation == "merge":
+        repo.git.run("merge-base", "--is-ancestor", before, "HEAD")
+    original = next(c for c in audit.manifest["conflicts"] if c["path"] == "file.txt")
+    assert "marked" not in original["artifacts"]
+    assert original["resolution"]["action"] == "delete"
+
+
+@pytest.mark.parametrize("change", ["index", "merge_head"])
+def test_concurrent_control_change_after_resolution_blocks_git_continuation(repo, mocker, change):
+    engine = Engine(repo.root, repo.config, repo.resolver)
+    resolve = engine.resolve_conflicts
+
+    def concurrent_change(git, *args):
+        index = Path(git.text("rev-parse", "--path-format=absolute", "--git-path", "index"))
+        original = index.read_bytes()
+        resolve(git, *args)
+        if change == "index":
+            index.write_bytes(original)
+        else:
+            merge_head = Path(
+                git.text(
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-path",
+                    "MERGE_HEAD",
+                )
+            )
+            merge_head.write_text(repo.base_oid + "\n")
+
+    mocker.patch.object(engine, "resolve_conflicts", side_effect=concurrent_change)
+    audit = engine.run("main", "merge")
+    assert audit.manifest["status"] == "failed"
+    expected = "Unmerged index entries remain" if change == "index" else "Merge target changed"
+    assert expected in audit.manifest["error"]
+    assert not audit.manifest["integrated"]
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert repo.git.operation_active()
+    assert "git merge --continue" not in (audit.directory / "integration.log").read_text()
+
+
+def test_branch_ref_change_during_final_verification_is_not_reported_as_success(repo, mocker):
+    engine = Engine(repo.root, repo.config, repo.resolver)
+    check = engine._check_repository
+    record = engine._record_result
+    recorded = []
+
+    def record_result(audit):
+        record(audit)
+        recorded.append(audit.manifest["result_oid"])
+
+    def concurrent_update():
+        branch = check()
+        if recorded:
+            repo.git.run("update-ref", "refs/heads/feature", repo.source_oid)
+        return branch
+
+    mocker.patch.object(engine, "_record_result", side_effect=record_result)
+    mocker.patch.object(engine, "_check_repository", side_effect=concurrent_update)
+    audit = engine.run("main")
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["integrated"]
+    assert "Current branch changed during integration" in audit.manifest["error"]
+    assert audit.manifest["result_oid"] == recorded[0]
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert recorded[0] != repo.source_oid
+
+
+@pytest.mark.parametrize("damage", ["oversized", "non_utf8"])
+def test_unreadable_worktree_conflict_is_refused_before_sending_it_to_the_resolver(
+    repo, mocker, damage
+):
+    engine = Engine(repo.root, repo.config, repo.resolver)
+    snapshot = engine.snapshot
+
+    def external_edit(git, audit, name, versions):
+        path = git.path / name
+        if damage == "oversized":
+            with path.open("wb") as stream:
+                stream.truncate(10_000_001)
+        else:
+            path.write_bytes(b"invalid \xff\n")
+        return snapshot(git, audit, name, versions)
+
+    mocker.patch.object(engine, "snapshot", side_effect=external_edit)
+    audit = engine.run("main")
+    assert audit.manifest["status"] == "failed"
+    expected = "Marked file too large" if damage == "oversized" else "Non-UTF-8 working file"
+    assert expected in audit.manifest["error"]
+    assert repo.resolver.calls == []
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert "request" not in audit.manifest["conflicts"][0]["artifacts"]
+    assert (audit.directory / "exit/files.json").is_file()
+
+
+def test_binary_proposal_is_rejected_without_committing_it(repo):
+    repo.resolver = FakeResolver(content="binary\0proposal")
+    audit = integrate(repo)
+    assert audit.manifest["status"] == "failed"
+    assert "Binary content" in audit.manifest["error"]
+    assert not audit.manifest["integrated"]
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    conflict = audit.manifest["conflicts"][0]
+    assert conflict["status"] == "failed"
+    assert (audit.directory / conflict["artifacts"]["proposed"]).read_bytes() == b"binary\0proposal"

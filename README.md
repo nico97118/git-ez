@@ -228,7 +228,10 @@ Tools execute on the host; their output is sent to the configured model.
 Low confidence, an error, or an interruption leaves local state available for inspection.
 There is no automatic rollback. `integrated` indicates that Git completed, whereas
 `succeeded` also requires successful checks. Validation failure after integration
-therefore preserves the local result with a failed run status.
+therefore preserves the local result with a failed run status. Failure to write a
+required agent-session or final audit snapshot also fails the run. A session snapshot
+failure prevents Git continuation; a final snapshot failure preserves any completed
+integration. A secondary capture error does not replace the original failure reason.
 
 ## Audit
 
@@ -336,6 +339,11 @@ combined JSON/XML/HTML coverage reports plus separate JUnit results as artifacts
 each OS/Python combination. Open `coverage-html/index.html` from an artifact for
 file-by-file detail. Reports are retained for 14 days, including when tests fail.
 Coverage measures exercised code paths; it does not establish resolution correctness.
+Critical tests assert committed file contents, reference ancestry, retained local state,
+and recorded audit evidence. Controlled fault injection covers input-reference races,
+audit write failures, and provider errors, including checkpoint redaction. Scripted
+model replies validate orchestration and protocol behavior, not the quality of a real
+model's decisions or every possible concurrent filesystem change.
 
 The pytest suite covers real temporary Git repositories, SDKs, TLS, and the agent graph.
 Installed-command tests use a deterministic local OpenAI-compatible HTTP server.

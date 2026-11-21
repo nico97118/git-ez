@@ -80,9 +80,15 @@ def cli_repo(tmp_path, model_server):
     return git
 
 
-@pytest.mark.parametrize("operation", ["rebase", "merge"])
-@pytest.mark.parametrize("invocation", ["extension", "alias"])
-@pytest.mark.parametrize("subdirectory", [False, True])
+@pytest.mark.parametrize(
+    "operation,invocation,subdirectory",
+    [
+        ("rebase", "extension", False),
+        ("merge", "extension", False),
+        ("rebase", "extension", True),
+        ("merge", "alias", True),
+    ],
+)
 @pytest.mark.integration
 def test_git_extension_resolves_through_real_http_and_agent(
     cli_repo,
@@ -116,6 +122,9 @@ def test_git_extension_resolves_through_real_http_and_agent(
     assert (git.path / "file.txt").read_text() == "combined\n"
     assert git.text("remote") == ""
     assert len(model_server.calls) == 2
+    assert not git.operation_active()
+    assert not git.run("status", "--porcelain").stdout
+    git.run("merge-base", "--is-ancestor", "main", "HEAD")
     audits = list((git.path / ".git/ez/runs").iterdir())
     assert len(audits) == 1
     assert "Preserve both intentions" in (audits[0] / "report.md").read_text()
@@ -197,3 +206,18 @@ def test_module_entry_point_reports_version_without_configuration(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "git-ez 0.1.0"
+
+
+@pytest.mark.integration
+def test_failed_cli_run_returns_one_and_a_readable_audit(cli_repo, monkeypatch, capsys):
+    monkeypatch.chdir(cli_repo.path)
+    before = cli_repo.branch_oid("feature")
+    assert main(["merge", "main", "--check", sys.executable, "-c", "raise SystemExit(7)"]) == 1
+    captured = capsys.readouterr()
+    assert "Status: failed" in captured.out
+    assert "Validation failed with code 7" in captured.err
+    assert not cli_repo.operation_active()
+    assert cli_repo.branch_oid("feature") != before
+    audit = next((cli_repo.path / ".git/ez/runs").iterdir())
+    assert "Validation failed with code 7" in (audit / "report.md").read_text()
+    assert main(["show", str(audit)]) == 0

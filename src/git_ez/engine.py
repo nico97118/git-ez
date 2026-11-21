@@ -85,6 +85,9 @@ class Engine:
                 audit.manifest["exit_state"] = "exit/files.json"
             except (EzError, OSError, ValueError) as exc:
                 audit.manifest["capture_error"] = str(exc)
+                if audit.manifest["status"] == "succeeded":
+                    audit.manifest["status"] = "failed"
+                    audit.manifest["error"] = "Final audit capture failed; inspect the report"
             audit.save()
         return audit
 

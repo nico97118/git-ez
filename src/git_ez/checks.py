@@ -43,13 +43,19 @@ class WorktreeChecks:
     def verify(self, git: Git, conflicts: list[str]) -> None:
         raw = git.run("diff", "--name-only", "-z", "HEAD", "--").stdout
         raw += git.run("ls-files", "--others", "--exclude-standard", "-z").stdout
-        names = set(raw.decode("utf-8").split("\0")) | set(conflicts)
+        try:
+            names = set(raw.decode("utf-8").split("\0")) | set(conflicts)
+        except UnicodeDecodeError as exc:
+            raise EzError("Non-UTF-8 changed filenames require manual resolution") from exc
         for name in names - {""}:
             path = git.safe_path(name)
             if not path.exists():
                 continue
             if not path.is_file() or path.stat().st_size > self.config.max_file_bytes:
                 raise EzError(f"Changed file is not regular text or exceeds size limit: {name}")
-            text = path.read_bytes().decode("utf-8")
+            try:
+                text = path.read_bytes().decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise EzError(f"Non-UTF-8 proposal requires manual resolution: {name}") from exc
             if "\0" in text or MARKERS.search(text):
                 raise EzError(f"Binary content or conflict markers remain in {name}")

@@ -1,0 +1,94 @@
+.TH GIT-EZ 1 "" "git-ez" "Git Manual"
+.SH NAME
+git-ez \- local rebase and merge with AI-assisted conflict resolution
+.SH SYNOPSIS
+.B git ez rebase
+.I target
+.RI [ --repo " directory"]
+.RI [ --check " executable arguments..."]
+.br
+.B git ez merge
+.I target
+.RI [ --repo " directory"]
+.RI [ --check " executable arguments..."]
+.br
+.B git ez probe --output
+.I report.json
+.br
+.B git ez show
+.I run-directory
+.br
+.B git ez --version
+.SH DESCRIPTION
+Integrate a revision into the current branch using Git, calling a configured LLM
+when conflicts require resolution. Preserve an audit of changes, decisions,
+and reasons. No branches or worktrees are created; no fetch or push is performed.
+.PP
+A checked-out branch, clean checkout, and no active Git operation are required.
+The target is required and pinned at startup. Only simple rebase and merge are
+supported; Git options are not forwarded. Interactive rebase, rebasing merge
+commits, octopus merge, and unrelated histories are unsupported.
+.SH OPTIONS
+.TP
+.B --repo directory
+Use this repository instead of the current directory. Subdirectories are accepted.
+.TP
+.B --check executable arguments...
+Run final validation without a shell at the repository root. Must be the last
+option. The agent may also run this command during resolution.
+.TP
+.B -h
+Display command-line usage. Each subcommand also accepts this option.
+.TP
+.B --help
+Display this manual through Git. Requires the manual directory on MANPATH.
+.SH CONFIGURATION
+Use native Git configuration keys under ez.*, with normal Git scopes and includes.
+Set ez.model to the exact model identifier. The default provider is openai,
+using a Chat Completions-compatible endpoint; ollama is also supported.
+.PP
+Set ez.endpoint for a custom server, ez.apiKeyEnv for a token environment variable,
+and ez.caBundle for an internal PEM CA bundle. Prefer environment variables to
+ez.apiKey, which Git stores in plaintext. HTTPS is required outside loopback
+unless ez.allowInsecureHttp is explicitly enabled.
+.PP
+See README.md and examples/ez.gitconfig in the project repository for the full
+configuration reference. Use probe to check native tool-call compatibility
+without exposing a repository or shell tools.
+.SH AUDIT AND FAILURE RECOVERY
+Audits are stored under ez/runs/<id> in the repository's common Git directory.
+Each run prints the report location. Use git ez show with that run directory.
+.PP
+On failure or interruption, local state is retained without automatic rollback.
+Inspect the report and git status; continue or abort an active operation using
+native Git commands. There is no agent session resume command.
+.PP
+The agent shell has host-process privileges and is not a system sandbox.
+Audit files may contain sensitive source code and tool output. Model confidence
+and passing tests do not prove semantic correctness.
+.SH EXIT STATUS
+.TP
+.B 0
+Successful integration, displayed report, or compatible probe.
+.TP
+.B 1
+Failed or interrupted run, or failed probe.
+.TP
+.B 2
+Configuration, command-line, or precondition error.
+.SH EXAMPLES
+.nf
+git config --global ez.model exact-model-id
+git config --global ez.endpoint https://ai-server.example/v1
+git ez probe --output /tmp/ai-compatibility.json
+git ez rebase main
+git ez merge feature
+git ez rebase main --check python -B -m pytest
+.fi
+.SH SEE ALSO
+.BR git (1),
+.BR git-config (1),
+.BR git-rebase (1),
+.BR git-merge (1)
+.PP
+https://github.com/nico97118/git-ez

@@ -31,8 +31,11 @@ addopts = "-ra --strict-config --strict-markers"
 [tool.hatch.build.targets.wheel]
 packages = ["src/git_ez"]
 
+[tool.hatch.build.targets.wheel.shared-data]
+"docs/man/git-ez.1" = "share/man/man1/git-ez.1"
+
 [tool.hatch.build.targets.sdist]
-include = ["/src/git_ez", "/tests", "/examples", "/README.md", "/LICENSE", "/pyproject.toml", "/uv.lock"]
+include = ["/src/git_ez", "/tests", "/examples", "/README.md", "/LICENSE", "/pyproject.toml", "/uv.lock", "/docs", "/scripts"]
 
 [tool.ruff]
 line-length = 100

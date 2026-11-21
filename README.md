@@ -33,6 +33,20 @@ A standard installation copies the package into an isolated environment: the sou
 checkout is not required at runtime. Provider connectors and the agent runtime are
 included in the main dependencies.
 
+### Command help and manual
+
+`git ez -h` and `git ez rebase -h` display command-line usage. Git handles
+`git ez --help` and `git help ez` through its manual viewer. The package includes
+`git-ez.1`; for a uv tool installation, add its manual directory to your shell profile:
+
+```bash
+export MANPATH="$(uv tool dir)/git-ez/share/man:${MANPATH:-}"
+```
+
+The trailing separator preserves the system manual search path. A working `man`
+viewer is required (for example, `man-db` on Debian/Ubuntu). For other Python
+installations, the manual is under `<environment-prefix>/share/man/man1/git-ez.1`.
+
 ## Git configuration
 
 All settings use `git config`. For an OpenAI-compatible Chat Completions API

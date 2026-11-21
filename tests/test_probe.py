@@ -83,6 +83,7 @@ def run_probe(mocker, monkeypatch, tmp_path: Path, provider="openai", broken_too
     return (report, requests)
 
 
+@pytest.mark.integration
 def test_real_compatible_sdk_three_step_roundtrip(monkeypatch, mocker, tmp_path: Path):
     report, requests = run_probe(mocker, monkeypatch, tmp_path)
     assert report["status"] == "compatible", report
@@ -92,6 +93,7 @@ def test_real_compatible_sdk_three_step_roundtrip(monkeypatch, mocker, tmp_path:
     assert requests[2]["messages"][-1]["tool_call_id"] == "probe-call"
 
 
+@pytest.mark.integration
 def test_real_ollama_sdk_three_step_roundtrip(monkeypatch, mocker, tmp_path: Path):
     report, requests = run_probe(mocker, monkeypatch, tmp_path, "ollama")
     assert report["status"] == "compatible", report
@@ -99,6 +101,7 @@ def test_real_ollama_sdk_three_step_roundtrip(monkeypatch, mocker, tmp_path: Pat
     assert all(p["model"] == "test-qwen" for p in requests)
 
 
+@pytest.mark.integration
 def test_plain_chat_success_does_not_prove_tool_compatibility(monkeypatch, mocker, tmp_path: Path):
     report, requests = run_probe(mocker, monkeypatch, tmp_path, broken_tools=True)
     assert report["status"] == "failed"
@@ -107,6 +110,7 @@ def test_plain_chat_success_does_not_prove_tool_compatibility(monkeypatch, mocke
     assert len(requests) == 2
 
 
+@pytest.mark.integration
 def test_chat_model_trusts_configured_ca_bundle_only(https_server):
     body = json.dumps(
         {
@@ -143,6 +147,7 @@ def test_chat_model_trusts_configured_ca_bundle_only(https_server):
         default.http_client.close()
 
 
+@pytest.mark.integration
 def test_ollama_client_kwargs_carry_ca_bundle(ca_bundle: Path):
     config = Config(
         provider="ollama",
@@ -157,6 +162,7 @@ def test_ollama_client_kwargs_carry_ca_bundle(ca_bundle: Path):
         model._client._client.close()
 
 
+@pytest.mark.unit
 def test_full_and_base_urls_are_supported():
     config = Config(model="test", endpoint="http://localhost:8000/v1/chat/completions")
     assert base_url(config) == "http://localhost:8000/v1"
@@ -166,3 +172,44 @@ def test_full_and_base_urls_are_supported():
     )
     config = replace(config, provider="ollama", endpoint="http://localhost:11434/api/chat")
     assert base_url(config) == "http://localhost:11434"
+
+
+@pytest.mark.unit
+def test_responses_endpoint_is_rejected_without_a_protocol_fallback():
+    from git_ez.errors import EzError
+
+    with pytest.raises(EzError, match="requires Chat Completions"):
+        base_url(Config(model="test", endpoint="https://models.example/v1/responses"))
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "options,message",
+    [
+        ({"options": "not-a-table"}, "options must be a table"),
+        ({"unexpected_generation_option": True}, "Unsupported Ollama generation options"),
+    ],
+)
+def test_invalid_ollama_options_fail_before_a_request(options, message):
+    from git_ez.errors import EzError
+
+    config = Config(model="test", provider="ollama", request_options=options)
+    with pytest.raises(EzError, match=message):
+        create_chat_model(config)
+
+
+@pytest.mark.integration
+def test_ollama_reasoning_and_generation_options_reach_the_sdk():
+    model = create_chat_model(
+        Config(
+            model="test",
+            provider="ollama",
+            endpoint="http://localhost:11434",
+            request_options={"think": False, "options": {"temperature": 0.2}},
+        )
+    )
+    try:
+        assert model.reasoning is False
+        assert model.temperature == 0.2
+    finally:
+        model._client._client.close()

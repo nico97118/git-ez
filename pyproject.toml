@@ -21,12 +21,26 @@ dependencies = [
 git-ez = "git_ez.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-mock>=3.14", "ruff>=0.9", "mypy>=1.14"]
+dev = ["pytest>=8.0", "pytest-cov>=7.1", "pytest-mock>=3.14", "ruff>=0.9", "mypy>=1.14"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-ra --strict-config --strict-markers"
+markers = [
+    "unit: isolated behavior without Git subprocesses, model runtimes, or network services",
+    "integration: real Git, SDK/runtime integration, local HTTP/TLS, or installed CLI",
+]
+
+[tool.coverage.run]
+source = ["git_ez"]
+branch = true
+patch = ["subprocess"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+precision = 2
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/git_ez"]

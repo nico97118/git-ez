@@ -15,6 +15,7 @@ from git_ez.git import Git
 
 
 @pytest.mark.parametrize("operation", ["rebase", "merge"])
+@pytest.mark.unit
 def test_git_like_syntax_defaults_to_current_directory(operation):
     args = parser().parse_args([operation, "main"])
     assert args.command == operation
@@ -31,12 +32,14 @@ def test_git_like_syntax_defaults_to_current_directory(operation):
         ["rebase", "main", "--remote", "origin"],
     ],
 )
+@pytest.mark.unit
 def test_only_supported_git_commands_are_accepted(args):
     with pytest.raises(SystemExit) as error:
         parser().parse_args(args)
     assert error.value.code == 2
 
 
+@pytest.mark.unit
 def test_show_displays_report_without_modifying_audit(tmp_path, capsys):
     report = tmp_path / "report.md"
     content = "# Integration\nConflict: file.txt\nDecision: combine\nRationale: preserve intent\n"
@@ -48,6 +51,7 @@ def test_show_displays_report_without_modifying_audit(tmp_path, capsys):
     assert list(tmp_path.iterdir()) == [report]
 
 
+@pytest.mark.unit
 def test_show_missing_report_returns_error(tmp_path, capsys):
     assert main(["show", str(tmp_path)]) == 2
     assert "git-ez:" in capsys.readouterr().err
@@ -79,6 +83,7 @@ def cli_repo(tmp_path, model_server):
 @pytest.mark.parametrize("operation", ["rebase", "merge"])
 @pytest.mark.parametrize("invocation", ["extension", "alias"])
 @pytest.mark.parametrize("subdirectory", [False, True])
+@pytest.mark.integration
 def test_git_extension_resolves_through_real_http_and_agent(
     cli_repo,
     model_server,
@@ -118,6 +123,7 @@ def test_git_extension_resolves_through_real_http_and_agent(
     assert (audits[0] / "sessions/0001/checkpoints.sqlite").is_file()
 
 
+@pytest.mark.integration
 def test_missing_model_configuration_explains_setup(tmp_path, monkeypatch, capsys):
     git = Git(tmp_path)
     git.run("init", "-b", "main")
@@ -127,6 +133,7 @@ def test_missing_model_configuration_explains_setup(tmp_path, monkeypatch, capsy
     assert not (tmp_path / ".git/ez").exists()
 
 
+@pytest.mark.integration
 def test_probe_uses_git_configuration(tmp_path, monkeypatch, mocker):
     Git(tmp_path).run("init", "-b", "main")
     Git(tmp_path).run("config", "ez.model", "configured-model")
@@ -139,6 +146,7 @@ def test_probe_uses_git_configuration(tmp_path, monkeypatch, mocker):
     assert destination == output
 
 
+@pytest.mark.integration
 def test_git_command_line_configuration_is_forwarded(cli_repo, model_server):
     env = dict(os.environ)
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
@@ -154,6 +162,7 @@ def test_git_command_line_configuration_is_forwarded(cli_repo, model_server):
     assert all(call["model"] == "one-off-model" for call in model_server.calls)
 
 
+@pytest.mark.integration
 def test_version_is_available_without_a_repository_or_configuration(tmp_path):
     env = dict(os.environ)
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
@@ -161,6 +170,27 @@ def test_version_is_available_without_a_repository_or_configuration(tmp_path):
         ["git", "ez", "--version"],
         cwd=tmp_path,
         env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "git-ez 0.1.0"
+
+
+@pytest.mark.unit
+def test_empty_check_is_rejected_before_loading_configuration(mocker, capsys):
+    config = mocker.patch("git_ez.cli.Config.from_git")
+    assert main(["rebase", "main", "--check"]) == 2
+    assert "--check requires an executable" in capsys.readouterr().err
+    config.assert_not_called()
+
+
+@pytest.mark.integration
+def test_module_entry_point_reports_version_without_configuration(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-m", "git_ez", "--version"],
+        cwd=tmp_path,
         capture_output=True,
         text=True,
         check=False,

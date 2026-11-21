@@ -12,6 +12,8 @@ from git_ez.config import Config
 from git_ez.conflicts import Decision
 from git_ez.errors import EzError
 
+pytestmark = pytest.mark.unit
+
 
 def test_valid_decision_explains_resolution():
     assert Decision.parse({"rationale": "Combined both intents", "confidence": 0.9}) == Decision(
@@ -86,3 +88,21 @@ def test_audit_redacts_api_key():
 def test_invalid_request_options_are_rejected(options):
     with pytest.raises(ValueError):
         Config(model="test", request_options=options).validate()
+
+
+@pytest.mark.parametrize(
+    "settings,message",
+    [
+        ({"model": 42}, "model must be a string"),
+        ({"allow_insecure_http": "yes"}, "allow_insecure_http must be a boolean"),
+        ({"ca_bundle": ""}, "ca_bundle must be a non-empty path"),
+        ({"request_options": []}, "request_options must be an object"),
+        (
+            {"model_context_tokens": 8192, "model_max_output_tokens": 8192},
+            "model_max_output_tokens must be smaller",
+        ),
+    ],
+)
+def test_configuration_rejects_ambiguous_types_and_inconsistent_budgets(settings, message):
+    with pytest.raises(ValueError, match=message):
+        Config(**({"model": "test"} | settings)).validate()

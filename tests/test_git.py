@@ -3,7 +3,11 @@
 
 """Git caller settings are preserved while checkout redirections are excluded."""
 
+import pytest
+
 from git_ez.git import Git
+
+pytestmark = pytest.mark.integration
 
 
 def test_git_environment_keeps_configuration_and_identity_but_not_repository_routing(

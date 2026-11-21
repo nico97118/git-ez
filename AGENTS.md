@@ -96,7 +96,7 @@ uv run --locked pytest tests/test_engine.py -k merge
 Before every code-changing commit, run all of:
 
 ```sh
-uv run --locked pytest -v
+uv run --locked pytest -v --cov --cov-report=term-missing
 uv run --locked ruff check .
 uv run --locked ruff format --check .
 uv run --locked mypy src
@@ -113,6 +113,12 @@ the installed command and manual outside the source checkout. A `man` viewer is
 required. CI covers Python 3.11 through 3.14 on Linux and macOS; consider that range
 when changing compatibility.
 
+- Mark every test with exactly one of `unit` or `integration`; use the existing
+  module markers where applicable. Unit tests do not start Git, model runtimes, or
+  network services. Keep Git/SDK/runtime/CLI scenarios in the integration selection.
+- Use pytest-cov with branch and subprocess measurement. CI runs both categories
+  and combines their coverage; do not judge whole-project coverage from unit tests
+  alone or omit production code just to improve a percentage.
 - Test observable behavior and regressions; avoid tests that merely mirror code.
 - Reuse existing fixtures and helpers. Use temporary Git repositories with isolated
   Git configuration, deterministic resolvers, and local HTTP/TLS servers as needed.

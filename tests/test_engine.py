@@ -16,6 +16,8 @@ from git_ez.errors import EzError
 from git_ez.git import Git
 from tests.fakes import FakeResolver
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 def repo(tmp_path: Path):
@@ -445,3 +447,113 @@ def test_rerere_does_not_retry_a_rejected_commit_hook(repo):
     audit = integrate(repo, "merge")
     assert audit.manifest["status"] == "failed", audit.manifest
     assert count.read_text().splitlines() == ["called"]
+
+
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+def test_interruption_preserves_partial_edits_and_the_active_operation(repo, mocker, operation):
+    def interrupt(*args):
+        repo.file.write_text("partial resolution\n")
+        raise KeyboardInterrupt
+
+    mocker.patch.object(repo.resolver, "run", side_effect=interrupt)
+    audit = integrate(repo, operation)
+    assert audit.manifest["status"] == "interrupted"
+    assert not audit.manifest["integrated"]
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    conflict = audit.manifest["conflicts"][0]
+    assert conflict["status"] == "interrupted"
+    assert (
+        audit.directory / conflict["artifacts"]["proposed"]
+    ).read_text() == "partial resolution\n"
+    assert (audit.directory / "exit/files.json").is_file()
+
+
+def test_validation_timeout_retains_output_and_the_integrated_commit(repo):
+    from dataclasses import replace
+
+    repo.config = replace(repo.config, timeout=1)
+    script = (
+        "import sys,time; print('validation started',flush=True); "
+        "print('validation progress',file=sys.stderr,flush=True); time.sleep(30)"
+    )
+    audit = integrate(repo, validation=(sys.executable, "-c", script))
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["integrated"]
+    assert "Validation command timed out" in audit.manifest["error"]
+    assert "validation started" in (audit.directory / "validation.stdout").read_text()
+    assert "validation progress" in (audit.directory / "validation.stderr").read_text()
+    assert repo.git.branch_oid("feature") == audit.manifest["result_oid"]
+    assert not repo.git.operation_active()
+
+
+def test_rebasing_merge_commits_is_refused_before_creating_an_audit(repo):
+    repo.git.run("checkout", "-b", "side")
+    (repo.root / "side.txt").write_text("side\n")
+    repo.git.run("add", ".")
+    repo.git.run("commit", "-m", "Side change")
+    repo.git.run("checkout", "feature")
+    repo.git.run("merge", "--no-ff", "--no-edit", "side")
+    before = repo.git.text("rev-parse", "HEAD")
+    with pytest.raises(EzError, match="Rebasing merge commits"):
+        integrate(repo)
+    assert repo.git.text("rev-parse", "HEAD") == before
+    assert repo.resolver.calls == []
+    assert not (repo.root / ".git/ez").exists()
+
+
+def test_non_utf8_conflicts_remain_manual_with_a_saved_failure(repo):
+    repo.file.write_bytes(b"source \xff\n")
+    repo.git.run("commit", "--amend", "-am", "Non-UTF-8 input")
+    audit = integrate(repo)
+    assert audit.manifest["status"] == "failed"
+    assert "Non-UTF-8 file requires manual resolution" in audit.manifest["error"]
+    assert repo.resolver.calls == []
+    assert repo.git.operation_active()
+    assert (audit.directory / "report.md").is_file()
+
+
+def test_conflict_round_limit_stops_before_calling_the_resolver_again(repo):
+    from dataclasses import replace
+
+    repo.file.write_text("second source change\n")
+    repo.git.run("commit", "-am", "Second replayed change")
+    repo.config = replace(repo.config, max_rounds=1)
+    audit = integrate(repo)
+    assert audit.manifest["status"] == "failed"
+    assert "Maximum conflict rounds exceeded" in audit.manifest["error"]
+    assert len(repo.resolver.calls) == 1
+    assert repo.git.operation_active()
+    assert repo.git.conflicts()
+
+
+def test_oversized_proposals_cannot_be_staged_or_committed(repo):
+    from dataclasses import replace
+
+    repo.config = replace(repo.config, max_file_bytes=4)
+    audit = integrate(repo)
+    assert audit.manifest["status"] == "failed"
+    assert "exceeds size limit" in audit.manifest["error"]
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert "Proposal exceeds size limit" in audit.manifest["conflicts"][0]["capture_error"]
+
+
+def test_audit_distinguishes_deleted_and_unavailable_paths_without_following_links(repo, tmp_path):
+    audit = integrate(repo)
+    repo.file.unlink()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private content")
+    (repo.root / "linked.txt").symlink_to(outside)
+    (repo.root / "directory").mkdir()
+    destination = audit.directory / "inspection"
+    audit.capture_worktree(repo.git, destination, 1024, paths=["directory", ".git/config"])
+    records = {
+        record["path"]: record
+        for record in json.loads((destination / "files.json").read_text())["files"]
+    }
+    assert records["file.txt"]["state"] == "deleted"
+    for name in ("linked.txt", "directory", ".git/config"):
+        assert records[name]["state"] == "unavailable"
+        assert "artifact" not in records[name]
+    assert outside.read_text() == "private content"

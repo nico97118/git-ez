@@ -22,6 +22,8 @@ from git_ez.config import Config
 from git_ez.engine import Engine
 from git_ez.git import Git
 
+pytestmark = pytest.mark.integration
+
 
 def tool(name: str, **args: Any) -> dict[str, Any]:
     return {"name": name, "args": args, "id": ""}
@@ -359,3 +361,46 @@ def test_agent_environment_redacts_transient_git_tokens_without_losing_other_set
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "O'Reilly"
+
+
+def test_finish_in_a_tool_batch_is_rejected_until_it_is_called_alone(repo):
+    audit, model = run_agent(
+        repo,
+        [
+            [tool("finish", rationale="Premature batch", confidence=0.95), tool("ls", path="/")],
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [tool("finish", rationale="Verified alone", confidence=0.95)],
+        ],
+    )
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert "finish must be called alone" in str(model.seen[1])
+    assert audit.manifest["sessions"][0]["rationale"] == "Verified alone"
+
+
+def test_agent_cannot_override_the_configured_command_timeout(repo):
+    unsafe = tool("execute", command="touch forbidden.txt", timeout=repo.config.timeout + 1)
+    audit, model = run_agent(
+        repo,
+        [
+            [unsafe],
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [tool("finish", rationale="Resolved within limits", confidence=0.95)],
+        ],
+    )
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert "Command timeout exceeds configured limit" in str(model.seen[1])
+    assert not (repo.root / "forbidden.txt").exists()
+
+
+def test_context_byte_limit_stops_further_model_calls_and_preserves_evidence(repo):
+    audit, model = run_agent(
+        repo,
+        [[command("print('x' * 10000)")]],
+        config=replace(repo.config, agent_max_context_bytes=4096),
+    )
+    assert audit.manifest["status"] == "failed"
+    assert "Agent context byte budget exceeded" in audit.manifest["error"]
+    assert len(model.seen) <= 1
+    assert repo.git.operation_active()
+    assert (audit.directory / "sessions/0001/events.jsonl").is_file()
+    assert (audit.directory / "exit/files.json").is_file()

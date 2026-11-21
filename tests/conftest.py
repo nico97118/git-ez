@@ -15,6 +15,16 @@ from typing import Any
 import pytest
 
 
+def pytest_collection_modifyitems(items):
+    """Keep both CI selections exhaustive and disjoint as tests are added."""
+    for item in items:
+        categories = [name for name in ("unit", "integration") if item.get_closest_marker(name)]
+        if len(categories) != 1:
+            raise pytest.UsageError(
+                f"{item.nodeid} must have exactly one unit or integration marker"
+            )
+
+
 @pytest.fixture
 def ca_bundle(tmp_path: Path) -> Path:
     """Create a self-signed certificate trusted only by this test."""

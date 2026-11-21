@@ -9,3 +9,9 @@ dist/
 .env
 .pytest_cache/
 .DS_Store
+
+.coverage
+.coverage.*
+ci-reports/
+htmlcov/
+coverage.xml

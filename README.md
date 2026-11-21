@@ -303,12 +303,39 @@ checkpoints are for inspection. Pushing remains the user's decision.
 
 ```bash
 uv sync --locked
-uv run --locked pytest -v
+uv run --locked pytest -v --cov --cov-report=term-missing
 uv run --locked ruff check .
 uv run --locked ruff format --check .
 uv run --locked mypy src
 uv build
 ```
+
+### Test suites and coverage
+
+Every test has exactly one `unit` or `integration` marker; collection rejects missing
+or overlapping categories. Unit tests isolate behavior without Git subprocesses,
+model runtimes, or network services. Integration tests exercise real Git, SDKs,
+the agent runtime, local HTTP/TLS, or CLI subprocesses. Both suites run explicitly
+in every CI matrix job.
+
+```bash
+# Fast isolated checks:
+uv run --locked pytest -v -m unit
+
+# Git, SDK/runtime, HTTP/TLS, and CLI integration:
+uv run --locked pytest -v -m integration
+
+# Combined line and branch coverage, including Python subprocesses:
+uv run --locked pytest --cov --cov-report=term-missing \
+  --cov-report=html:ci-reports/coverage-html \
+  --cov-report=xml:ci-reports/coverage.xml
+```
+
+CI collects coverage during the unit step, appends integration coverage, and uploads
+combined JSON/XML/HTML coverage reports plus separate JUnit results as artifacts for
+each OS/Python combination. Open `coverage-html/index.html` from an artifact for
+file-by-file detail. Reports are retained for 14 days, including when tests fail.
+Coverage measures exercised code paths; it does not establish resolution correctness.
 
 The pytest suite covers real temporary Git repositories, SDKs, TLS, and the agent graph.
 Installed-command tests use a deterministic local OpenAI-compatible HTTP server.

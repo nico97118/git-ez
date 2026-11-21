@@ -11,6 +11,8 @@ from git_ez.config import Config
 from git_ez.errors import EzError
 from git_ez.git import Git
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 def git(tmp_path):
@@ -139,3 +141,11 @@ def test_standard_git_configuration_example_can_be_included(git):
     config = Config.from_git(git.path)
     assert config.model == "exact-model-id-on-your-server"
     assert config.max_file_bytes == 262144
+
+
+def test_malformed_git_configuration_is_reported_without_echoing_its_contents(git):
+    secret = "private-token-never-echo"
+    (git.path / ".git/config").write_text(f"[{secret}\n")
+    with pytest.raises(EzError, match="Cannot read ez.* Git configuration") as error:
+        Config.from_git(git.path)
+    assert secret not in str(error.value)

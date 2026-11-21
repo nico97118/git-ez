@@ -23,7 +23,28 @@ jobs:
             sudo apt-get install --yes man-db
           fi
       - run: uv sync --locked
-      - run: uv run --locked pytest -v
+      - name: Unit tests
+        id: unit
+        run: >-
+          uv run --locked pytest -v -m unit --cov --cov-report=
+          --junitxml=ci-reports/unit.xml
+      - name: Integration tests and combined coverage
+        id: integration
+        if: ${{ !cancelled() && (steps.unit.outcome == 'success' || steps.unit.outcome == 'failure') }}
+        run: >-
+          uv run --locked pytest -v -m integration --cov --cov-append
+          --cov-report=term-missing
+          --cov-report=json:ci-reports/coverage.json
+          --cov-report=xml:ci-reports/coverage.xml
+          --cov-report=html:ci-reports/coverage-html
+          --junitxml=ci-reports/integration.xml
+      - name: Preserve test and coverage reports
+        if: ${{ !cancelled() && (steps.unit.outcome == 'success' || steps.unit.outcome == 'failure') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports-${{ matrix.os }}-py${{ matrix.python }}
+          path: ci-reports/
+          retention-days: 14
       - run: uv run --locked ruff check .
       - run: uv run --locked ruff format --check .
       - run: uv run --locked mypy src

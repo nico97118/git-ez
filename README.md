@@ -319,7 +319,7 @@ Every test has exactly one `unit` or `integration` marker; collection rejects mi
 or overlapping categories. Unit tests isolate behavior without Git subprocesses,
 model runtimes, or network services. Integration tests exercise real Git, SDKs,
 the agent runtime, local HTTP/TLS, or CLI subprocesses. Both suites run explicitly
-in every CI matrix job.
+in every CI test matrix job.
 
 ```bash
 # Fast isolated checks:
@@ -348,9 +348,17 @@ model's decisions or every possible concurrent filesystem change.
 The pytest suite covers real temporary Git repositories, SDKs, TLS, and the agent graph.
 Installed-command tests use a deterministic local OpenAI-compatible HTTP server.
 No automated test calls a remote model. CI covers Python 3.11 through 3.14 on
-Linux and macOS. Each job builds the distributions and installs the wheel into a
-fresh environment outside the checkout to verify Git discovery, command help,
-manual lookup, audit display, and conflict-free merge/rebase without a model server.
+Linux and macOS. The workflow runs three independent job families: `quality`
+(Ruff lint, formatting, and mypy on Ubuntu with Python 3.11), `tests`, and `packages`.
+Both `tests` and `packages` cover the full OS/Python matrix. Each packaging job builds
+the distributions and installs the wheel into a fresh environment outside the checkout
+to verify Git discovery, command help, manual lookup, audit display, and conflict-free
+merge/rebase without a model server.
+
+Pushes and pull requests both trigger CI. A newer run cancels an older run for the
+same workflow, event type, and pull request or Git reference; push and pull-request
+runs do not cancel each other.
+
 Run the same installation check locally after building:
 
 ```bash

@@ -141,3 +141,62 @@ when changing compatibility.
 - Do not rewrite history or discard user work without explicit authorization.
 - Explain the result, relevant validation, and remaining limitations. Write commit
   messages and repository documentation for readers who have not seen the chat.
+
+
+## Commit conventions
+
+Use this Conventional Commits format for new commits:
+
+```text
+<type>[(scope)][!]: <imperative summary>
+```
+
+- Write the subject in English, starting with a lowercase imperative verb, without
+  a trailing period. Keep it within 72 characters when practical.
+- Choose the type by the purpose of the change:
+  - `feat`: add user-visible behavior.
+  - `fix`: correct faulty behavior.
+  - `refactor`: restructure code without changing its observable behavior.
+  - `test`: add or improve tests without changing production behavior.
+  - `docs`: change documentation only.
+  - `build`: change packaging, dependencies, or build tooling.
+  - `ci`: change CI workflows or automation.
+  - `perf`: improve performance without changing intended behavior.
+  - `chore`: maintenance that does not fit a more specific type.
+- A scope is optional. Use a short, concrete component name when it improves clarity,
+  such as `cli`, `git`, `agent`, `config`, or `audit`; omit it for cross-cutting changes.
+- Mark incompatible user-facing changes with `!` and a `BREAKING CHANGE:` body entry
+  explaining the impact and migration. Do not introduce compatibility shims unless
+  the task requires them.
+- Add a body when the reason or tradeoff is not obvious. Explain the problem,
+  resulting behavior, and relevant validation for a reader without the chat history.
+
+Examples:
+
+```text
+fix(audit): fail the run when a required snapshot cannot be written
+feat(cli): display the latest integration report
+refactor(config): centralize Git setting conversion
+test(git): cover reference changes during final verification
+ci: preserve test and coverage reports
+```
+
+## Commit boundaries
+
+Each commit must have one precise objective and leave the project in a working,
+reviewable state. A functional commit may be a fix, test improvement, documentation
+change, or build change; it does not have to introduce a feature.
+
+- Keep implementation, regression tests, documentation, and dependency/lockfile
+  updates together when they are needed to complete the same objective. Choose
+  `feat` or `fix` for such a commit, rather than splitting out its required tests.
+- Split independent objectives into separate commits. Organize by resulting behavior
+  or purpose, rather than by file or technical layer. Avoid unrelated cleanup.
+- Every code-changing commit must pass the validation required above. Do not leave
+  failing tests, broken imports, or incomplete migrations for a later commit to fix.
+- Before committing, review the staged diff and state its objective in one sentence.
+  If that requires listing unrelated outcomes, split the changes. Stage only the
+  intended files and keep the change coherent for review and reversion.
+- Use descriptive subjects instead of messages such as `WIP`, `misc fixes`, or
+  `address feedback`. Temporary work must not remain as incomplete commits in the
+  delivered history; existing history still requires explicit authorization to rewrite.

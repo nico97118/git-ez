@@ -29,4 +29,7 @@ jobs:
       - run: uv run --locked mypy src
       - run: uv build
       - name: Verify installed wheel outside the checkout
-        run: uv run --locked python scripts/check_install.py dist/git_ez_ai-*.whl
+        run: |
+          mkdir -p "$RUNNER_TEMP/git-ez-temp"
+          ln -s "$RUNNER_TEMP/git-ez-temp" "$RUNNER_TEMP/git-ez-temp-alias"
+          TMPDIR="$RUNNER_TEMP/git-ez-temp-alias" uv run --locked python scripts/check_install.py dist/git_ez_ai-*.whl

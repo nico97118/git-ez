@@ -15,7 +15,7 @@ from pathlib import Path
 def main() -> None:
     wheel = Path(sys.argv[1]).resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="git-ez-install-") as temporary:
-        root = Path(temporary)
+        root = Path(temporary).resolve(strict=True)
         environment = root / "environment"
         subprocess.run(
             ["uv", "venv", "--python", sys.executable, str(environment)], check=True, cwd=root
@@ -62,7 +62,7 @@ def main() -> None:
         installed = Path(
             run(str(python), "-I", "-c", "import git_ez; print(git_ez.__file__)").strip()
         )
-        if not installed.is_relative_to(environment):
+        if not installed.resolve(strict=True).is_relative_to(environment.resolve(strict=True)):
             raise RuntimeError(f"Imported code outside the installed environment: {installed}")
         if not run("git", "ez", "--version").startswith("git-ez "):
             raise RuntimeError("Installed Git extension did not report its version")

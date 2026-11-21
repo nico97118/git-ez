@@ -9,6 +9,7 @@ git-ez \- local rebase and merge with AI-assisted conflict resolution
 .br
 .B git ez merge
 .I target
+.RI [ --ff " | " --no-ff " | " --ff-only ]
 .RI [ --repo " directory"]
 .RI [ --check " executable arguments..."]
 .br
@@ -46,6 +47,15 @@ environment variables.
 Valid model configuration is required even when no conflicts occur; no model
 call is made when Git resolves the operation without assistance.
 .SH OPTIONS
+.TP
+.B --ff, --no-ff, --ff-only
+Merge only. Allow fast-forward with a merge commit otherwise (--ff), create a
+merge commit when integration is needed (--no-ff), or refuse divergent histories
+(--ff-only). An already up-to-date branch stays unchanged. An explicit policy
+overrides Git configuration; the last policy specified wins. Without one, Git
+configuration and defaults apply. A refused --ff-only merge does not call the
+model or change the checkout. The requested policy is recorded in the audit and
+report. Specify these options before --check.
 .TP
 .B --repo directory
 Use this repository instead of the current directory. Subdirectories are

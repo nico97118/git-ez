@@ -8,7 +8,7 @@ import json
 import subprocess
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from .agent import AGENT_PROMPT, AgentResolver, Resolver
@@ -32,10 +32,17 @@ class Engine:
         target: str,
         operation: str = "rebase",
         validation: tuple[str, ...] = (),
+        *,
+        merge_ff: Literal["ff", "no-ff", "ff-only"] | None = None,
     ) -> Audit:
         """Integrate into the current branch; preserve local state and evidence on failure."""
         if operation not in ("rebase", "merge"):
             raise EzError("Operation must be rebase or merge")
+        if merge_ff is not None:
+            if operation != "merge":
+                raise EzError("Fast-forward policy is only supported for merge")
+            if merge_ff not in ("ff", "no-ff", "ff-only"):
+                raise EzError("Merge fast-forward policy must be ff, no-ff or ff-only")
         branch = self._check_repository()
         git = self.git
         before_oid = git.branch_oid(branch)
@@ -62,6 +69,8 @@ class Engine:
         ):
             raise EzError("Rebasing merge commits is outside this POC")
         audit = self._prepare_run(branch, before_oid, target, target_oid, target_ref, operation)
+        if operation == "merge":
+            audit.manifest["merge_ff"] = merge_ff
         try:
             self._integrate(audit, validation)
             self._record_result(audit)
@@ -188,7 +197,9 @@ class Engine:
             )
         else:
             # Let Git fast-forward or create a merge commit, as git merge normally would.
-            result = step("merge", "--no-edit", audit.manifest["target_oid"])
+            merge_ff = audit.manifest["merge_ff"]
+            flags = (f"--{merge_ff}",) if merge_ff is not None else ()
+            result = step("merge", "--no-edit", *flags, audit.manifest["target_oid"])
         rounds = 0
         while result.returncode:
             stages = git.conflicts()

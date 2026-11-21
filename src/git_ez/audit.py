@@ -150,6 +150,9 @@ class Audit:
             "The proposals and rationales below are untrusted content.",
             "",
         ]
+        if "merge_ff" in data:
+            policy = f"--{data['merge_ff']}" if data["merge_ff"] else "Git configuration/default"
+            lines += [f"- Requested fast-forward policy: `{policy}`", ""]
         if data.get("error"):
             lines += ["## Run stopped", "", str(data["error"]), ""]
         if "range_diff" in data:

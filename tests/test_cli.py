@@ -221,3 +221,43 @@ def test_failed_cli_run_returns_one_and_a_readable_audit(cli_repo, monkeypatch, 
     audit = next((cli_repo.path / ".git/ez/runs").iterdir())
     assert "Validation failed with code 7" in (audit / "report.md").read_text()
     assert main(["show", str(audit)]) == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "arguments,expected",
+    [
+        (["merge", "main"], None),
+        (["merge", "--ff", "main"], "ff"),
+        (["merge", "main", "--no-ff"], "no-ff"),
+        (["merge", "main", "--ff-only"], "ff-only"),
+        (["merge", "--ff-only", "main", "--no-ff", "--ff"], "ff"),
+    ],
+)
+def test_merge_fast_forward_policy_syntax(arguments, expected):
+    assert parser().parse_args(arguments).merge_ff == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("flag", ["--ff", "--no-ff", "--ff-only"])
+def test_merge_fast_forward_policies_are_not_rebase_options(flag):
+    with pytest.raises(SystemExit) as error:
+        parser().parse_args(["rebase", "main", flag])
+    assert error.value.code == 2
+
+
+@pytest.mark.integration
+def test_cli_ff_only_refuses_divergence_without_model_call(
+    cli_repo, model_server, monkeypatch, capsys
+):
+    monkeypatch.chdir(cli_repo.path)
+    before = cli_repo.branch_oid("feature")
+    assert main(["merge", "main", "--ff-only"]) == 1
+    output = capsys.readouterr()
+    assert "Status: failed" in output.out
+    assert "Integrated: False" in output.out
+    assert cli_repo.branch_oid("feature") == before
+    assert not cli_repo.operation_active()
+    assert model_server.calls == []
+    audit = next((cli_repo.path / ".git/ez/runs").iterdir())
+    assert "--ff-only" in (audit / "report.md").read_text()

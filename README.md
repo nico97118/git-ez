@@ -308,7 +308,15 @@ uv build
 
 The pytest suite covers real temporary Git repositories, SDKs, TLS, and the agent graph.
 Installed-command tests use a deterministic local OpenAI-compatible HTTP server.
-No automated test calls a remote model. CI covers Python 3.11 through 3.14.
+No automated test calls a remote model. CI covers Python 3.11 through 3.14 on
+Linux and macOS. Each job builds the distributions and installs the wheel into a
+fresh environment outside the checkout to verify Git discovery, command help,
+manual lookup, audit display, and conflict-free merge/rebase without a model server.
+Run the same installation check locally after building:
+
+```bash
+uv run --locked python scripts/check_install.py dist/git_ez-*.whl
+```
 
 ```bash
 # Deterministic fixture without a model or network:

@@ -34,6 +34,8 @@ consequence and clarify the intended change before implementing it.
 - `tests/`: pytest tests, temporary repositories, deterministic resolvers, and local
   HTTP/TLS fixtures.
 - `examples/`: demonstrations and sample Git configuration.
+- `docs/man/git-ez.1`: the packaged Git manual.
+- `scripts/check_install.py`: isolated wheel installation and Git command checks.
 
 Module names above are relative to `src/git_ez/`. Read nearby code and tests before
 changing a behavior. Keep this map accurate when moving responsibilities.
@@ -100,8 +102,10 @@ and its examples; Python checks are not required unless executable behavior chan
 If a required check cannot run, report the blocker and do not silently bypass it.
 
 For packaging, dependency, or executable-entry-point changes, also run `uv build`
-and verify the installed `git-ez` command from outside the source checkout. CI covers
-Python 3.11 through 3.14; consider that range when changing compatibility.
+and run `uv run --locked python scripts/check_install.py dist/git_ez-*.whl` to verify
+the installed command and manual outside the source checkout. A `man` viewer is
+required. CI covers Python 3.11 through 3.14 on Linux and macOS; consider that range
+when changing compatibility.
 
 - Test observable behavior and regressions; avoid tests that merely mirror code.
 - Reuse existing fixtures and helpers. Use temporary Git repositories with isolated

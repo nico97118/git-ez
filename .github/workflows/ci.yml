@@ -2,9 +2,11 @@ name: checks
 on: [push, pull_request]
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         python: ['3.11', '3.12', '3.13', '3.14']
     steps:
       - uses: actions/checkout@v4
@@ -13,9 +15,18 @@ jobs:
           version: "0.11.2"
           python-version: ${{ matrix.python }}
           enable-cache: true
+      - name: Ensure a manual viewer is available
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v man >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install --yes man-db
+          fi
       - run: uv sync --locked
       - run: uv run --locked pytest -v
       - run: uv run --locked ruff check .
       - run: uv run --locked ruff format --check .
       - run: uv run --locked mypy src
       - run: uv build
+      - name: Verify installed wheel outside the checkout
+        run: uv run --locked python scripts/check_install.py dist/git_ez-*.whl

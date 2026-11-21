@@ -11,6 +11,9 @@ resolution and an inspectable audit of changes, decisions, and reasons.
 - Operate on the user's current checkout and branch. Do not add automatic fetch,
   push, backup branches, or worktree creation.
 - Invoke the LLM only when conflicts require resolution.
+- Keep the supported command subset explicit in the README and manual. Do not
+  imply that arbitrary native Git flags are forwarded or that every Git workflow
+  is supported. Document intentional execution-policy overrides.
 - Preserve Git behavior where supported, including hooks, signing, and rerere.
   Document unsupported cases rather than silently changing their meaning.
 - Leave the actual local state available for inspection on failure or interruption;

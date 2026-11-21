@@ -12,6 +12,32 @@ The operation modifies the current branch. Users decide whether to use a dedicat
 branch and whether to push the result afterward. git-ez does not create branches or
 worktrees, fetch, or push.
 
+## Supported Git workflow
+
+Use git-ez for a simple integration into the currently checked-out branch. It exposes
+its own small command-line interface; it does not forward arbitrary options to
+`git rebase` or `git merge`.
+
+| Contract | Behavior |
+| --- | --- |
+| Target | One explicit revision is required, even when the branch has an upstream. It must already be available locally. |
+| Repository | A clean checkout on a local branch, with no active Git operation. Detached HEAD and bare repositories are unsupported. |
+| Rebase | Replay the current branch onto the pinned target using Git's merge backend. Autostash, update-refs, and rebasing merge commits are disabled. |
+| Merge | Integrate one pinned target with `--no-edit`; Git's fast-forward policy still applies. |
+| Interaction | Git runs noninteractively with `diff3` conflict markers. Hooks and signing failures are not bypassed. |
+| Model | Valid `ez.*` model configuration is required before integration, even if no conflicts occur. No model call is made when Git resolves the operation without assistance. |
+| Recovery | Failed runs preserve local state. Inspect the audit and use native Git to continue or abort an active operation. |
+
+Interactive rebase, `--onto`, `--autosquash`, `--rebase-merges`, merge `--squash`,
+`--no-commit`, octopus merges, and arbitrary strategy options are outside this interface.
+For these workflows, use Git directly. git-ez cannot attach to an operation that was
+already started with Git.
+
+Native caller configuration is retained except for the explicit execution policies
+above and repository-redirection environment variables described under Limitations.
+For example, `git -C /path/to/project -c ez.model=another-model ez rebase main` uses
+Git's own directory and temporary-configuration options.
+
 ## Installation
 
 Requires Python 3.11+, Git 2.38+, and macOS or Linux for local shell execution.
@@ -253,7 +279,20 @@ uses `diff3` markers. Environment variables that redirect the repository, index,
 objects are excluded to preserve the selected checkout.
 
 After a failure, inspect the report and `git status`. An active operation can be
-continued or aborted manually with Git. There is no agent session resume command:
+continued or aborted manually with Git:
+
+```bash
+git status
+# If a rebase is still active, resolve and stage files before continuing:
+git rebase --continue
+# Or abandon that active rebase:
+git rebase --abort
+# For an active merge, use git merge --continue or git merge --abort instead.
+```
+
+If Git already completed and only final validation failed, there is no active operation
+to continue or abort: inspect the resulting commit and validation output.
+There is no agent session resume command:
 checkpoints are for inspection. Pushing remains the user's decision.
 
 ## Development

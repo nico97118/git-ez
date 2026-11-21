@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "git-ez"
+name = "git-ez-ai"
 version = "0.1.0"
 description = "Local Git rebase/merge with traceable AI conflict resolution"
 readme = "README.md"

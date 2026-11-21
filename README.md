@@ -53,6 +53,10 @@ Or install from a local checkout:
 uv tool install .
 ```
 
+The Python distribution is named `git-ez-ai`; the Git extension and repository are
+named `git-ez`. PyPI installation will use `uv tool install git-ez-ai` once a release
+is published. Until then, use the GitHub or local installation above.
+
 The package installs a single executable, `git-ez`. Once the directory reported by
 `uv tool dir --bin` is on `PATH`, Git automatically discovers it as `git ez`.
 A standard installation copies the package into an isolated environment: the source
@@ -66,7 +70,7 @@ included in the main dependencies.
 `git-ez.1`; for a uv tool installation, add its manual directory to your shell profile:
 
 ```bash
-export MANPATH="$(uv tool dir)/git-ez/share/man:${MANPATH:-}"
+export MANPATH="$(uv tool dir)/git-ez-ai/share/man:${MANPATH:-}"
 ```
 
 The trailing separator preserves the system manual search path. A working `man`
@@ -315,7 +319,7 @@ manual lookup, audit display, and conflict-free merge/rebase without a model ser
 Run the same installation check locally after building:
 
 ```bash
-uv run --locked python scripts/check_install.py dist/git_ez-*.whl
+uv run --locked python scripts/check_install.py dist/git_ez_ai-*.whl
 ```
 
 ```bash

@@ -6,6 +6,9 @@
 `git ez merge <target>` to perform a local integration with LLM-assisted conflict
 resolution and an inspectable audit of changes, decisions, and reasons.
 
+- The Python distribution is `git-ez-ai`, the import package is `git_ez`, and the
+  executable is `git-ez` (invoked as `git ez`). Keep these names distinct when
+  updating packaging, installation instructions, and manual search paths.
 - Keep the tool generic across supported LLM providers, including internal servers.
 - Use native Git configuration under `ez.*`, respecting Git scopes and includes.
 - Operate on the user's current checkout and branch. Do not add automatic fetch,
@@ -102,7 +105,7 @@ and its examples; Python checks are not required unless executable behavior chan
 If a required check cannot run, report the blocker and do not silently bypass it.
 
 For packaging, dependency, or executable-entry-point changes, also run `uv build`
-and run `uv run --locked python scripts/check_install.py dist/git_ez-*.whl` to verify
+and run `uv run --locked python scripts/check_install.py dist/git_ez_ai-*.whl` to verify
 the installed command and manual outside the source checkout. A `man` viewer is
 required. CI covers Python 3.11 through 3.14 on Linux and macOS; consider that range
 when changing compatibility.

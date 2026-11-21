@@ -39,6 +39,14 @@ def main() -> None:
             )
             return re.sub(r".\x08", "", result.stdout)
 
+        distribution = run(
+            str(python),
+            "-I",
+            "-c",
+            "from importlib.metadata import metadata; print(metadata('git-ez-ai')['Name'])",
+        ).strip()
+        if distribution != "git-ez-ai":
+            raise RuntimeError(f"Unexpected installed distribution: {distribution}")
         installed = Path(
             run(str(python), "-I", "-c", "import git_ez; print(git_ez.__file__)").strip()
         )

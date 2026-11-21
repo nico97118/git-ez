@@ -25,6 +25,8 @@ def parser() -> argparse.ArgumentParser:
             operation, help=f"Run a local {operation} with AI conflict resolution"
         )
         run.add_argument("target", help="Git revision to integrate into the current branch")
+        if operation == "rebase":
+            run.add_argument("--onto", help="Replay commits after target onto this revision")
         if operation == "merge":
             for flag, help_text in (
                 ("ff", "Allow fast-forward; otherwise create a merge commit"),
@@ -75,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
             args.command,
             validation=tuple(args.check or ()),
             merge_ff=getattr(args, "merge_ff", None),
+            onto=getattr(args, "onto", None),
         )
         print(f"Status: {audit.manifest['status']}")
         print(f"Report: {audit.directory / 'report.md'}")

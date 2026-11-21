@@ -293,6 +293,8 @@ def run_agent(
             "validation_command": shlex.join(check) if check else None,
             "task": "Investigate and resolve this Git integration using your tools.",
         }
+        if "onto_oid" in audit.manifest:
+            mission["onto_sha"] = audit.manifest["onto_oid"]
         write_json(directory / "mission.json", mission)
         with SqliteSaver.from_conn_string(str(directory / "checkpoints.sqlite")) as saver:
             agent = create_deep_agent(

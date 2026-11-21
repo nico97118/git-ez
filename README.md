@@ -22,16 +22,27 @@ its own small command-line interface; it does not forward arbitrary options to
 | --- | --- |
 | Target | One explicit revision is required, even when the branch has an upstream. It must already be available locally. |
 | Repository | A clean checkout on a local branch, with no active Git operation. Detached HEAD and bare repositories are unsupported. |
-| Rebase | Replay the current branch onto the pinned target using Git's merge backend. Autostash, update-refs, and rebasing merge commits are disabled. |
+| Rebase | Replay the current branch onto the pinned target, or use `--onto` to choose a separate new base, using Git's merge backend. Autostash, update-refs, and rebasing merge commits are disabled. |
 | Merge | Integrate one pinned target with `--no-edit`; Git's fast-forward policy still applies. |
 | Interaction | Git runs noninteractively with `diff3` conflict markers. Hooks and signing failures are not bypassed. |
 | Model | Valid `ez.*` model configuration is required before integration, even if no conflicts occur. No model call is made when Git resolves the operation without assistance. |
 | Recovery | Failed runs preserve local state. Inspect the audit and use native Git to continue or abort an active operation. |
 
-Interactive rebase, `--onto`, `--autosquash`, `--rebase-merges`, merge `--squash`,
+Interactive rebase, `--autosquash`, `--rebase-merges`, merge `--squash`,
 `--no-commit`, octopus merges, and arbitrary strategy options are outside this interface.
 For these workflows, use Git directly. git-ez cannot attach to an operation that was
 already started with Git.
+
+Rebase accepts `--onto <newbase> <target>`. Here, target is the upstream boundary
+used to select commits, and newbase is where Git replays them. Both revisions are
+pinned and their named references are checked throughout the run. The audit and
+range-diff distinguish the original series from the series on the new base.
+Only the current branch is rebased; a second positional branch argument and
+Git's `A...B` shorthand for the new base are not supported.
+
+```sh
+git ez rebase --onto main old-base
+```
 
 Merge accepts `--ff`, `--no-ff`, and `--ff-only`. An explicit policy overrides
 Git configuration; when repeated, the last policy wins. Without one, Git's

@@ -261,3 +261,27 @@ def test_cli_ff_only_refuses_divergence_without_model_call(
     assert model_server.calls == []
     audit = next((cli_repo.path / ".git/ez/runs").iterdir())
     assert "--ff-only" in (audit / "report.md").read_text()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "arguments", [["rebase", "--onto", "main", "old"], ["rebase", "old", "--onto", "main"]]
+)
+def test_rebase_onto_syntax(arguments):
+    args = parser().parse_args(arguments)
+    assert args.target == "old"
+    assert args.onto == "main"
+
+
+@pytest.mark.unit
+def test_merge_rejects_onto():
+    with pytest.raises(SystemExit):
+        parser().parse_args(["merge", "main", "--onto", "old"])
+
+
+@pytest.mark.integration
+def test_cli_rebase_onto_reaches_engine(cli_repo, monkeypatch, capsys):
+    monkeypatch.chdir(cli_repo.path)
+    assert main(["rebase", "HEAD", "--onto", "main"]) == 0
+    assert "Status: succeeded" in capsys.readouterr().out
+    assert cli_repo.branch_oid("feature") == cli_repo.branch_oid("main")

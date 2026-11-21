@@ -4,6 +4,7 @@ git-ez \- local rebase and merge with AI-assisted conflict resolution
 .SH SYNOPSIS
 .B git ez rebase
 .I target
+.RI [ --onto " newbase"]
 .RI [ --repo " directory"]
 .RI [ --check " executable arguments..."]
 .br
@@ -30,7 +31,7 @@ performed.
 A checked-out branch, clean checkout, and no active Git operation are
 required.
 The target is required and pinned at startup. Only simple rebase and merge are
-supported; Git options are not forwarded. Interactive rebase, --onto,
+supported; arbitrary Git options are not forwarded. Interactive rebase,
 --autosquash, rebasing merge commits, merge --squash, --no-commit, octopus
 merge,
 and unrelated histories are unsupported. The tool cannot attach to an
@@ -47,6 +48,13 @@ environment variables.
 Valid model configuration is required even when no conflicts occur; no model
 call is made when Git resolves the operation without assistance.
 .SH OPTIONS
+.TP
+.B --onto newbase
+Rebase only. Replay the commits selected after target onto newbase. Both revisions
+are pinned and their named references are checked throughout the run. The audit
+and range-diff record the upstream boundary and new base separately. Only the
+current branch is rebased. A second positional branch argument and the A...B
+new-base shorthand are unsupported.
 .TP
 .B --ff, --no-ff, --ff-only
 Merge only. Allow fast-forward with a merge commit otherwise (--ff), create a

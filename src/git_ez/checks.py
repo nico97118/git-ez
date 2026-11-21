@@ -25,9 +25,10 @@ class WorktreeChecks:
         else:
             changed |= bool(git.run("symbolic-ref", "-q", "HEAD", check=False).stdout)
         changed |= git.branch_oid(audit.manifest["branch"]) != audit.manifest["before_oid"]
-        ref = audit.manifest["target_ref"]
-        if ref:
-            changed |= git.commit_oid(ref) != audit.manifest["target_oid"]
+        for name in ("target", "onto"):
+            ref = audit.manifest.get(f"{name}_ref")
+            if ref:
+                changed |= git.commit_oid(ref) != audit.manifest[f"{name}_oid"]
         if audit.manifest["operation"] == "rebase":
             changed |= not git.rebase_active()
         else:

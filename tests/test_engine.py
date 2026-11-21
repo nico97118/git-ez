@@ -917,3 +917,128 @@ def test_invalid_merge_policy_is_rejected_before_creating_audit(repo, operation,
         integrate(repo, operation, merge_ff=policy)
     assert not (repo.root / ".git/ez").exists()
     assert repo.git.branch_oid("feature") == repo.source_oid
+
+
+def test_rebase_onto_replays_only_selected_series(repo):
+    repo.git.run("checkout", "-b", "old-base", repo.base_oid)
+    (repo.root / "old.txt").write_text("old base only\n")
+    repo.git.run("add", "old.txt")
+    repo.git.run("commit", "-m", "old base")
+    upstream = repo.git.text("rev-parse", "HEAD")
+    repo.git.run("checkout", "-b", "topic")
+    (repo.root / "topic.txt").write_text("topic\n")
+    repo.git.run("add", "topic.txt")
+    repo.git.run("commit", "-m", "topic change")
+    before = repo.git.text("rev-parse", "HEAD")
+    audit = integrate(repo, target="old-base", onto="main")
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.git.text("rev-parse", "HEAD^") == repo.parent_oid
+    assert not (repo.root / "old.txt").exists()
+    assert (repo.root / "topic.txt").read_text() == "topic\n"
+    assert repo.git.branch_oid("old-base") == upstream
+    assert repo.git.branch_oid("main") == repo.parent_oid
+    assert repo.resolver.calls == []
+    comparison = audit.manifest["range_diff"]
+    assert comparison["before"] == f"{upstream}..{before}"
+    assert comparison["after"] == f"{repo.parent_oid}..{audit.manifest['result_oid']}"
+    assert " = " in (audit.directory / comparison["artifact"]).read_text()
+    assert "New base: `main`" in (audit.directory / "report.md").read_text()
+
+
+@pytest.mark.parametrize("target", ["HEAD", "HEAD~1"])
+def test_rebase_onto_pins_head_relative_inputs_and_handles_empty_series(repo, target):
+    audit = integrate(repo, target=target, onto="main")
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.manifest["target_ref"] is None
+    assert audit.manifest["onto_oid"] == repo.parent_oid
+    if target == "HEAD":
+        assert repo.git.branch_oid("feature") == repo.parent_oid
+        assert repo.resolver.calls == []
+    else:
+        assert repo.file.read_text() == "combined\n"
+        assert len(repo.resolver.calls) == 1
+
+
+@pytest.mark.parametrize("phase", ["preflight", "resolver", "validation"])
+@pytest.mark.parametrize("changed_ref", ["main", "upstream"])
+def test_rebase_onto_detects_changed_input_refs(repo, mocker, phase, changed_ref):
+    repo.git.run("branch", "upstream", repo.base_oid)
+    engine = Engine(repo.root, repo.config, repo.resolver)
+    moved_oid = repo.source_oid
+    if phase == "preflight":
+        prepare = engine._prepare_run
+
+        def prepare_and_move(*args):
+            audit = prepare(*args)
+            repo.git.run("update-ref", f"refs/heads/{changed_ref}", moved_oid)
+            return audit
+
+        mocker.patch.object(engine, "_prepare_run", side_effect=prepare_and_move)
+    elif phase == "resolver":
+        resolve = repo.resolver.run
+
+        def resolve_and_move(*args):
+            result = resolve(*args)
+            repo.git.run("update-ref", f"refs/heads/{changed_ref}", moved_oid)
+            return result
+
+        mocker.patch.object(repo.resolver, "run", side_effect=resolve_and_move)
+    command = (
+        ("git", "update-ref", f"refs/heads/{changed_ref}", moved_oid)
+        if phase == "validation"
+        else ()
+    )
+    audit = engine.run("upstream", onto="main", validation=command)
+    assert audit.manifest["status"] == "failed", audit.manifest
+    assert "reference changed" in audit.manifest["error"] or "input refs" in audit.manifest["error"]
+    assert audit.manifest["onto_oid"] == repo.parent_oid
+    assert repo.git.branch_oid(changed_ref) == moved_oid
+    if phase == "preflight":
+        assert repo.resolver.calls == []
+        assert repo.git.branch_oid("feature") == repo.source_oid
+    elif phase == "resolver":
+        assert repo.git.rebase_active()
+    else:
+        assert audit.manifest["integrated"]
+
+
+@pytest.mark.parametrize("onto", ["missing", "--help", "main...feature"])
+def test_invalid_onto_is_rejected_before_creating_audit(repo, onto):
+    with pytest.raises(EzError):
+        integrate(repo, onto=onto)
+    assert not (repo.root / ".git/ez").exists()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+
+
+def test_onto_is_rejected_for_merge_by_engine(repo):
+    with pytest.raises(EzError, match="only supported for rebase"):
+        integrate(repo, "merge", onto="main")
+    assert not (repo.root / ".git/ez").exists()
+
+
+def test_rebase_onto_records_a_fully_dropped_series(repo):
+    repo.git.run("checkout", "main")
+    repo.file.write_text("source\n")
+    repo.git.run("commit", "-am", "equivalent feature change")
+    new_base = repo.git.text("rev-parse", "HEAD")
+    repo.git.run("checkout", "feature")
+    audit = integrate(repo, target=repo.base_oid, onto="main")
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.manifest["result_oid"] == new_base
+    assert " < " in (audit.directory / "range-diff.txt").read_text()
+    assert repo.resolver.calls == []
+
+
+def test_rebase_onto_rejects_a_result_missing_the_new_base(repo, mocker):
+    engine = Engine(repo.root, repo.config, repo.resolver)
+    record = engine._record_result
+
+    def replace_result(audit):
+        repo.git.run("reset", "--hard", repo.source_oid)
+        record(audit)
+
+    mocker.patch.object(engine, "_record_result", side_effect=replace_result)
+    audit = engine.run(repo.base_oid, onto="main")
+    assert audit.manifest["status"] == "failed"
+    assert "does not contain" in audit.manifest["error"]
+    assert repo.git.branch_oid("feature") == repo.source_oid

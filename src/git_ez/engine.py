@@ -34,10 +34,13 @@ class Engine:
         validation: tuple[str, ...] = (),
         *,
         merge_ff: Literal["ff", "no-ff", "ff-only"] | None = None,
+        onto: str | None = None,
     ) -> Audit:
         """Integrate into the current branch; preserve local state and evidence on failure."""
         if operation not in ("rebase", "merge"):
             raise EzError("Operation must be rebase or merge")
+        if onto is not None and operation != "rebase":
+            raise EzError("--onto is only supported for rebase")
         if merge_ff is not None:
             if operation != "merge":
                 raise EzError("Fast-forward policy is only supported for merge")
@@ -47,28 +50,17 @@ class Engine:
         git = self.git
         before_oid = git.branch_oid(branch)
         target_oid = git.commit_oid(target)
-        symbolic = (
-            git.run(
-                "rev-parse",
-                "--symbolic-full-name",
-                "--verify",
-                "--end-of-options",
-                target,
-                check=False,
-            )
-            .stdout.decode()
-            .strip()
-        )
-        target_ref = symbolic if symbolic.startswith("refs/") else None
-        # HEAD-relative expressions are pinned once, rather than re-evaluated after edits.
-        if target_ref == f"refs/heads/{branch}":
-            target_ref = None
+        target_ref = self._input_ref(target, branch)
+        onto_oid = git.commit_oid(onto) if onto is not None else None
+        onto_ref = self._input_ref(onto, branch) if onto is not None else None
         git.run("merge-base", before_oid, target_oid)
         if operation == "rebase" and git.text(
             "rev-list", "--merges", f"{target_oid}..{before_oid}"
         ):
             raise EzError("Rebasing merge commits is outside this POC")
         audit = self._prepare_run(branch, before_oid, target, target_oid, target_ref, operation)
+        if onto is not None:
+            audit.manifest.update(onto=onto, onto_oid=onto_oid, onto_ref=onto_ref)
         if operation == "merge":
             audit.manifest["merge_ff"] = merge_ff
         try:
@@ -99,6 +91,24 @@ class Engine:
                     audit.manifest["error"] = "Final audit capture failed; inspect the report"
             audit.save()
         return audit
+
+    def _input_ref(self, revision: str, branch: str) -> str | None:
+        symbolic = (
+            self.git.run(
+                "rev-parse",
+                "--symbolic-full-name",
+                "--verify",
+                "--end-of-options",
+                revision,
+                check=False,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        # HEAD-relative expressions are pinned once, rather than re-evaluated after edits.
+        if symbolic.startswith("refs/") and symbolic != f"refs/heads/{branch}":
+            return symbolic
+        return None
 
     def _check_repository(self) -> str:
         git = self.git
@@ -150,9 +160,10 @@ class Engine:
         return audit
 
     def _verify_target(self, audit: Audit) -> None:
-        ref = audit.manifest["target_ref"]
-        if ref and self.git.commit_oid(ref) != audit.manifest["target_oid"]:
-            raise EzError("Target reference changed during integration")
+        for name in ("target", "onto"):
+            ref = audit.manifest.get(f"{name}_ref")
+            if ref and self.git.commit_oid(ref) != audit.manifest[f"{name}_oid"]:
+                raise EzError(f"{name.capitalize()} reference changed during integration")
 
     def _integrate(self, audit: Audit, validation: tuple[str, ...]) -> None:
         git = self.git
@@ -187,12 +198,16 @@ class Engine:
             raise EzError("Current branch changed before integration")
         self._verify_target(audit)
         if operation == "rebase":
+            flags: tuple[str, ...] = (
+                ("--onto", audit.manifest["onto_oid"]) if "onto" in audit.manifest else ()
+            )
             result = step(
                 "rebase",
                 "--merge",
                 "--no-autostash",
                 "--no-update-refs",
                 "--no-rebase-merges",
+                *flags,
                 audit.manifest["target_oid"],
             )
         else:
@@ -242,20 +257,31 @@ class Engine:
             ).stdout
         )
         if audit.manifest["operation"] == "rebase":
+            base_oid = audit.manifest.get("onto_oid", target_oid)
+            ranges = (
+                (f"{target_oid}..{before_oid}", f"{base_oid}..{result_oid}")
+                if "onto" in audit.manifest
+                else (target_oid, before_oid, result_oid)
+            )
+            # Git rejects empty ranges in its two-range syntax. Represent an empty
+            # side at the other base using the three-revision syntax instead.
+            if "onto" in audit.manifest:
+                if not git.text("rev-list", f"{target_oid}..{before_oid}"):
+                    ranges = (base_oid, base_oid, result_oid)
+                elif not git.text("rev-list", f"{base_oid}..{result_oid}"):
+                    ranges = (target_oid, before_oid, target_oid)
             args = (
                 "range-diff",
                 "--no-color",
                 "--no-ext-diff",
                 "--no-textconv",
-                target_oid,
-                before_oid,
-                result_oid,
+                *ranges,
             )
             (audit.directory / "range-diff.txt").write_bytes(git.run(*args).stdout)
             audit.manifest["range_diff"] = {
                 "artifact": "range-diff.txt",
                 "before": f"{target_oid}..{before_oid}",
-                "after": f"{target_oid}..{result_oid}",
+                "after": f"{base_oid}..{result_oid}",
                 "command": ["git", *args],
             }
         audit.save()
@@ -272,11 +298,11 @@ class Engine:
         if git.run(
             "merge-base",
             "--is-ancestor",
-            audit.manifest["target_oid"],
+            audit.manifest.get("onto_oid", audit.manifest["target_oid"]),
             audit.manifest["result_oid"],
             check=False,
         ).returncode:
-            raise EzError("Integration result does not contain the pinned target")
+            raise EzError("Integration result does not contain the pinned target or new base")
         if (
             audit.manifest["operation"] == "merge"
             and git.run(

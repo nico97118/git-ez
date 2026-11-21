@@ -140,7 +140,8 @@ class Audit:
             f"- Status: **{data['status']}**",
             f"- Operation: `{data['operation']}`",
             f"- Current branch: `{data['branch']}` (`{data['before_oid']}`)",
-            f"- Integrated revision: `{data['target']}` (`{data['target_oid']}`)",
+            f"- {'Upstream' if 'onto' in data else 'Integrated revision'}: "
+            f"`{data['target']}` (`{data['target_oid']}`)",
             f"- Result commit: `{data.get('result_oid', '—')}`",
             f"- Integration completed: `{data['integrated']}`",
             f"- Model: `{data['provider']}` / `{data['model']}`",
@@ -153,6 +154,8 @@ class Audit:
         if "merge_ff" in data:
             policy = f"--{data['merge_ff']}" if data["merge_ff"] else "Git configuration/default"
             lines += [f"- Requested fast-forward policy: `{policy}`", ""]
+        if "onto" in data:
+            lines += [f"- New base: `{data['onto']}` (`{data['onto_oid']}`)", ""]
         if data.get("error"):
             lines += ["## Run stopped", "", str(data["error"]), ""]
         if "range_diff" in data:

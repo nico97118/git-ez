@@ -49,6 +49,30 @@ Valid model configuration is required even when no conflicts occur; no model
 call is made when Git resolves the operation without assistance.
 .SH OPTIONS
 .TP
+.B -m message, --message message
+Merge only. Supply the merge commit message. Repeat for additional paragraphs.
+Mutually exclusive with --file. Does not force a commit on fast-forward.
+.TP
+.B -F file, --file file
+Merge only. Read a UTF-8 message file before integration. Paths are relative to
+the invocation directory, including with --repo. Standard input (-F -) is unsupported.
+The message is recorded in the audit and retained after conflicts.
+.TP
+.B -S[key], --gpg-sign[=key], --no-gpg-sign
+Sign newly created commits or explicitly disable signing. Attach an optional key
+to the option; without one, Git's configured key is used. The policy remains
+effective after conflicts and when retaining empty resolutions. Signing failures
+are not bypassed. Existing commits reused by Git are not signed again.
+.TP
+.B --signoff, --no-signoff
+Add or omit the committer's Signed-off-by trailer on newly created commits.
+This is distinct from a cryptographic signature. Hooks remain active.
+.TP
+.B --verify-signatures, --no-verify-signatures
+Merge only. Verify the incoming tip commit with native Git trust settings, or
+explicitly disable this verification. This does not verify every incoming commit
+or an annotated tag's signature. Explicit options override Git configuration.
+.TP
 .B --empty=drop|keep|stop
 Rebase only. Control commits that become empty. Explicit policies also apply
 after assisted conflict resolution: keep creates an empty commit with the original

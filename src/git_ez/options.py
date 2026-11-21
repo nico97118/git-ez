@@ -33,3 +33,31 @@ class RebaseOptions:
         if self.force_rebase is not None:
             flags.append("--force-rebase" if self.force_rebase else "--ff")
         return tuple(flags)
+
+
+@dataclass(frozen=True)
+class CommitOptions:
+    message: str | None = None
+    gpg_sign: str | Literal[False] | None = None
+    signoff: bool | None = None
+    verify_signatures: bool | None = None
+
+    def __post_init__(self) -> None:
+        if self.message is not None and "\0" in self.message:
+            raise EzError("Commit message must not contain NUL characters")
+
+    def flags(self, *, verify: bool = True) -> tuple[str, ...]:
+        flags = []
+        if self.message is not None:
+            flags.append(f"--message={self.message}")
+        if self.gpg_sign is False:
+            flags.append("--no-gpg-sign")
+        elif isinstance(self.gpg_sign, str):
+            flags.append(f"--gpg-sign={self.gpg_sign}")
+        if self.signoff is not None:
+            flags.append("--signoff" if self.signoff else "--no-signoff")
+        if verify and self.verify_signatures is not None:
+            flags.append(
+                "--verify-signatures" if self.verify_signatures else "--no-verify-signatures"
+            )
+        return tuple(flags)

@@ -312,3 +312,156 @@ def test_cli_rebase_empty_options_reach_engine(cli_repo, monkeypatch, capsys):
 def test_invalid_rebase_policies_are_rejected(arguments):
     with pytest.raises(SystemExit):
         parser().parse_args(arguments)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "arguments,expected",
+    [
+        (["rebase", "-S", "main"], ""),
+        (["merge", "--gpg-sign", "main"], ""),
+        (["merge", "main", "--gpg-sign=key"], "key"),
+        (["rebase", "-Skey", "main"], "key"),
+        (["merge", "main", "-S", "--no-gpg-sign"], False),
+        (["merge", "main", "--no-gpg-sign", "-Skey"], "key"),
+    ],
+)
+def test_signing_syntax_does_not_consume_target(arguments, expected):
+    args = parser().parse_args(arguments)
+    assert args.target == "main"
+    assert args.gpg_sign == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+@pytest.mark.parametrize("check_option", ["--check", "--chec", "--ch", "--c"])
+@pytest.mark.parametrize("attached", [False, True])
+def test_signing_arguments_inside_check_are_untouched(operation, check_option, attached):
+    arguments = [f"{check_option}=command"] if attached else [check_option, "command"]
+    command_arguments = ["-S", "--gpg-sign", "--no-gpg-sign", "--ff", "--", "--check"]
+    args = parser().parse_args([operation, "main", *arguments, *command_arguments])
+    assert args.check == ["command", *command_arguments]
+    assert args.gpg_sign is None
+
+
+@pytest.mark.unit
+def test_signing_before_attached_check_is_still_an_integration_option():
+    args = parser().parse_args(["merge", "-Skey", "main", "--check=command", "-S"])
+    assert args.gpg_sign == "key"
+    assert args.check == ["command", "-S"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["show", "run", "--check", "command"],
+        ["probe", "--output", "report.json", "--check=command"],
+    ],
+)
+def test_check_is_rejected_for_non_integration_commands(arguments):
+    with pytest.raises(SystemExit) as error:
+        parser().parse_args(arguments)
+    assert error.value.code == 2
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("check_option", ["--check", "--chec", "--check=", "--chec="])
+def test_cli_validation_arguments_stay_literal(cli_repo, monkeypatch, capsys, check_option):
+    monkeypatch.chdir(cli_repo.path)
+    # A no-op integration isolates argument handling from the resolver.
+    validation = [sys.executable, "-S", "-c", "print('literal validation')"]
+    arguments = (
+        [check_option + validation[0], *validation[1:]]
+        if check_option.endswith("=")
+        else [check_option, *validation]
+    )
+    assert main(["merge", "HEAD", *arguments]) == 0
+    assert "Status: succeeded" in capsys.readouterr().out
+    directory = next((cli_repo.path / ".git/ez/runs").iterdir())
+    assert (directory / "validation.stdout").read_text().strip() == "literal validation"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("from_file", [True, False])
+def test_cli_merge_message_and_signoff(cli_repo, monkeypatch, capsys, tmp_path, from_file):
+    monkeypatch.chdir(tmp_path)
+    if from_file:
+        (tmp_path / "message.txt").write_text("Custom merge\n\nDetails\n")
+        arguments = ["-F", "message.txt"]
+    else:
+        arguments = ["-m", "Custom merge", "-m", "Details"]
+    assert main(["merge", "main", "--repo", str(cli_repo.path), *arguments, "--signoff"]) == 0
+    assert "Status: succeeded" in capsys.readouterr().out
+    assert cli_repo.text("show", "-s", "--format=%B", "HEAD") == (
+        "Custom merge\n\nDetails\n\nSigned-off-by: Test <test@example.invalid>"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["-", "/nonexistent/git-ez-message"])
+def test_bad_message_file_is_rejected_before_configuration(path, mocker, capsys):
+    config = mocker.patch("git_ez.cli.Config.from_git")
+    assert main(["merge", "main", "-F", path]) == 2
+    assert "git-ez:" in capsys.readouterr().err
+    config.assert_not_called()
+
+
+@pytest.mark.unit
+def test_message_and_file_are_mutually_exclusive():
+    with pytest.raises(SystemExit):
+        parser().parse_args(["merge", "main", "-m", "message", "-F", "file"])
+
+
+@pytest.mark.integration
+def test_message_file_content_is_pinned_before_integration(cli_repo, monkeypatch, tmp_path, mocker):
+    from git_ez.engine import Engine
+
+    message = tmp_path / "message.txt"
+    message.write_text("original message\n")
+    monkeypatch.chdir(cli_repo.path)
+    prepare = Engine._prepare_run
+
+    def change_message_file(self, *args):
+        audit = prepare(self, *args)
+        message.write_text("changed message\n")
+        return audit
+
+    mocker.patch.object(Engine, "_prepare_run", change_message_file)
+    assert main(["merge", "main", "-F", str(message)]) == 0
+    assert cli_repo.text("show", "-s", "--format=%B", "HEAD") == "original message"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("source", ["message", "file"])
+def test_nul_message_is_rejected_before_configuration(tmp_path, mocker, capsys, source):
+    config = mocker.patch("git_ez.cli.Config.from_git")
+    engine = mocker.patch("git_ez.cli.Engine")
+    message = "title\0body"
+    if source == "file":
+        path = tmp_path / "message.txt"
+        path.write_text(message)
+        arguments = ["-F", str(path)]
+    else:
+        arguments = ["-m", message]
+    assert main(["merge", "main", *arguments]) == 2
+    assert "Commit message must not contain NUL characters" in capsys.readouterr().err
+    config.assert_not_called()
+    engine.assert_not_called()
+
+
+@pytest.mark.integration
+def test_nul_message_file_leaves_repository_unchanged(
+    cli_repo, model_server, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(cli_repo.path)
+    message = tmp_path / "message.txt"
+    message.write_bytes(b"title\0body")
+    before = cli_repo.text("show-ref")
+    assert main(["merge", "main", "-F", str(message)]) == 2
+    assert "NUL characters" in capsys.readouterr().err
+    assert cli_repo.text("show-ref") == before
+    assert cli_repo.run("status", "--porcelain").stdout == b""
+    assert not cli_repo.operation_active()
+    assert not (cli_repo.path / ".git/ez").exists()
+    assert model_server.calls == []

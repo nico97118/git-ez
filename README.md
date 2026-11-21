@@ -79,6 +79,34 @@ git ez merge --ff-only origin/main
 git ez merge feature --ff --check python -B -m pytest
 ```
 
+For merge commits, use `-m <message>` / `--message <message>` (repeat for multiple
+paragraphs), or `-F <file>` / `--file <file>`. Message files are read as UTF-8 before
+integration, relative to the invocation directory even with `--repo`; standard
+input (`-F -`) is unsupported. The requested message is retained through conflict
+resolution and recorded in the audit. Message options do not force a merge commit
+when Git can fast-forward.
+
+Both operations accept `--signoff` / `--no-signoff` and `-S` /
+`--gpg-sign[=<key>]` / `--no-gpg-sign`. Attach an explicit signing key with
+`-S<key>` or `--gpg-sign=<key>`; a bare signing option uses Git's configured key.
+These options apply to newly created commits, including after conflicts and for
+retained empty commits. Signoff adds a contribution trailer; it is distinct from
+a cryptographic signature. Signing and hook failures stop the run without retry
+or fallback to an unsigned commit. The options do not add trailers or signatures
+to existing commits reused by Git.
+
+Merge additionally accepts `--verify-signatures` / `--no-verify-signatures`,
+checking the incoming tip commit according to Git's trust configuration. This
+does not verify every incoming commit or the signature of an annotated tag.
+CLI options override the corresponding Git settings; omitted options preserve
+native configuration. All these options must precede `--check`.
+
+```sh
+git ez merge feature --no-ff -m "Merge feature" --signoff
+git ez rebase main --gpg-sign --signoff
+git ez merge feature --verify-signatures
+```
+
 Native caller configuration is retained except for the explicit execution policies
 above and repository-redirection environment variables described under Limitations.
 For example, `git -C /path/to/project -c ez.model=another-model ez rebase main` uses

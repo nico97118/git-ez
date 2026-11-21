@@ -4,6 +4,7 @@
 """Local integrations on real repositories, without a model or network."""
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from git_ez.config import Config
 from git_ez.engine import Engine
 from git_ez.errors import EzError
 from git_ez.git import Git
-from git_ez.options import RebaseOptions
+from git_ez.options import CommitOptions, RebaseOptions
 from tests.fakes import FakeResolver
 
 pytestmark = pytest.mark.integration
@@ -1158,3 +1159,157 @@ def test_reapply_cherry_picks_controls_equivalent_commit_replay(repo, reapply):
         assert repo.git.text("show", "-s", "--format=%s", "HEAD") == "source change"
     else:
         assert repo.git.branch_oid("feature") == target
+
+
+@pytest.fixture
+def ssh_signing(repo, tmp_path):
+    key = tmp_path / "signing-key"
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)],
+        check=True,
+        capture_output=True,
+    )
+    allowed = tmp_path / "allowed-signers"
+    allowed.write_text("test@example.invalid " + key.with_suffix(".pub").read_text())
+    repo.git.run("config", "gpg.format", "ssh")
+    repo.git.run("config", "user.signingkey", str(key))
+    repo.git.run("config", "gpg.ssh.allowedSignersFile", str(allowed))
+    return key
+
+
+@pytest.mark.parametrize("conflict", [True, False])
+def test_merge_message_and_signoff_survive_continuation(repo, conflict):
+    if not conflict:
+        repo.git.run("checkout", "-b", "clean", repo.base_oid)
+        (repo.root / "independent.txt").write_text("new\n")
+        repo.git.run("add", ".")
+        repo.git.run("commit", "-m", "independent")
+    message = "Merge the feature\n\nKeep both intentions."
+    audit = integrate(repo, "merge", commit_options=CommitOptions(message=message, signoff=True))
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    actual = repo.git.text("show", "-s", "--format=%B", "HEAD")
+    assert actual == message + "\n\nSigned-off-by: Test <test@example.invalid>"
+    assert audit.manifest["commit_options"]["message"] == message
+    assert len(repo.resolver.calls) == int(conflict)
+
+
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+@pytest.mark.parametrize("explicit_key", [True, False])
+def test_signing_options_create_verifiable_commits_after_conflict(
+    repo, ssh_signing, operation, explicit_key
+):
+    if explicit_key:
+        repo.git.run("config", "user.signingkey", "/nonexistent/default-signing-key")
+    key = str(ssh_signing) if explicit_key else ""
+    audit = integrate(repo, operation, commit_options=CommitOptions(gpg_sign=key, signoff=True))
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    repo.git.run("verify-commit", "HEAD")
+    assert "Signed-off-by: Test <test@example.invalid>" in repo.git.text(
+        "show", "-s", "--format=%B", "HEAD"
+    )
+    assert len(repo.resolver.calls) == 1
+
+
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+def test_explicit_no_sign_overrides_signing_configuration(repo, operation):
+    repo.git.run("config", "commit.gpgsign", "true")
+    repo.git.run("config", "gpg.program", "/nonexistent/signing-program")
+    audit = integrate(repo, operation, commit_options=CommitOptions(gpg_sign=False, signoff=False))
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert "gpgsig " not in repo.git.text("cat-file", "commit", "HEAD")
+    assert "Signed-off-by:" not in repo.git.text("show", "-s", "--format=%B", "HEAD")
+
+
+def test_retained_empty_commit_honors_signing_and_signoff(repo, ssh_signing):
+    repo.resolver = FakeResolver(content="parent\n")
+    audit = integrate(
+        repo,
+        rebase_options=RebaseOptions(empty="keep"),
+        commit_options=CommitOptions(gpg_sign=str(ssh_signing), signoff=True),
+    )
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.git.run("diff", "HEAD^", "HEAD").stdout == b""
+    repo.git.run("verify-commit", "HEAD")
+    assert "Signed-off-by:" in repo.git.text("show", "-s", "--format=%B", "HEAD")
+
+
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+def test_explicit_signing_failure_is_not_bypassed(repo, operation):
+    repo.git.run("config", "gpg.program", "/nonexistent/explicit-signing-program")
+    audit = integrate(repo, operation, commit_options=CommitOptions(gpg_sign=""))
+    assert audit.manifest["status"] == "failed"
+    assert not audit.manifest["integrated"]
+    assert repo.git.operation_active()
+    assert "explicit-signing-program" in (audit.directory / "integration.log").read_text()
+
+
+def test_merge_verifies_signed_target(repo, ssh_signing):
+    repo.git.run("checkout", "main")
+    repo.git.run("commit", "--allow-empty", "-S", "-m", "signed target")
+    target = repo.git.text("rev-parse", "HEAD")
+    repo.git.run("checkout", "feature")
+    audit = integrate(repo, "merge", commit_options=CommitOptions(verify_signatures=True))
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.git.text("rev-parse", "HEAD^2") == target
+
+
+def test_merge_signature_verification_refuses_unsigned_target_without_model(repo):
+    audit = integrate(repo, "merge", commit_options=CommitOptions(verify_signatures=True))
+    assert audit.manifest["status"] == "failed"
+    assert not audit.manifest["integrated"]
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert repo.resolver.calls == []
+    assert not repo.git.operation_active()
+
+
+def test_explicit_no_verify_signatures_overrides_configuration(repo):
+    repo.git.run("config", "merge.verifySignatures", "true")
+    audit = integrate(repo, "merge", commit_options=CommitOptions(verify_signatures=False))
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+
+
+def test_merge_message_does_not_force_a_commit_on_fast_forward(repo):
+    repo.git.run("checkout", "-b", "behind", repo.base_oid)
+    audit = integrate(repo, "merge", commit_options=CommitOptions(message="unused", signoff=True))
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.git.branch_oid("behind") == repo.parent_oid
+    assert "Signed-off-by:" not in repo.git.text("show", "-s", "--format=%B", "HEAD")
+
+
+@pytest.mark.parametrize(
+    "options", [CommitOptions(message="invalid"), CommitOptions(verify_signatures=True)]
+)
+def test_rebase_rejects_merge_only_commit_options(repo, options):
+    with pytest.raises(EzError, match="only supported for merge"):
+        integrate(repo, commit_options=options)
+    assert not (repo.root / ".git/ez").exists()
+
+
+@pytest.mark.parametrize("operation,hook_name", [("rebase", "pre-rebase"), ("merge", "commit-msg")])
+def test_commit_options_do_not_retry_rejected_commit_hooks(repo, operation, hook_name):
+    hook = repo.root / f".git/hooks/{hook_name}"
+    count = repo.root / ".git/commit-msg-count"
+    hook.write_text("#!/bin/sh\necho rejected >> .git/commit-msg-count\nexit 1\n")
+    hook.chmod(0o755)
+    options = CommitOptions(message="custom" if operation == "merge" else None, signoff=True)
+    audit = integrate(repo, operation, commit_options=options)
+    assert audit.manifest["status"] == "failed"
+    assert not audit.manifest["integrated"]
+    assert count.read_text().splitlines() == ["rejected"]
+    assert repo.git.operation_active() is (operation == "merge")
+
+
+def test_invalid_validation_argument_is_a_recorded_failure(repo):
+    repo.git.run("checkout", "-b", "behind", repo.base_oid)
+    audit = integrate(repo, "merge", validation=(sys.executable, "-c", "print('ok')\0"))
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["integrated"]
+    assert "embedded null byte" in audit.manifest["error"]
+    assert repo.git.branch_oid("behind") == repo.parent_oid
+    assert not repo.git.operation_active()
+    assert repo.resolver.calls == []
+    assert audit.manifest["exit_state"] == "exit/files.json"
+    saved = json.loads((audit.directory / "run.json").read_text())
+    assert saved["status"] == "failed"
+    assert "embedded null byte" in saved["error"]
+    assert "embedded null byte" in (audit.directory / "report.md").read_text()

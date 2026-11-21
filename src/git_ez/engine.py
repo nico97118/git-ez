@@ -18,7 +18,7 @@ from .config import Config
 from .conflicts import Conflict, Decision, LowConfidence
 from .errors import EzError
 from .git import Git, Stage, git_environment
-from .options import RebaseOptions
+from .options import CommitOptions, RebaseOptions
 
 
 class Engine:
@@ -37,6 +37,7 @@ class Engine:
         merge_ff: Literal["ff", "no-ff", "ff-only"] | None = None,
         onto: str | None = None,
         rebase_options: RebaseOptions | None = None,
+        commit_options: CommitOptions | None = None,
     ) -> Audit:
         """Integrate into the current branch; preserve local state and evidence on failure."""
         if operation not in ("rebase", "merge"):
@@ -45,6 +46,11 @@ class Engine:
             raise EzError("--onto is only supported for rebase")
         if rebase_options is not None and operation != "rebase":
             raise EzError("Rebase options are only supported for rebase")
+        commit_options = commit_options or CommitOptions()
+        if operation != "merge" and (
+            commit_options.message is not None or commit_options.verify_signatures is not None
+        ):
+            raise EzError("Messages and signature verification are only supported for merge")
         if merge_ff is not None:
             if operation != "merge":
                 raise EzError("Fast-forward policy is only supported for merge")
@@ -69,6 +75,7 @@ class Engine:
             audit.manifest["rebase_options"] = asdict(rebase_options or RebaseOptions())
         if operation == "merge":
             audit.manifest["merge_ff"] = merge_ff
+        audit.manifest["commit_options"] = asdict(commit_options)
         try:
             self._integrate(audit, validation)
             self._record_result(audit)
@@ -76,7 +83,7 @@ class Engine:
                 self.validate(git, audit, validation)
             self._verify_result(audit)
             audit.manifest["status"] = "succeeded"
-        except (EzError, OSError, KeyboardInterrupt) as exc:
+        except (EzError, OSError, ValueError, KeyboardInterrupt) as exc:
             audit.manifest["status"] = (
                 "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
             )
@@ -175,6 +182,7 @@ class Engine:
         git = self.git
         operation = audit.manifest["operation"]
         rebase_options = RebaseOptions(**audit.manifest.get("rebase_options", {}))
+        commit_options = CommitOptions(**audit.manifest["commit_options"])
         rerere = (
             git.run("config", "--bool", "--get", "rerere.autoupdate", check=False).stdout.strip()
             == b"true"
@@ -216,13 +224,16 @@ class Engine:
                 "--no-rebase-merges",
                 *flags,
                 *rebase_options.flags(),
+                *commit_options.flags(),
                 audit.manifest["target_oid"],
             )
         else:
             # Let Git fast-forward or create a merge commit, as git merge normally would.
             merge_ff = audit.manifest["merge_ff"]
             flags = (f"--{merge_ff}",) if merge_ff is not None else ()
-            result = step("merge", "--no-edit", *flags, audit.manifest["target_oid"])
+            result = step(
+                "merge", "--no-edit", *flags, *commit_options.flags(), audit.manifest["target_oid"]
+            )
         rounds = 0
         while result.returncode:
             stages = git.conflicts()
@@ -272,6 +283,7 @@ class Engine:
                         "--no-edit",
                         "-C",
                         replay_oid,
+                        *commit_options.flags(),
                     )
                     if committed.returncode:
                         raise EzError("Cannot retain empty commit; see integration.log")
@@ -280,7 +292,12 @@ class Engine:
                 and git.text("rev-parse", "MERGE_HEAD") != audit.manifest["target_oid"]
             ):
                 raise EzError("Merge target changed before Git continuation")
-            result = step(operation, "--continue")
+            if operation == "merge" and commit_options.flags(verify=False):
+                # Native merge --continue calls commit. Reapply explicit creation
+                # options here because merge does not persist all of them.
+                result = step("commit", "--no-edit", *commit_options.flags(verify=False))
+            else:
+                result = step(operation, "--continue")
         if git.operation_active() or git.conflicts():
             raise EzError("Git integration did not complete")
         audit.manifest["integrated"] = True

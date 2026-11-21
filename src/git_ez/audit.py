@@ -165,6 +165,15 @@ class Audit:
                 "```",
                 "",
             ]
+        if "commit_options" in data:
+            lines += [
+                "## Commit options",
+                "",
+                "```json",
+                json.dumps(data["commit_options"], indent=2),
+                "```",
+                "",
+            ]
         if data.get("empty_commits"):
             lines += ["## Empty conflict resolutions", ""]
             for entry in data["empty_commits"]:

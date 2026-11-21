@@ -6,17 +6,57 @@
 import argparse
 import json
 import sys
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Any, TypeVar, overload
 
 from . import __version__
 from .config import Config
 from .engine import Engine
 from .errors import EzError
-from .options import RebaseOptions
+from .options import CommitOptions, RebaseOptions
+
+NamespaceT = TypeVar("NamespaceT")
+
+
+class GitArgumentParser(argparse.ArgumentParser):
+    @overload
+    def parse_args(
+        self, args: Iterable[str] | None = None, namespace: None = None
+    ) -> argparse.Namespace: ...
+
+    @overload
+    def parse_args(self, args: Iterable[str] | None, namespace: NamespaceT) -> NamespaceT: ...
+
+    @overload
+    def parse_args(self, *, namespace: NamespaceT) -> NamespaceT: ...
+
+    def parse_args(self, args: Iterable[str] | None = None, namespace: Any = None) -> Any:
+        """Preserve Git-style signing keys and literal validation arguments."""
+        arguments = list(sys.argv[1:] if args is None else args)
+        validation: list[str] | None = None
+        for index, argument in enumerate(arguments):
+            if argument == "--":
+                break
+            option, separator, value = argument.partition("=")
+            if option.startswith("--") and "--check".startswith(option):
+                # Detach the command before argparse can interpret its flags or
+                # literal --, including with abbreviated and attached forms.
+                validation = ([value] if separator else []) + arguments[index + 1 :]
+                arguments = arguments[:index]
+                break
+            if argument in ("--gpg-sign", "-S"):
+                arguments[index] = "--gpg-sign="
+        parsed = super().parse_args(arguments, namespace)
+        if validation is not None:
+            if getattr(parsed, "command", None) not in ("rebase", "merge"):
+                self.error("--check is only supported for rebase and merge")
+            parsed.check = validation
+        return parsed
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(
+    root = GitArgumentParser(
         prog="git ez", description="Local Git rebase/merge with traceable AI conflict resolution"
     )
     root.add_argument("--version", action="version", version=f"git-ez {__version__}")
@@ -26,6 +66,17 @@ def parser() -> argparse.ArgumentParser:
             operation, help=f"Run a local {operation} with AI conflict resolution"
         )
         run.add_argument("target", help="Git revision to integrate into the current branch")
+        run.add_argument(
+            "--gpg-sign",
+            "-S",
+            nargs="?",
+            const="",
+            default=None,
+            metavar="KEY",
+            help="Sign new commits; attach an optional key with --gpg-sign=KEY or -SKEY",
+        )
+        run.add_argument("--no-gpg-sign", dest="gpg_sign", action="store_const", const=False)
+        run.add_argument("--signoff", action=argparse.BooleanOptionalAction, default=None)
         if operation == "rebase":
             run.add_argument("--onto", help="Replay commits after target onto this revision")
             run.add_argument("--empty", choices=("drop", "keep", "stop"))
@@ -45,6 +96,16 @@ def parser() -> argparse.ArgumentParser:
             )
             run.add_argument("--ff", dest="force_rebase", action="store_const", const=False)
         if operation == "merge":
+            messages = run.add_mutually_exclusive_group()
+            messages.add_argument(
+                "--message", "-m", action="append", help="Merge message paragraph"
+            )
+            messages.add_argument(
+                "--file", "-F", type=Path, help="Read the merge message from a file"
+            )
+            run.add_argument(
+                "--verify-signatures", action=argparse.BooleanOptionalAction, default=None
+            )
             for flag, help_text in (
                 ("ff", "Allow fast-forward; otherwise create a merge commit"),
                 ("no-ff", "Create a merge commit when integration is needed"),
@@ -87,6 +148,20 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if report["status"] == "compatible" else 1
         if args.check == []:
             raise EzError("--check requires an executable")
+        message = None
+        if args.command == "merge":
+            if args.file is not None:
+                if args.file == Path("-"):
+                    raise EzError("--file requires a message file; standard input is unsupported")
+                message = args.file.read_text(encoding="utf-8")
+            elif args.message is not None:
+                message = "\n\n".join(args.message)
+        commit_options = CommitOptions(
+            message=message,
+            gpg_sign=args.gpg_sign,
+            signoff=args.signoff,
+            verify_signatures=getattr(args, "verify_signatures", None),
+        )
         config = Config.from_git(args.repo)
         engine = Engine(args.repo, config)
         audit = engine.run(
@@ -102,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.command == "rebase"
                 else None
             ),
+            commit_options=commit_options,
         )
         print(f"Status: {audit.manifest['status']}")
         print(f"Report: {audit.directory / 'report.md'}")

@@ -94,12 +94,16 @@ def main() -> None:
             (repository / "feature.txt").write_text("feature\n", encoding="utf-8")
             git("add", ".")
             git("commit", "-m", "Feature")
+            if operation == "rebase":
+                (repository / "feature.txt").write_text("fixed feature\n", encoding="utf-8")
+                git("commit", "-am", "fixup! Feature")
             git("checkout", "main")
             (repository / "main.txt").write_text("main\n", encoding="utf-8")
             git("add", ".")
             git("commit", "-m", "Main")
             git("checkout", "feature")
-            if "Status: succeeded" not in git("ez", operation, "main"):
+            options = ("--autosquash",) if operation == "rebase" else ()
+            if "Status: succeeded" not in git("ez", operation, "main", *options):
                 raise RuntimeError(f"Installed {operation} failed")
             git("merge-base", "--is-ancestor", "main", "HEAD")
             if git("status", "--porcelain"):
@@ -107,7 +111,19 @@ def main() -> None:
             audits = list((repository / ".git/ez/runs").iterdir())
             if len(audits) != 1 or "integration report" not in git("ez", "show", str(audits[0])):
                 raise RuntimeError(f"Installed {operation} did not preserve a readable audit")
-        print("Installed wheel: imports, Git discovery, help, manual, audits, merge, rebase passed")
+            if operation == "rebase":
+                if git("rev-list", "--count", "main..HEAD").strip() != "1":
+                    raise RuntimeError("Installed autosquash did not group the fixup")
+                if (repository / "feature.txt").read_text() != "fixed feature\n":
+                    raise RuntimeError("Installed autosquash lost the fixup content")
+                if "fixup " not in (audits[0] / "rebase-todo.txt").read_text():
+                    raise RuntimeError("Installed autosquash did not capture its sequence")
+                if not (audits[0] / "rebase-commits.log").is_file():
+                    raise RuntimeError("Installed autosquash did not capture commit messages")
+        print(
+            "Installed wheel: imports, Git discovery, help, manual, audits, "
+            "merge, autosquash passed"
+        )
 
 
 if __name__ == "__main__":

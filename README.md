@@ -28,7 +28,7 @@ its own small command-line interface; it does not forward arbitrary options to
 | Model | Valid `ez.*` model configuration is required before integration, even if no conflicts occur. No model call is made when Git resolves the operation without assistance. |
 | Recovery | Failed runs preserve local state. Inspect the audit and use native Git to continue or abort an active operation. |
 
-Interactive rebase, `--autosquash`, `--rebase-merges`, merge `--squash`,
+Interactive editing of a rebase, `--rebase-merges`, merge `--squash`,
 `--no-commit`, octopus merges, and arbitrary strategy options are outside this interface.
 For these workflows, use Git directly. git-ez cannot attach to an operation that was
 already started with Git.
@@ -61,6 +61,32 @@ hooks and signing remain active. The audit records the policy and empty resoluti
 ```sh
 git ez rebase main --reapply-cherry-picks --empty=keep
 git ez rebase main --no-keep-empty --force-rebase
+```
+
+Rebase accepts `--autosquash` / `--no-autosquash` (last explicit value wins).
+With `--autosquash`, native Git matches and groups `fixup!`, `squash!`, and
+`amend!` commits. Unmatched markers remain ordinary commits. The model only
+resolves conflicts; it does not choose the order or write the combined messages.
+Git determines the resulting messages without opening an editor.
+
+Autosquash is opt-in: `rebase.autoSquash` alone does not activate it. git-ez uses
+Git's interactive machinery internally with a capture-only sequence editor,
+forces `rebase.instructionFormat=%s` for that invocation, and keeps `--empty=drop`
+as the default rather than adopting interactive rebase's stop behavior. Explicit
+`--empty` policies still apply to replayed commits; empty fixup/squash resolutions
+are handled by Git as part of their existing group. Hooks and signing are retained.
+Interactive editing and arbitrary todo instructions remain unsupported.
+
+The audit retains `rebase-todo.txt` before any replay. If the complete sequence
+cannot be captured within `ez.maxFileBytes`, Git stops before replay. Missing
+sequence evidence prevents overall success, even if integration has completed.
+`rebase-commits.log` records the resulting commits and messages; any truncation
+at `ez.maxFileBytes` is explicit in the manifest and report. Failures preserve the
+actual local state and available evidence for inspection and native recovery.
+
+```sh
+git ez rebase main --autosquash
+git ez rebase old-base --onto main --autosquash --gpg-sign
 ```
 
 Merge accepts `--ff`, `--no-ff`, and `--ff-only`. An explicit policy overrides
@@ -334,6 +360,8 @@ Traces are stored in the target repository's common Git directory:
   integration.log            # Git commands and output
   result.diff                # Full before/after diff
   range-diff.txt             # Commit series comparison, rebase only
+  rebase-todo.txt            # Initial native sequence, autosquash only
+  rebase-commits.log         # Result commits/messages, autosquash only; truncation is explicit
   conflicts/0001/
     base.txt / ours.txt / theirs.txt / marked.txt
     request.json             # Initial conflict evidence

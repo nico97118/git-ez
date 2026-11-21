@@ -485,3 +485,27 @@ def test_nul_message_file_leaves_repository_unchanged(
     assert not cli_repo.operation_active()
     assert not (cli_repo.path / ".git/ez").exists()
     assert model_server.calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("enabled", [True, False])
+def test_autosquash_cli_policy_is_explicit_and_last_value_wins(enabled):
+    flags = ["--autosquash", "--no-autosquash"]
+    if enabled:
+        flags.reverse()
+    assert parser().parse_args(["rebase", "main", *flags]).autosquash is enabled
+    assert parser().parse_args(["rebase", "main"]).autosquash is None
+    with pytest.raises(SystemExit):
+        parser().parse_args(["merge", "main", "--autosquash"])
+
+
+@pytest.mark.integration
+def test_cli_autosquash_uses_native_grouping_without_a_model(cli_repo, model_server, monkeypatch):
+    monkeypatch.chdir(cli_repo.path)
+    (cli_repo.path / "file.txt").write_text("fixed source\n")
+    cli_repo.run("commit", "-am", "fixup! source")
+    target = cli_repo.text("rev-parse", "main^")
+    assert main(["rebase", target, "--autosquash"]) == 0
+    assert cli_repo.text("rev-list", "--count", f"{target}..HEAD") == "1"
+    assert cli_repo.text("show", "-s", "--format=%s", "HEAD") == "source"
+    assert model_server.calls == []

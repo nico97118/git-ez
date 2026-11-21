@@ -4,6 +4,7 @@
 """Local Git rebase/merge with traceable AI conflict resolution."""
 
 import difflib
+import hashlib
 import json
 import subprocess
 from dataclasses import asdict
@@ -19,6 +20,7 @@ from .conflicts import Conflict, Decision, LowConfidence
 from .errors import EzError
 from .git import Git, Stage, git_environment
 from .options import CommitOptions, RebaseOptions
+from .sequence_editor import editor_command, read_regular
 
 
 class Engine:
@@ -104,6 +106,13 @@ class Engine:
                 if audit.manifest["status"] == "succeeded":
                     audit.manifest["status"] = "failed"
                     audit.manifest["error"] = "Final audit capture failed; inspect the report"
+            if "rebase_sequence" in audit.manifest:
+                try:
+                    self._verify_sequence_capture(audit)
+                except EzError as exc:
+                    if audit.manifest["status"] == "succeeded":
+                        audit.manifest["status"] = "failed"
+                        audit.manifest["error"] = str(exc)
             audit.save()
         return audit
 
@@ -201,13 +210,15 @@ class Engine:
         audit.manifest["rerere_autoupdate_effective"] = rerere
         auto_resolved = False
 
-        def step(*args: str) -> subprocess.CompletedProcess[bytes]:
+        def step(
+            *args: str, sequence_editor: str | None = None
+        ) -> subprocess.CompletedProcess[bytes]:
             nonlocal auto_resolved
             previous_tree = git.run(
                 "rev-parse", "--verify", "AUTO_MERGE^{tree}", check=False
             ).stdout
             command = (*rerere_config, *args)
-            result = git.run(*command, check=False)
+            result = git.run(*command, check=False, sequence_editor=sequence_editor)
             conflict_tree = git.run(
                 "rev-parse", "--verify", "AUTO_MERGE^{tree}", check=False
             ).stdout
@@ -229,17 +240,50 @@ class Engine:
             flags: tuple[str, ...] = (
                 ("--onto", audit.manifest["onto_oid"]) if "onto" in audit.manifest else ()
             )
-            result = step(
-                "rebase",
-                "--merge",
-                "--no-autostash",
-                "--no-update-refs",
-                "--no-rebase-merges",
-                *flags,
-                *rebase_options.flags(),
-                *commit_options.flags(),
-                audit.manifest["target_oid"],
-            )
+            sequence_editor = None
+            prefix: tuple[str, ...] = ()
+            if rebase_options.autosquash is True:
+                sequence = audit.directory / "rebase-todo.txt"
+                audit.manifest["rebase_sequence"] = {
+                    "artifact": sequence.name,
+                    "status": "pending",
+                    "limit_bytes": self.config.max_file_bytes,
+                }
+                audit.save()
+                sequence_editor = editor_command(sequence, self.config.max_file_bytes)
+                # Prevent a configured multiline instruction format from adding
+                # instructions to the internally generated interactive sequence.
+                prefix = ("-c", "rebase.instructionFormat=%s")
+            try:
+                result = step(
+                    *prefix,
+                    "rebase",
+                    "--merge",
+                    "--no-autostash",
+                    "--no-update-refs",
+                    "--no-rebase-merges",
+                    *flags,
+                    *rebase_options.flags(),
+                    *commit_options.flags(),
+                    audit.manifest["target_oid"],
+                    sequence_editor=sequence_editor,
+                )
+            finally:
+                if rebase_options.autosquash is True:
+                    evidence = audit.manifest["rebase_sequence"]
+                    try:
+                        content = read_regular(
+                            audit.directory / evidence["artifact"], self.config.max_file_bytes
+                        )
+                    except (OSError, ValueError) as exc:
+                        evidence.update(status="unavailable", error=str(exc))
+                    else:
+                        evidence.update(
+                            status="captured",
+                            sha256=hashlib.sha256(content).hexdigest(),
+                            size_bytes=len(content),
+                        )
+                    audit.save()
         else:
             # Let Git fast-forward or create a merge commit, as git merge normally would.
             merge_ff = audit.manifest["merge_ff"]
@@ -272,6 +316,10 @@ class Engine:
                 operation == "rebase"
                 and rebase_options.empty is not None
                 and git.run("diff", "--cached", "--quiet", "HEAD", check=False).returncode == 0
+                and not (
+                    rebase_options.autosquash is True
+                    and self._rebase_action() in ("fixup", "squash")
+                )
             ):
                 replay_oid = git.text("rev-parse", "REBASE_HEAD")
                 audit.manifest.setdefault("empty_commits", []).append(
@@ -315,6 +363,43 @@ class Engine:
             raise EzError("Git integration did not complete")
         audit.manifest["integrated"] = True
 
+    def _verify_sequence_capture(self, audit: Audit) -> None:
+        evidence = audit.manifest["rebase_sequence"]
+        try:
+            if evidence["status"] != "captured":
+                raise EzError(evidence.get("error", "Initial sequence capture was unavailable"))
+            content = read_regular(
+                audit.directory / evidence["artifact"], self.config.max_file_bytes
+            )
+            if hashlib.sha256(content).hexdigest() != evidence["sha256"]:
+                raise EzError("Captured sequence changed during rebase continuation")
+        except (EzError, OSError, ValueError) as exc:
+            evidence.update(status="unavailable", error=str(exc))
+            raise EzError(
+                "Required rebase sequence capture is unavailable; inspect the audit"
+            ) from exc
+
+    def _rebase_action(self) -> str:
+        path = Path(self.git.text("rev-parse", "--git-path", "rebase-merge/done"))
+        if not path.is_absolute():
+            path = self.git.path / path
+        lines = read_regular(path, self.config.max_file_bytes).splitlines()
+        actions = {
+            b"pick": "pick",
+            b"p": "pick",
+            b"fixup": "fixup",
+            b"f": "fixup",
+            b"squash": "squash",
+            b"s": "squash",
+        }
+        for line in reversed(lines):
+            if line.strip() and not line.lstrip().startswith(b"#"):
+                action = actions.get(line.split()[0])
+                if action is not None:
+                    return action
+                break
+        raise EzError("Cannot determine the current autosquash action; inspect the rebase state")
+
     def _record_result(self, audit: Audit) -> None:
         git = self.git
         before_oid, target_oid = audit.manifest["before_oid"], audit.manifest["target_oid"]
@@ -353,6 +438,24 @@ class Engine:
                 "after": f"{base_oid}..{result_oid}",
                 "command": ["git", *args],
             }
+            if audit.manifest.get("rebase_options", {}).get("autosquash") is True:
+                contents = git.run(
+                    "log",
+                    "--reverse",
+                    "--no-color",
+                    "--no-decorate",
+                    "--no-show-signature",
+                    "--no-notes",
+                    "--format=raw",
+                    f"{base_oid}..{result_oid}",
+                ).stdout
+                artifact = "rebase-commits.log"
+                (audit.directory / artifact).write_bytes(contents[: self.config.max_file_bytes])
+                audit.manifest["result_commits"] = {
+                    "artifact": artifact,
+                    "truncated": len(contents) > self.config.max_file_bytes,
+                    "limit_bytes": self.config.max_file_bytes,
+                }
         audit.save()
 
     def _verify_result(self, audit: Audit) -> None:

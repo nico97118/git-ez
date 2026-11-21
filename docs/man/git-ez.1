@@ -32,7 +32,7 @@ A checked-out branch, clean checkout, and no active Git operation are
 required.
 The target is required and pinned at startup. Only simple rebase and merge are
 supported; arbitrary Git options are not forwarded. Interactive rebase,
---autosquash, rebasing merge commits, merge --squash, --no-commit, octopus
+rebasing merge commits, merge --squash, --no-commit, octopus
 merge,
 and unrelated histories are unsupported. The tool cannot attach to an
 operation
@@ -48,6 +48,23 @@ environment variables.
 Valid model configuration is required even when no conflicts occur; no model
 call is made when Git resolves the operation without assistance.
 .SH OPTIONS
+.TP
+.B --autosquash, --no-autosquash
+Rebase only. Opt in to native grouping of fixup!, squash!, and amend! commits,
+or disable it. The last explicit value wins. rebase.autoSquash alone does not
+activate this mode. Git chooses the order and combined messages, with no editor
+or model intervention except for resolving conflicts.
+.PP
+git-ez uses interactive machinery internally with a capture-only sequence editor,
+forces rebase.instructionFormat=%s for this invocation, and preserves the default
+--empty=drop. Explicit empty policies apply to replayed commits; Git handles empty
+fixup/squash resolutions within their existing groups. Interactive editing remains
+unsupported. Hooks and signing are retained.
+.PP
+The audit captures rebase-todo.txt before replay. A failed or over-limit capture
+stops Git before replay; missing evidence prevents overall success after completion.
+rebase-commits.log records final commits and messages with explicit truncation at
+ez.maxFileBytes. Local state and available evidence are preserved on failure.
 .TP
 .B --rerere-autoupdate, --no-rerere-autoupdate
 Override rerere.autoupdate for the whole run, including continuation, without

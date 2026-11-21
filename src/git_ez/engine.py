@@ -18,6 +18,7 @@ from .config import Config
 from .conflicts import Conflict, Decision, LowConfidence
 from .errors import EzError
 from .git import Git, Stage, git_environment
+from .options import RebaseOptions
 
 
 class Engine:
@@ -35,12 +36,15 @@ class Engine:
         *,
         merge_ff: Literal["ff", "no-ff", "ff-only"] | None = None,
         onto: str | None = None,
+        rebase_options: RebaseOptions | None = None,
     ) -> Audit:
         """Integrate into the current branch; preserve local state and evidence on failure."""
         if operation not in ("rebase", "merge"):
             raise EzError("Operation must be rebase or merge")
         if onto is not None and operation != "rebase":
             raise EzError("--onto is only supported for rebase")
+        if rebase_options is not None and operation != "rebase":
+            raise EzError("Rebase options are only supported for rebase")
         if merge_ff is not None:
             if operation != "merge":
                 raise EzError("Fast-forward policy is only supported for merge")
@@ -61,6 +65,8 @@ class Engine:
         audit = self._prepare_run(branch, before_oid, target, target_oid, target_ref, operation)
         if onto is not None:
             audit.manifest.update(onto=onto, onto_oid=onto_oid, onto_ref=onto_ref)
+        if operation == "rebase":
+            audit.manifest["rebase_options"] = asdict(rebase_options or RebaseOptions())
         if operation == "merge":
             audit.manifest["merge_ff"] = merge_ff
         try:
@@ -168,6 +174,7 @@ class Engine:
     def _integrate(self, audit: Audit, validation: tuple[str, ...]) -> None:
         git = self.git
         operation = audit.manifest["operation"]
+        rebase_options = RebaseOptions(**audit.manifest.get("rebase_options", {}))
         rerere = (
             git.run("config", "--bool", "--get", "rerere.autoupdate", check=False).stdout.strip()
             == b"true"
@@ -208,6 +215,7 @@ class Engine:
                 "--no-update-refs",
                 "--no-rebase-merges",
                 *flags,
+                *rebase_options.flags(),
                 audit.manifest["target_oid"],
             )
         else:
@@ -236,6 +244,37 @@ class Engine:
                 self.resolve_conflicts(git, audit, stages, rounds, validation)
             if git.conflicts():
                 raise EzError("Unmerged index entries remain")
+            if (
+                operation == "rebase"
+                and rebase_options.empty is not None
+                and git.run("diff", "--cached", "--quiet", "HEAD", check=False).returncode == 0
+            ):
+                replay_oid = git.text("rev-parse", "REBASE_HEAD")
+                audit.manifest.setdefault("empty_commits", []).append(
+                    {
+                        "commit": replay_oid,
+                        "policy": rebase_options.empty,
+                        "reason": "Resolution left no staged changes relative to HEAD.",
+                    }
+                )
+                audit.save()
+                if rebase_options.empty == "stop":
+                    raise EzError(
+                        "Rebase resolution is empty; inspect the audit and use native Git "
+                        "to commit with --allow-empty or skip the commit"
+                    )
+                if rebase_options.empty == "keep":
+                    self._verify_target(audit)
+                    committed = step(
+                        "commit",
+                        "--allow-empty",
+                        "--allow-empty-message",
+                        "--no-edit",
+                        "-C",
+                        replay_oid,
+                    )
+                    if committed.returncode:
+                        raise EzError("Cannot retain empty commit; see integration.log")
             if (
                 operation == "merge"
                 and git.text("rev-parse", "MERGE_HEAD") != audit.manifest["target_oid"]

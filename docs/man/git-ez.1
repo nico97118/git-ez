@@ -49,6 +49,25 @@ Valid model configuration is required even when no conflicts occur; no model
 call is made when Git resolves the operation without assistance.
 .SH OPTIONS
 .TP
+.B --empty=drop|keep|stop
+Rebase only. Control commits that become empty. Explicit policies also apply
+after assisted conflict resolution: keep creates an empty commit with the original
+author and message, drop lets Git discard it, and stop leaves the active rebase
+for manual handling with a nonzero exit code. This extends native continuation,
+which can drop an empty resolution even with --empty=keep. Hooks and signing
+remain active. Policies and empty resolutions are recorded in the audit.
+.TP
+.B --keep-empty, --no-keep-empty
+Rebase only. Keep or discard commits that were already empty before replay.
+.TP
+.B --reapply-cherry-picks, --no-reapply-cherry-picks
+Rebase only. Control whether Git replays changes equivalent to upstream commits.
+Reapplied commits that become empty are handled by --empty.
+.TP
+.B --force-rebase, -f, --no-ff, --ff
+For rebase, force replay of unchanged commits; --ff resets this request. The last
+request wins. For merge, --ff and --no-ff instead select the policy described below.
+.TP
 .B --onto newbase
 Rebase only. Replay the commits selected after target onto newbase. Both revisions
 are pinned and their named references are checked throughout the run. The audit

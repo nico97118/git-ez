@@ -156,6 +156,20 @@ class Audit:
             lines += [f"- Requested fast-forward policy: `{policy}`", ""]
         if "onto" in data:
             lines += [f"- New base: `{data['onto']}` (`{data['onto_oid']}`)", ""]
+        if "rebase_options" in data:
+            lines += [
+                "## Rebase options",
+                "",
+                "```json",
+                json.dumps(data["rebase_options"], indent=2),
+                "```",
+                "",
+            ]
+        if data.get("empty_commits"):
+            lines += ["## Empty conflict resolutions", ""]
+            for entry in data["empty_commits"]:
+                lines += [f"- `{entry['commit']}`: `{entry['policy']}` — {entry['reason']}"]
+            lines.append("")
         if data.get("error"):
             lines += ["## Run stopped", "", str(data["error"]), ""]
         if "range_diff" in data:

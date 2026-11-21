@@ -44,13 +44,33 @@ Git's `A...B` shorthand for the new base are not supported.
 git ez rebase --onto main old-base
 ```
 
+Rebase also accepts `--empty=drop|keep|stop`, `--keep-empty` /
+`--no-keep-empty`, `--reapply-cherry-picks` / `--no-reapply-cherry-picks`, and
+`--force-rebase` (`-f`, `--no-ff`; reset with `--ff`). `--keep-empty` controls
+commits that were empty originally; `--empty` controls commits that become empty.
+Reapplying cherry-picks lets the empty policy handle changes already present
+upstream. Without explicit options, native Git defaults apply.
+
+An explicit `--empty` policy also applies after an assisted conflict resolution:
+git-ez retains an empty commit for `keep`, allows Git to drop it for `drop`, and
+stops with a nonzero exit code and the active rebase preserved for `stop`.
+This extends native continuation behavior, which can drop empty resolutions even
+with `--empty=keep`. Retained commits preserve the original author and message;
+hooks and signing remain active. The audit records the policy and empty resolution.
+
+```sh
+git ez rebase main --reapply-cherry-picks --empty=keep
+git ez rebase main --no-keep-empty --force-rebase
+```
+
 Merge accepts `--ff`, `--no-ff`, and `--ff-only`. An explicit policy overrides
 Git configuration; when repeated, the last policy wins. Without one, Git's
 configuration and defaults apply. `--ff` allows fast-forward and otherwise creates
 a merge commit. `--no-ff` creates a merge commit when integration is needed;
 an already up-to-date branch stays unchanged. `--ff-only` refuses divergent
-histories without calling the model or changing the checkout. These flags are
-not accepted by `git ez rebase`. Put them before `--check`, which consumes all
+histories without calling the model or changing the checkout. `--ff-only` is
+merge-only; in rebase, `--no-ff` forces replay and `--ff` resets that request.
+Put these options before `--check`, which consumes all
 remaining arguments. The requested policy is recorded in the audit and report.
 
 ```sh

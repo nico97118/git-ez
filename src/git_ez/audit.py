@@ -156,6 +156,12 @@ class Audit:
             lines += [f"- Requested fast-forward policy: `{policy}`", ""]
         if "onto" in data:
             lines += [f"- New base: `{data['onto']}` (`{data['onto_oid']}`)", ""]
+        if "rerere_autoupdate_effective" in data:
+            lines += [
+                f"- Requested rerere autoupdate: `{data['rerere_autoupdate']}`",
+                f"- Effective rerere autoupdate: `{data['rerere_autoupdate_effective']}`",
+                "",
+            ]
         if "rebase_options" in data:
             lines += [
                 "## Rebase options",

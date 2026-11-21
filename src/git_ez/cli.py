@@ -77,6 +77,12 @@ def parser() -> argparse.ArgumentParser:
         )
         run.add_argument("--no-gpg-sign", dest="gpg_sign", action="store_const", const=False)
         run.add_argument("--signoff", action=argparse.BooleanOptionalAction, default=None)
+        run.add_argument(
+            "--rerere-autoupdate",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help="Allow Git rerere to stage reused resolutions; overrides Git configuration",
+        )
         if operation == "rebase":
             run.add_argument("--onto", help="Replay commits after target onto this revision")
             run.add_argument("--empty", choices=("drop", "keep", "stop"))
@@ -178,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
                 else None
             ),
             commit_options=commit_options,
+            rerere_autoupdate=args.rerere_autoupdate,
         )
         print(f"Status: {audit.manifest['status']}")
         print(f"Report: {audit.directory / 'report.md'}")

@@ -1299,6 +1299,92 @@ def test_commit_options_do_not_retry_rejected_commit_hooks(repo, operation, hook
     assert repo.git.operation_active() is (operation == "merge")
 
 
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+@pytest.mark.parametrize("autoupdate", [True, False])
+def test_explicit_rerere_policy_overrides_configuration_without_changing_it(
+    repo, operation, autoupdate
+):
+    repo.git.run("config", "rerere.enabled", "true")
+    configured = "false" if autoupdate else "true"
+    repo.git.run("config", "rerere.autoupdate", configured)
+    first = integrate(repo, operation, rerere_autoupdate=True)
+    assert first.manifest["status"] == "succeeded", first.manifest
+    repo.git.run("reset", "--hard", repo.source_oid)
+    repo.resolver.calls.clear()
+    second = integrate(repo, operation, rerere_autoupdate=autoupdate)
+    assert second.manifest["status"] == "succeeded", second.manifest
+    assert repo.git.text("config", "--get", "rerere.autoupdate") == configured
+    assert second.manifest["rerere_autoupdate"] is autoupdate
+    assert second.manifest["rerere_autoupdate_effective"] is autoupdate
+    assert len(repo.resolver.calls) == (0 if autoupdate else 1)
+    assert repo.file.read_text() == "combined\n"
+    if autoupdate:
+        assert second.manifest["native_resolutions"][0]["mechanism"] == "rerere"
+    else:
+        assert repo.resolver.calls[0].marked == "combined\n"
+    assert "Effective rerere autoupdate" in (second.directory / "report.md").read_text()
+    assert (
+        f"rerere.autoupdate={str(autoupdate).lower()}"
+        in (second.directory / "integration.log").read_text()
+    )
+
+
+def test_explicit_rerere_policy_does_not_retry_a_rejected_hook(repo):
+    repo.git.run("config", "rerere.enabled", "true")
+    repo.git.run("config", "rerere.autoupdate", "false")
+    assert integrate(repo, "merge", rerere_autoupdate=True).manifest["status"] == "succeeded"
+    repo.git.run("reset", "--hard", repo.source_oid)
+    repo.resolver.calls.clear()
+    hook = repo.root / ".git/hooks/pre-commit"
+    count = repo.root / ".git/hook-count"
+    hook.write_text("#!/bin/sh\necho rejected >> .git/hook-count\nexit 1\n")
+    hook.chmod(0o755)
+    audit = integrate(
+        repo,
+        "merge",
+        rerere_autoupdate=True,
+        commit_options=CommitOptions(signoff=True),
+    )
+    assert audit.manifest["status"] == "failed"
+    assert count.read_text().splitlines() == ["rejected"]
+    assert repo.resolver.calls == []
+    assert repo.git.operation_active()
+
+
+def test_autoupdate_flag_does_not_enable_disabled_rerere(repo):
+    repo.git.run("config", "rerere.enabled", "false")
+    audit = integrate(repo, "merge", rerere_autoupdate=True)
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert len(repo.resolver.calls) == 1
+    assert "native_resolutions" not in audit.manifest
+    assert repo.git.text("config", "--get", "rerere.enabled") == "false"
+
+
+def test_rerere_override_is_kept_across_multiple_rebase_steps(repo, mocker):
+    repo.git.run("config", "rerere.enabled", "true")
+    repo.git.run("config", "rerere.autoupdate", "false")
+    repo.file.write_text("second source\n")
+    repo.git.run("commit", "-am", "second source change")
+    original = repo.git.text("rev-parse", "HEAD")
+    resolve = repo.resolver.run
+
+    def distinct_resolutions(git, audit, round_number, paths, check):
+        repo.resolver.content = f"combined {round_number}\n"
+        return resolve(git, audit, round_number, paths, check)
+
+    mocker.patch.object(repo.resolver, "run", side_effect=distinct_resolutions)
+    first = integrate(repo, rerere_autoupdate=True)
+    assert first.manifest["status"] == "succeeded", first.manifest
+    assert len(repo.resolver.calls) == 2
+    repo.git.run("reset", "--hard", original)
+    repo.resolver.calls.clear()
+    second = integrate(repo, rerere_autoupdate=True)
+    assert second.manifest["status"] == "succeeded", second.manifest
+    assert repo.resolver.calls == []
+    assert repo.git.text("config", "--get", "rerere.autoupdate") == "false"
+    assert repo.file.read_text() == "combined 2\n"
+
+
 def test_invalid_validation_argument_is_a_recorded_failure(repo):
     repo.git.run("checkout", "-b", "behind", repo.base_oid)
     audit = integrate(repo, "merge", validation=(sys.executable, "-c", "print('ok')\0"))

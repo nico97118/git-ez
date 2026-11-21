@@ -433,6 +433,26 @@ def test_message_file_content_is_pinned_before_integration(cli_repo, monkeypatch
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+def test_explicit_rerere_policy_syntax(operation):
+    args = parser().parse_args([operation, "main", "--rerere-autoupdate", "--no-rerere-autoupdate"])
+    assert args.rerere_autoupdate is False
+    assert parser().parse_args([operation, "main"]).rerere_autoupdate is None
+
+
+@pytest.mark.integration
+def test_cli_rerere_policy_reaches_engine(cli_repo, monkeypatch):
+    import json
+
+    monkeypatch.chdir(cli_repo.path)
+    assert main(["merge", "main", "--no-rerere-autoupdate"]) == 0
+    directory = next((cli_repo.path / ".git/ez/runs").iterdir())
+    manifest = json.loads((directory / "run.json").read_text())
+    assert manifest["rerere_autoupdate"] is False
+    assert manifest["rerere_autoupdate_effective"] is False
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("source", ["message", "file"])
 def test_nul_message_is_rejected_before_configuration(tmp_path, mocker, capsys, source):
     config = mocker.patch("git_ez.cli.Config.from_git")

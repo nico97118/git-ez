@@ -107,6 +107,20 @@ git ez rebase main --gpg-sign --signoff
 git ez merge feature --verify-signatures
 ```
 
+Both operations accept `--rerere-autoupdate` / `--no-rerere-autoupdate`, overriding
+`rerere.autoupdate` for the whole run, including continuation, without changing
+stored Git configuration. This does not enable `rerere.enabled`.
+When enabled rerere reuses and stages a recorded resolution, git-ez records the
+native resolution and continues without calling the model for that conflict.
+With `--no-rerere-autoupdate`, Git may reuse file contents but leaves the index
+unmerged: git-ez sends those conflicts through its normal assisted resolution and
+validation before staging. The audit records requested and effective autoupdate.
+
+```sh
+git ez rebase main --rerere-autoupdate
+git ez merge feature --no-rerere-autoupdate
+```
+
 Native caller configuration is retained except for the explicit execution policies
 above and repository-redirection environment variables described under Limitations.
 For example, `git -C /path/to/project -c ez.model=another-model ez rebase main` uses

@@ -38,6 +38,7 @@ class Engine:
         onto: str | None = None,
         rebase_options: RebaseOptions | None = None,
         commit_options: CommitOptions | None = None,
+        rerere_autoupdate: bool | None = None,
     ) -> Audit:
         """Integrate into the current branch; preserve local state and evidence on failure."""
         if operation not in ("rebase", "merge"):
@@ -76,6 +77,7 @@ class Engine:
         if operation == "merge":
             audit.manifest["merge_ff"] = merge_ff
         audit.manifest["commit_options"] = asdict(commit_options)
+        audit.manifest["rerere_autoupdate"] = rerere_autoupdate
         try:
             self._integrate(audit, validation)
             self._record_result(audit)
@@ -183,10 +185,20 @@ class Engine:
         operation = audit.manifest["operation"]
         rebase_options = RebaseOptions(**audit.manifest.get("rebase_options", {}))
         commit_options = CommitOptions(**audit.manifest["commit_options"])
-        rerere = (
-            git.run("config", "--bool", "--get", "rerere.autoupdate", check=False).stdout.strip()
-            == b"true"
-        )
+        requested_rerere = audit.manifest["rerere_autoupdate"]
+        rerere = requested_rerere
+        rerere_config: tuple[str, ...] = ()
+        if requested_rerere is None:
+            rerere = (
+                git.run(
+                    "config", "--bool", "--get", "rerere.autoupdate", check=False
+                ).stdout.strip()
+                == b"true"
+            )
+        else:
+            # Scope the CLI override to every Git step, including continuation.
+            rerere_config = ("-c", f"rerere.autoupdate={'true' if rerere else 'false'}")
+        audit.manifest["rerere_autoupdate_effective"] = rerere
         auto_resolved = False
 
         def step(*args: str) -> subprocess.CompletedProcess[bytes]:
@@ -194,7 +206,8 @@ class Engine:
             previous_tree = git.run(
                 "rev-parse", "--verify", "AUTO_MERGE^{tree}", check=False
             ).stdout
-            result = git.run(*args, check=False)
+            command = (*rerere_config, *args)
+            result = git.run(*command, check=False)
             conflict_tree = git.run(
                 "rev-parse", "--verify", "AUTO_MERGE^{tree}", check=False
             ).stdout
@@ -202,7 +215,7 @@ class Engine:
             # an already resolved stop. Never retry a rejected hook implicitly.
             auto_resolved = rerere and bool(conflict_tree) and conflict_tree != previous_tree
             with (audit.directory / "integration.log").open("ab") as stream:
-                stream.write(("git " + " ".join(args) + "\n").encode())
+                stream.write(("git " + " ".join(command) + "\n").encode())
                 stream.write(result.stdout + result.stderr + b"\n")
             return result
 

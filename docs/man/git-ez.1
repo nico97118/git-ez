@@ -49,6 +49,14 @@ Valid model configuration is required even when no conflicts occur; no model
 call is made when Git resolves the operation without assistance.
 .SH OPTIONS
 .TP
+.B --rerere-autoupdate, --no-rerere-autoupdate
+Override rerere.autoupdate for the whole run, including continuation, without
+changing stored configuration. Does not enable rerere.enabled. Resolutions reused
+and staged by native rerere are audited and continued without a model call for
+that conflict. With --no-rerere-autoupdate, reused file contents still pass through
+assisted resolution and validation while the index remains unmerged. The audit
+records requested and effective autoupdate.
+.TP
 .B -m message, --message message
 Merge only. Supply the merge commit message. Repeat for additional paragraphs.
 Mutually exclusive with --file. Does not force a commit on fast-forward.

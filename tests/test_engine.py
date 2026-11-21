@@ -842,3 +842,78 @@ def test_binary_proposal_is_rejected_without_committing_it(repo):
     conflict = audit.manifest["conflicts"][0]
     assert conflict["status"] == "failed"
     assert (audit.directory / conflict["artifacts"]["proposed"]).read_bytes() == b"binary\0proposal"
+
+
+@pytest.mark.parametrize(
+    "policy,configuration,expected",
+    [
+        (None, None, "ff"),
+        (None, "false", "merge"),
+        (None, "only", "ff"),
+        ("ff", "false", "ff"),
+        ("no-ff", "only", "merge"),
+        ("ff-only", "false", "ff"),
+    ],
+)
+def test_merge_fast_forward_policy_overrides_configuration(repo, policy, configuration, expected):
+    repo.git.run("checkout", "-b", "behind", repo.base_oid)
+    if configuration is not None:
+        repo.git.run("config", "merge.ff", configuration)
+    audit = integrate(repo, "merge", merge_ff=policy)
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.manifest["merge_ff"] == policy
+    if expected == "ff":
+        assert repo.git.branch_oid("behind") == repo.parent_oid
+    else:
+        assert repo.git.text("rev-parse", "HEAD^1") == repo.base_oid
+        assert repo.git.text("rev-parse", "HEAD^2") == repo.parent_oid
+    assert not repo.git.operation_active()
+    assert repo.git.run("status", "--porcelain").stdout == b""
+    assert repo.resolver.calls == []
+    saved = json.loads((audit.directory / "run.json").read_text())
+    assert saved["merge_ff"] == policy
+    assert "Requested fast-forward policy" in (audit.directory / "report.md").read_text()
+
+
+@pytest.mark.parametrize("policy", [None, "ff", "no-ff", "ff-only"])
+def test_merge_policy_leaves_up_to_date_branch_unchanged(repo, policy):
+    audit = integrate(repo, "merge", target="HEAD", merge_ff=policy)
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert repo.resolver.calls == []
+
+
+@pytest.mark.parametrize("policy", ["ff", "no-ff"])
+def test_merge_policy_survives_conflict_continuation(repo, policy):
+    repo.git.run("config", "merge.ff", "only")
+    audit = integrate(repo, "merge", merge_ff=policy)
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.git.text("rev-parse", "HEAD^1") == repo.source_oid
+    assert repo.git.text("rev-parse", "HEAD^2") == repo.parent_oid
+    assert repo.file.read_text() == "combined\n"
+    assert len(repo.resolver.calls) == 1
+    assert not repo.git.operation_active()
+
+
+def test_ff_only_refusal_preserves_state_and_audits_failure(repo):
+    repo.git.run("config", "merge.ff", "false")
+    refs = repo.git.text("show-ref")
+    audit = integrate(repo, "merge", merge_ff="ff-only")
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["integrated"] is False
+    assert repo.git.text("show-ref") == refs
+    assert repo.file.read_text() == "source\n"
+    assert repo.git.run("status", "--porcelain").stdout == b""
+    assert not repo.git.operation_active()
+    assert repo.resolver.calls == []
+    assert audit.manifest["exit_state"] == "exit/files.json"
+    assert "--ff-only" in (audit.directory / "integration.log").read_text()
+    assert "--ff-only" in (audit.directory / "report.md").read_text()
+
+
+@pytest.mark.parametrize("operation,policy", [("rebase", "ff"), ("merge", "invalid")])
+def test_invalid_merge_policy_is_rejected_before_creating_audit(repo, operation, policy):
+    with pytest.raises(EzError, match="[Ff]ast-forward"):
+        integrate(repo, operation, merge_ff=policy)
+    assert not (repo.root / ".git/ez").exists()
+    assert repo.git.branch_oid("feature") == repo.source_oid

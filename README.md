@@ -33,6 +33,21 @@ Interactive rebase, `--onto`, `--autosquash`, `--rebase-merges`, merge `--squash
 For these workflows, use Git directly. git-ez cannot attach to an operation that was
 already started with Git.
 
+Merge accepts `--ff`, `--no-ff`, and `--ff-only`. An explicit policy overrides
+Git configuration; when repeated, the last policy wins. Without one, Git's
+configuration and defaults apply. `--ff` allows fast-forward and otherwise creates
+a merge commit. `--no-ff` creates a merge commit when integration is needed;
+an already up-to-date branch stays unchanged. `--ff-only` refuses divergent
+histories without calling the model or changing the checkout. These flags are
+not accepted by `git ez rebase`. Put them before `--check`, which consumes all
+remaining arguments. The requested policy is recorded in the audit and report.
+
+```sh
+git ez merge feature --no-ff
+git ez merge --ff-only origin/main
+git ez merge feature --ff --check python -B -m pytest
+```
+
 Native caller configuration is retained except for the explicit execution policies
 above and repository-redirection environment variables described under Limitations.
 For example, `git -C /path/to/project -c ez.model=another-model ez rebase main` uses

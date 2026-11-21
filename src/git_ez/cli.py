@@ -25,6 +25,19 @@ def parser() -> argparse.ArgumentParser:
             operation, help=f"Run a local {operation} with AI conflict resolution"
         )
         run.add_argument("target", help="Git revision to integrate into the current branch")
+        if operation == "merge":
+            for flag, help_text in (
+                ("ff", "Allow fast-forward; otherwise create a merge commit"),
+                ("no-ff", "Create a merge commit when integration is needed"),
+                ("ff-only", "Refuse integration unless fast-forward is possible"),
+            ):
+                run.add_argument(
+                    f"--{flag}",
+                    dest="merge_ff",
+                    action="store_const",
+                    const=flag,
+                    help=help_text + "; the last policy specified wins",
+                )
         run.add_argument(
             "--repo", type=Path, default=Path("."), help="Repository (default: current directory)"
         )
@@ -57,7 +70,12 @@ def main(argv: list[str] | None = None) -> int:
             raise EzError("--check requires an executable")
         config = Config.from_git(args.repo)
         engine = Engine(args.repo, config)
-        audit = engine.run(args.target, args.command, validation=tuple(args.check or ()))
+        audit = engine.run(
+            args.target,
+            args.command,
+            validation=tuple(args.check or ()),
+            merge_ff=getattr(args, "merge_ff", None),
+        )
         print(f"Status: {audit.manifest['status']}")
         print(f"Report: {audit.directory / 'report.md'}")
         print(f"Branch: {audit.manifest['branch']}")

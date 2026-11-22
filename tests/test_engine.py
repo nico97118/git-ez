@@ -1679,3 +1679,38 @@ def test_autosquash_sequence_is_checked_after_final_validation(repo):
     assert audit.manifest["validation"]["returncode"] == 0
     assert audit.manifest["rebase_sequence"]["status"] == "unavailable"
     assert "sequence capture is unavailable" in audit.manifest["error"]
+
+
+@pytest.mark.parametrize("artifact", ["rebase-todo.txt", "rebase-todo.txt.sha256"])
+def test_autosquash_rejects_evidence_replaced_by_post_rewrite_hook(repo, artifact):
+    autosquash_series(repo)
+    hook = repo.root / ".git/hooks/post-rewrite"
+    hook.write_text(
+        f"#!/bin/sh\nfor evidence in .git/ez/runs/*/{artifact}; "
+        'do printf "noop\\n" > "$evidence"; done\n'
+    )
+    hook.chmod(0o755)
+    audit = integrate(repo, rebase_options=RebaseOptions(autosquash=True))
+    assert audit.manifest["status"] == "failed", audit.manifest
+    assert audit.manifest["integrated"]
+    assert not repo.git.operation_active()
+    assert audit.manifest["rebase_sequence"]["status"] == "unavailable"
+    assert "sequence changed" in audit.manifest["rebase_sequence"]["error"]
+    saved = json.loads((audit.directory / "run.json").read_text())
+    assert saved["status"] == "failed"
+    assert "sequence capture is unavailable" in (audit.directory / "report.md").read_text()
+
+
+def test_autosquash_fingerprint_is_checked_after_final_validation(repo):
+    autosquash_series(repo)
+    command = (
+        sys.executable,
+        "-c",
+        "from pathlib import Path; "
+        "[p.write_text('0' * 64) for p in Path('.git/ez/runs').glob('*/rebase-todo.txt.sha256')]",
+    )
+    audit = integrate(repo, validation=command, rebase_options=RebaseOptions(autosquash=True))
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["integrated"]
+    assert audit.manifest["validation"]["returncode"] == 0
+    assert "fingerprint changed" in audit.manifest["rebase_sequence"]["error"]

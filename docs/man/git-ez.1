@@ -63,6 +63,8 @@ unsupported. Hooks and signing are retained.
 .PP
 The audit captures rebase-todo.txt before replay. A failed or over-limit capture
 stops Git before replay; missing evidence prevents overall success after completion.
+The capture editor records rebase-todo.txt.sha256 before replay. Changes to the
+sequence or fingerprint, including from Git hooks, make the run fail.
 rebase-commits.log records final commits and messages with explicit truncation at
 ez.maxFileBytes. Local state and available evidence are preserved on failure.
 .TP

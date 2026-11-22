@@ -246,6 +246,7 @@ class Engine:
                 sequence = audit.directory / "rebase-todo.txt"
                 audit.manifest["rebase_sequence"] = {
                     "artifact": sequence.name,
+                    "digest_artifact": sequence.name + ".sha256",
                     "status": "pending",
                     "limit_bytes": self.config.max_file_bytes,
                 }
@@ -275,12 +276,17 @@ class Engine:
                         content = read_regular(
                             audit.directory / evidence["artifact"], self.config.max_file_bytes
                         )
+                        digest = read_regular(
+                            audit.directory / evidence["digest_artifact"], 64
+                        ).decode("ascii")
+                        if hashlib.sha256(content).hexdigest() != digest:
+                            raise ValueError("Captured sequence changed before Git returned")
                     except (OSError, ValueError) as exc:
                         evidence.update(status="unavailable", error=str(exc))
                     else:
                         evidence.update(
                             status="captured",
-                            sha256=hashlib.sha256(content).hexdigest(),
+                            sha256=digest,
                             size_bytes=len(content),
                         )
                     audit.save()
@@ -373,6 +379,9 @@ class Engine:
             )
             if hashlib.sha256(content).hexdigest() != evidence["sha256"]:
                 raise EzError("Captured sequence changed during rebase continuation")
+            digest = read_regular(audit.directory / evidence["digest_artifact"], 64).decode("ascii")
+            if digest != evidence["sha256"]:
+                raise EzError("Captured sequence fingerprint changed during rebase continuation")
         except (EzError, OSError, ValueError) as exc:
             evidence.update(status="unavailable", error=str(exc))
             raise EzError(

@@ -4,6 +4,7 @@
 """Capture Git's generated rebase sequence without changing its instructions."""
 
 import argparse
+import hashlib
 import os
 import shlex
 import stat
@@ -27,10 +28,16 @@ def read_regular(path: Path, limit: int) -> bytes:
 
 def capture_sequence(source: Path, destination: Path, limit: int) -> None:
     content = read_regular(source, limit)
-    temporary = destination.with_name(destination.name + ".tmp")
-    with temporary.open("xb") as stream:
-        stream.write(content)
-    temporary.replace(destination)
+    digest = destination.with_name(destination.name + ".sha256")
+    # Record the initial fingerprint before returning control to Git's replay and hooks.
+    for path, data in (
+        (destination, content),
+        (digest, hashlib.sha256(content).hexdigest().encode()),
+    ):
+        temporary = path.with_name(path.name + ".tmp")
+        with temporary.open("xb") as stream:
+            stream.write(data)
+        temporary.replace(path)
 
 
 def editor_command(destination: Path, limit: int) -> str:

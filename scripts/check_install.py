@@ -118,6 +118,8 @@ def main() -> None:
                     raise RuntimeError("Installed autosquash lost the fixup content")
                 if "fixup " not in (audits[0] / "rebase-todo.txt").read_text():
                     raise RuntimeError("Installed autosquash did not capture its sequence")
+                if not (audits[0] / "rebase-todo.txt.sha256").is_file():
+                    raise RuntimeError("Installed autosquash did not capture its fingerprint")
                 if not (audits[0] / "rebase-commits.log").is_file():
                     raise RuntimeError("Installed autosquash did not capture commit messages")
         print(

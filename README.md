@@ -80,6 +80,8 @@ Interactive editing and arbitrary todo instructions remain unsupported.
 The audit retains `rebase-todo.txt` before any replay. If the complete sequence
 cannot be captured within `ez.maxFileBytes`, Git stops before replay. Missing
 sequence evidence prevents overall success, even if integration has completed.
+The capture editor also writes `rebase-todo.txt.sha256` before replay; changes to
+the sequence or its fingerprint, including from Git hooks, make the run fail.
 `rebase-commits.log` records the resulting commits and messages; any truncation
 at `ez.maxFileBytes` is explicit in the manifest and report. Failures preserve the
 actual local state and available evidence for inspection and native recovery.

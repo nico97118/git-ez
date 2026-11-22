@@ -83,11 +83,9 @@ def main() -> None:
             str(python),
             "-I",
             "-c",
-            "import importlib.util; from importlib.resources import files; "
+            "import importlib.util; "
             "assert importlib.util.find_spec('sqlite_vec') is None; "
-            "root = files('git_ez._vendor.langgraph_sqlite'); "
-            "assert 'Copyright (c) 2024 LangChain' in root.joinpath('LICENSE').read_text(); "
-            "assert root.joinpath('UPSTREAM.json').is_file()",
+            "assert importlib.util.find_spec('langgraph.checkpoint.sqlite') is None",
         )
         if not run("git", "ez", "--version").startswith("git-ez "):
             raise RuntimeError("Installed Git extension did not report its version")

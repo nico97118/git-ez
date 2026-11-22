@@ -83,10 +83,14 @@ group again. Packaging commands omit `--group` to select runtime dependencies.
 FreeBSD CI targets 15.1 amd64/Python 3.12 only. ARM64 emulation is excluded from
 the PR, scheduled, and manual jobs after a cold dependency build exceeded the
 90-minute limit before reaching the tests.
-Native VM validation passed all 551 tests on 16.0-CURRENT arm64/Python 3.12.14;
-this historical result does not establish 15.1 ARM64 support. Earlier 14.4 amd64
-CI also passed all 551 tests; the 15.1 amd64 target needs its own successful run.
-Models and HTTP/TLS servers used by the tests are deterministic and local; no external LLM is called.
+The in-memory checkpoint experiment passed all 554 tests on macOS. Focused
+native validation passed 134 agent/CLI tests and isolated installed-wheel/manual
+checks on FreeBSD 16.0-CURRENT arm64 with Python 3.12.14. This is not a complete
+FreeBSD suite or a validation of the 15.1 amd64 CI target. A separate abrupt
+process-exit probe confirmed that agent files and completed tool events survive
+without final cleanup; final messages and session status are unavailable in that
+case. Models and HTTP/TLS servers used by the tests are deterministic and local;
+no external LLM is called.
 
 ## Required checks
 
@@ -132,7 +136,7 @@ FreeBSD uploads combined coverage XML and a JUnit report for the complete suite.
 Coverage measures exercised code paths; it does not establish resolution correctness.
 Critical tests assert committed file contents, reference ancestry, retained local state,
 and recorded audit evidence. Controlled fault injection covers input-reference races,
-audit write failures, and provider errors, including checkpoint redaction. Scripted
+audit write failures, and provider errors, including error redaction. Scripted
 model replies validate orchestration and protocol behavior, not the quality of a real
 model's decisions or every possible concurrent filesystem change.
 

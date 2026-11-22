@@ -62,8 +62,9 @@ included in the main dependencies.
 FreeBSD CI targets 15.1 amd64 with Python 3.12. This experimental target validates
 installation and usage on one architecture; ARM64 is not part of the CI scope.
 
-Earlier FreeBSD 14.4 amd64 CI validation passed all 551 tests, installed-wheel
-checks, and manual discovery. The 15.1 amd64 target needs its own successful run.
+The in-memory checkpoint runtime is experimental on this branch and requires
+its own FreeBSD 15.1 amd64 CI validation; earlier CI results cover the previous
+runtime.
 
 Install the system interpreter, its SQLite module, and the toolchain needed to
 build Python dependencies that have no FreeBSD wheels:
@@ -84,9 +85,9 @@ git help ez
 
 For a local checkout, replace the Git URL with `.`. Save the exports in your
 shell profile (these examples use POSIX shell syntax). No system Python packages
-need to be exposed to the tool environment. `sqlite-vec` is not required: git-ez
-bundles the synchronous SQLite checkpoint adapter, with its original MIT license,
-without the unrelated vector store. SQLite audit checkpoints are retained.
+need to be exposed to the tool environment. Neither `sqlite-vec` nor a SQLite
+checkpoint adapter is required. Graph checkpoints stay in memory during each
+agent session; durable audit events and agent files are stored separately.
 
 For development prerequisites and the FreeBSD-specific Ruff warning, see
 [Contributing on FreeBSD](CONTRIBUTING.md#freebsd). Ruff is not required at runtime.
@@ -487,10 +488,15 @@ and input references, among other invariants. Hooks, commit signing, rerere, and
 Git settings are respected. If rerere reuses and stages a resolution, that decision is
 recorded without an AI call. Hook and signing failures are not bypassed.
 
-The Deep Agents runtime provides local tools, context management, and SQLite checkpoints.
-Session `runtime.json` records the installed dependency versions and the bundled
-checkpoint adapter's upstream version. Its provenance and MIT license are included
-in the installed package; see [licensing](docs/licensing.md).
+The Deep Agents runtime provides local tools, context management, and in-memory
+graph checkpoints. Session `runtime.json` records dependency versions and the
+checkpoint storage mode. No graph checkpoints are saved for inspection or restart.
+Model/tool events are written progressively to `events.jsonl`; offloaded history
+and agent files are written directly to the session's `agent-files/` directory.
+These artifacts survive independently of graph state. They do not represent every
+internal graph state or pending task. Abrupt process termination can leave an
+incomplete event or file and skips final messages, worktree snapshots, and status
+updates; inspect the artifacts already written and the actual Git state.
 Delegation is disabled. Offloaded history is stored separately from the repository.
 The model receives explicit base/ours/theirs semantics for the Git strategy in use.
 Tools execute on the host; their output is sent to the configured model.
@@ -527,7 +533,7 @@ Traces are stored in the target repository's common Git directory:
     proposed.txt / resolution.diff
   sessions/0001/
     runtime.json / mission.json
-    checkpoints.sqlite
+    agent-files/             # Agent files and offloaded history, outside the worktree
     events.jsonl / messages.json / decision.json
     worktree.diff / staged.diff
     files.json / files/*.bin
@@ -579,8 +585,10 @@ git rebase --abort
 
 If Git already completed and only final validation failed, there is no active operation
 to continue or abort: inspect the resulting commit and validation output.
-There is no agent session resume command:
-checkpoints are for inspection. Pushing remains the user's decision.
+There is no agent session resume command. In-memory checkpoints disappear when
+the process exits; inspect the durable audit artifacts instead. Historical SQLite
+checkpoint files from earlier runs remain on disk and are not migrated or deleted.
+Pushing remains the user's decision.
 
 ## Contributing
 

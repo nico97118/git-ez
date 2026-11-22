@@ -34,7 +34,6 @@ consequence and clarify the intended change before implementing it.
 - `git.py`, `engine.py`, `checks.py`: Git execution, integration lifecycle, and guards.
 - `conflicts.py`: conflict evidence and resolution decisions.
 - `agent.py`, `agent_runtime.py`, `llm.py`: resolver contract, agent runtime, providers.
-- `_vendor/langgraph_sqlite/`: synchronous upstream SQLite checkpoint adapter (MIT).
 - `audit.py`: persistent evidence and reports.
 - `probe.py`: provider connectivity diagnostics.
 - `tests/`: pytest tests, temporary repositories, deterministic resolvers, and local
@@ -127,11 +126,9 @@ the intermittent jemalloc assertion observed on the native arm64 VM; see the
 FreeBSD section of CONTRIBUTING.md for prerequisites and the documented tool
 execution override.
 
-The synchronous SQLite checkpoint adapter is vendored under
-`src/git_ez/_vendor/langgraph_sqlite/` with upstream MIT licensing and provenance.
-Keep upstream changes bounded and documented in `UPSTREAM.json`; do not apply
-project GPL notices or unrelated formatting to third-party files. See
-`docs/licensing.md` for the update and validation requirements.
+Agent graph checkpoints are in memory only. Preserve progressive audit events
+and the session's `agent-files/` directory independently of graph state. Do not
+claim crash recovery or a complete graph history from these audit artifacts.
 
 - Mark every test with exactly one of `unit` or `integration`; use the existing
   module markers where applicable. Unit tests do not start Git, model runtimes, or

@@ -17,7 +17,7 @@ from deepagents import (
     create_deep_agent,
     register_harness_profile,
 )
-from deepagents.backends import CompositeBackend, LocalShellBackend, StateBackend
+from deepagents.backends import CompositeBackend, FilesystemBackend, LocalShellBackend
 from langchain.agents.middleware import (
     AgentMiddleware,
     ModelCallLimitMiddleware,
@@ -27,9 +27,9 @@ from langchain.agents.middleware.types import ToolCallRequest, hook_config
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, ToolMessage, messages_to_dict
 from langchain_core.tools import tool
+from langgraph.checkpoint.memory import InMemorySaver
 from langsmith import tracing_context
 
-from ._vendor.langgraph_sqlite import SqliteSaver
 from .agent import AGENT_PROMPT
 from .audit import Audit, now, write_json
 from .checks import GitStateChanged, WorktreeChecks
@@ -254,7 +254,8 @@ def run_agent(
                 "langgraph-checkpoint",
             )
         },
-        "checkpoint_adapter": {"source": "vendored", "upstream_version": "3.1.3"},
+        "checkpoints": {"storage": "memory", "resumable": False},
+        "agent_files": "agent-files/",
         "provider": config.provider,
         "model": config.model,
         "model_context_tokens": config.model_context_tokens,
@@ -279,9 +280,14 @@ def run_agent(
         )
 
         # Deep Agents offloads history/large results without polluting the project or git add -A.
+        (directory / "agent-files").mkdir()
         backend = CompositeBackend(
             default=shell,
-            routes={"/.ez-agent/": StateBackend()},
+            routes={
+                "/.ez-agent/": FilesystemBackend(
+                    root_dir=directory / "agent-files", virtual_mode=True
+                )
+            },
             artifacts_root="/.ez-agent",
         )
 
@@ -309,39 +315,36 @@ def run_agent(
             mission["rebase_base_sha"] = audit.manifest["rebase_plan"]["base_oid"]
             mission["replay_boundary_sha"] = audit.manifest["rebase_plan"]["selection_oid"]
         write_json(directory / "mission.json", mission)
-        with SqliteSaver.from_conn_string(str(directory / "checkpoints.sqlite")) as saver:
-            agent = create_deep_agent(
-                model=model,
-                backend=backend,
-                system_prompt=AGENT_PROMPT,
-                tools=[finish],
-                middleware=[
-                    IntegrationMiddleware(config, guard, log, lambda: bool(decision)),
-                    ModelCallLimitMiddleware(
-                        run_limit=config.agent_max_turns, exit_behavior="error"
-                    ),
-                    ToolCallLimitMiddleware(
-                        run_limit=config.agent_max_tool_calls, exit_behavior="error"
-                    ),
-                ],
-                checkpointer=saver,
+        agent = create_deep_agent(
+            model=model,
+            backend=backend,
+            system_prompt=AGENT_PROMPT,
+            tools=[finish],
+            middleware=[
+                IntegrationMiddleware(config, guard, log, lambda: bool(decision)),
+                ModelCallLimitMiddleware(run_limit=config.agent_max_turns, exit_behavior="error"),
+                ToolCallLimitMiddleware(
+                    run_limit=config.agent_max_tool_calls, exit_behavior="error"
+                ),
+            ],
+            checkpointer=InMemorySaver(),
+        )
+        # Traces stay local even if this machine has global LangSmith settings.
+        with tracing_context(enabled=False):
+            result = agent.invoke(
+                {"messages": [{"role": "user", "content": json.dumps(mission)}]},
+                config={
+                    "configurable": {"thread_id": f"{audit.manifest['id']}-{round_number}"},
+                    "callbacks": [log],
+                    "recursion_limit": config.agent_max_turns * 20 + 100,
+                    "max_concurrency": 1,
+                },
             )
-            # Traces stay local even if this machine has global LangSmith settings.
-            with tracing_context(enabled=False):
-                result = agent.invoke(
-                    {"messages": [{"role": "user", "content": json.dumps(mission)}]},
-                    config={
-                        "configurable": {"thread_id": f"{audit.manifest['id']}-{round_number}"},
-                        "callbacks": [log],
-                        "recursion_limit": config.agent_max_turns * 20 + 100,
-                        "max_concurrency": 1,
-                    },
-                )
-            guard()
-            if not decision:
-                raise EzError("Deep Agents stopped without a verified finish decision")
-            session.update(status="resolved", **decision)
-            return decision
+        guard()
+        if not decision:
+            raise EzError("Deep Agents stopped without a verified finish decision")
+        session.update(status="resolved", **decision)
+        return decision
     except BaseException as exc:
         if session["status"] == "running":
             session["status"] = "failed"
@@ -362,7 +365,7 @@ def run_agent(
         write_json(
             directory / "messages.json", messages_to_dict(result.get("messages", log.messages))
         )
-        # Callbacks + checkpoints retain the full trajectory even when invoke raises.
+        # Events and offloaded files persist independently of in-memory graph state.
         log.event("session_finished", status=session["status"])
         audit.save()
         if capture_failure is not None:

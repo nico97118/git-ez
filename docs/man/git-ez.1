@@ -259,3 +259,19 @@ git ez rebase main --check python -B -m pytest
 .BR git-merge (1)
 .PP
 https://github.com/nico97118/git-ez
+.SH INTERACTIVE PROPOSAL REVIEW
+.B --interactive
+is supported for merge and rebase. Review each harness proposal before engine
+staging: accept, revise with feedback, or stop. This is not Git's interactive
+rebase sequence editor. Revisions retain current proposed files and require fresh
+approval. Invalid input, EOF and interruption never accept.
+.PP
+The display includes diffs, captured contents and capture limits, rationale and
+agent-reported checks and uncertainties. Final validation runs later. Approval
+still requires engine checks; changes during review invalidate approval.
+Each proposal, feedback and decision is retained in the audit separately from
+application. Stop preserves files, the index and the active operation for native
+Git inspection, continuation or abort. No rollback is performed.
+.PP
+No conflicts means no prompt or model call. Resolutions already staged by rerere
+autoupdate do not pass through harness review.

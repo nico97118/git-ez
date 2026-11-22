@@ -2200,3 +2200,192 @@ def test_merge_log_limits_multiple_incoming_subjects(repo, limit):
     assert ("  third incoming" in message) is (limit > 0)
     assert ("  second incoming" in message) is (limit > 1)
     assert ("  parent change" in message) is (limit > 1)
+
+
+@pytest.mark.parametrize("operation", ["merge", "rebase"])
+@pytest.mark.parametrize("choice", ["accept", "stop", "eof", "interrupt", "revise"])
+def test_interactive_review_preserves_or_applies_proposals(repo, mocker, operation, choice):
+    answers = iter(
+        ["r", "add a test", "r", "keep both intentions", "a"]
+        if choice == "revise"
+        else ["a" if choice == "accept" else "s"]
+    )
+    observed = []
+    original = repo.resolver.run
+
+    def resolve(git, audit, number, paths, check):
+        observed.append((repo.file.read_text(), audit.manifest["reviews"][-1]["feedback"]))
+        return original(git, audit, number, paths, check)
+
+    repo.resolver.run = resolve
+
+    def read(prompt):
+        assert repo.git.run("ls-files", "-u").stdout
+        if choice == "eof":
+            raise EOFError
+        if choice == "interrupt":
+            raise KeyboardInterrupt
+        return next(answers)
+
+    mocker.patch("builtins.input", side_effect=read)
+    audit = Engine(repo.root, repo.config, repo.resolver).run("main", operation, interactive=True)
+    success = choice in ("accept", "revise")
+    assert (audit.manifest["status"] == "succeeded") == success, audit.manifest
+    assert bool(repo.git.run("ls-files", "-u").stdout) != success
+    assert repo.file.read_text() == "combined\n"
+    reviews = audit.manifest["reviews"]
+    assert len(reviews) == (3 if choice == "revise" else 1)
+    for proposal in reviews:
+        assert (audit.directory / proposal["artifacts"] / "files.json").is_file()
+    if choice == "revise":
+        assert observed[1:] == [
+            ("combined\n", "add a test"),
+            ("combined\n", "keep both intentions"),
+        ]
+
+
+def test_interactive_review_rechecks_state(repo, mocker):
+    def read(prompt):
+        repo.git.run("update-ref", "refs/heads/main", repo.base_oid)
+        return "a"
+
+    mocker.patch("builtins.input", side_effect=read)
+    audit = Engine(repo.root, repo.config, repo.resolver).run("main", interactive=True)
+    assert audit.manifest["status"] == "failed"
+    assert repo.git.run("ls-files", "-u").stdout
+
+
+@pytest.mark.parametrize("mutation", ["file", "index"])
+def test_interactive_review_rejects_concurrent_edits(repo, mocker, mutation):
+    def read(prompt):
+        if mutation == "file":
+            repo.file.write_text("changed during review\n")
+        else:
+            repo.git.run("add", "file.txt")
+        return "a"
+
+    mocker.patch("builtins.input", side_effect=read)
+    audit = Engine(repo.root, repo.config, repo.resolver).run("main", interactive=True)
+    assert audit.manifest["status"] == "failed"
+    assert "changed during review" in audit.manifest["error"]
+    assert repo.git.rebase_active()
+
+
+@pytest.mark.parametrize("operation", ["merge", "rebase"])
+def test_interactive_without_conflict_never_prompts(repo, mocker, operation):
+    prompt = mocker.patch("builtins.input", side_effect=AssertionError("Unexpected prompt"))
+    audit = Engine(repo.root, repo.config, repo.resolver).run("HEAD", operation, interactive=True)
+    assert audit.manifest["status"] == "succeeded"
+    assert not repo.resolver.calls
+    prompt.assert_not_called()
+
+
+def test_interactive_acceptance_does_not_bypass_confidence(repo, mocker):
+    repo.resolver.confidence = 0.01
+    mocker.patch("builtins.input", return_value="a")
+    audit = Engine(repo.root, repo.config, repo.resolver).run("main", interactive=True)
+    assert audit.manifest["status"] == "failed"
+    assert repo.git.run("ls-files", "-u").stdout
+    assert audit.manifest["reviews"][0]["decision"] == "accept"
+
+
+def test_interactive_multiple_rebase_stops(repo, mocker):
+    repo.file.write_text("source second\n")
+    repo.git.run("commit", "-am", "second change")
+    mocker.patch("builtins.input", side_effect=["r", "revise first", "a", "a"])
+    audit = Engine(repo.root, repo.config, repo.resolver).run("main", interactive=True)
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert [r["round"] for r in audit.manifest["reviews"]] == [1, 1, 2]
+
+
+@pytest.mark.parametrize(
+    ("operation", "previous_stop"), [("merge", False), ("rebase", False), ("rebase", True)]
+)
+@pytest.mark.parametrize("ending", ["stop", "eof", "interrupt", "resolver_error"])
+def test_interactive_failed_revision_links_latest_session(
+    repo, mocker, operation, ending, previous_stop
+):
+    if previous_stop:
+        repo.file.write_text("source second\n")
+        repo.git.run("commit", "-am", "second change")
+    original = repo.resolver.run
+    indices = []
+    heads = []
+    failing_round = 2 if previous_stop else 1
+
+    def resolve(git, audit, number, paths, check):
+        review = audit.manifest["reviews"][-1]
+        directory = audit.directory / "sessions" / f"{number:04d}"
+        directory.mkdir(parents=True)
+        (directory / "messages.json").write_text(json.dumps([f"attempt {number}"]))
+        (directory / "files.json").write_text(json.dumps({"attempt": number}))
+        audit.manifest.setdefault("sessions", []).append(
+            {
+                "round": number,
+                "artifacts": f"sessions/{number:04d}",
+                "tool_calls": 0,
+                "runtime": "deterministic test resolver",
+                "status": "failed",
+                "rationale": f"attempt {number}",
+                "confidence": 0.95,
+            }
+        )
+        if review["round"] == failing_round:
+            indices.append(git.run("ls-files", "--stage", "-z").stdout)
+            heads.append(git.text("rev-parse", "HEAD"))
+        result = original(git, audit, number, paths, check)
+        if review["feedback"] and ending == "resolver_error":
+            raise EzError("Revision resolver failed")
+        return result
+
+    repo.resolver.run = resolve
+    answers = iter((["a"] if previous_stop else []) + ["r", "revise this proposal", "s"])
+
+    def read(prompt):
+        if len(indices) == 2:
+            if ending == "eof":
+                raise EOFError
+            if ending == "interrupt":
+                raise KeyboardInterrupt
+        return next(answers)
+
+    mocker.patch("builtins.input", side_effect=read)
+    audit = Engine(repo.root, repo.config, repo.resolver).run("main", operation, interactive=True)
+    assert audit.manifest["status"] == ("interrupted" if ending == "interrupt" else "failed")
+    latest = 3 if previous_stop else 2
+    record = audit.manifest["conflicts"][-1]
+    assert record["artifacts"]["session"] == f"sessions/{latest:04d}/messages.json"
+    assert record["artifacts"]["files"] == f"sessions/{latest:04d}/files.json"
+    assert record["resolution"]["rationale"] == f"attempt {latest}"
+    assert record["status"] == ("interrupted" if ending == "interrupt" else "failed")
+    if previous_stop:
+        assert (
+            audit.manifest["conflicts"][0]["artifacts"]["session"] == "sessions/0001/messages.json"
+        )
+    assert len(audit.manifest["reviews"]) == latest
+    for review in audit.manifest["reviews"]:
+        assert (audit.directory / review["artifacts"] / "files.json").is_file()
+        assert (audit.directory / review["artifacts"] / "worktree.diff").is_file()
+    assert indices[0] == indices[1] == repo.git.run("ls-files", "--stage", "-z").stdout
+    assert heads[0] == heads[1] == repo.git.text("rev-parse", "HEAD")
+    assert repo.git.run("ls-files", "-u").stdout
+    if operation == "rebase":
+        assert repo.git.rebase_active()
+    else:
+        assert repo.git.text("rev-parse", "MERGE_HEAD") == repo.parent_oid
+    assert repo.file.read_text() == "combined\n"
+
+
+@pytest.mark.parametrize("operation", ["merge", "rebase"])
+def test_interactive_rerere_autoupdate_never_prompts(repo, mocker, operation):
+    repo.git.run("config", "rerere.enabled", "true")
+    first = integrate(repo, operation, rerere_autoupdate=True)
+    assert first.manifest["status"] == "succeeded"
+    repo.git.run("reset", "--hard", repo.source_oid)
+    repo.resolver.calls.clear()
+    mocker.patch("builtins.input", side_effect=AssertionError("Unexpected prompt"))
+    second = Engine(repo.root, repo.config, repo.resolver).run(
+        "main", operation, rerere_autoupdate=True, interactive=True
+    )
+    assert second.manifest["status"] == "succeeded", second.manifest
+    assert not repo.resolver.calls

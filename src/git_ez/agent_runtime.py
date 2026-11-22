@@ -293,6 +293,14 @@ def run_agent(
             "validation_command": shlex.join(check) if check else None,
             "task": "Investigate and resolve this Git integration using your tools.",
         }
+        if audit.manifest.get("interactive"):
+            review = audit.manifest["reviews"][-1]
+            mission["review_round"] = review["round"]
+            mission["user_feedback"] = review["feedback"]
+            mission["revision_instruction"] = (
+                "Revise the current worktree proposal using user_feedback; do not restore "
+                "the initial conflict markers. Explain checks performed and uncertainties."
+            )
         if "onto_oid" in audit.manifest:
             mission["onto_sha"] = audit.manifest["onto_oid"]
         if "rebase_plan" in audit.manifest:

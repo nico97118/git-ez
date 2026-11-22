@@ -544,3 +544,33 @@ def test_resolver_mission_distinguishes_upstream_from_result_base(repo):
     assert mission["target_sha"] == boundary
     assert mission["rebase_base_sha"] == repo.parent
     assert mission["replay_boundary_sha"] == boundary
+
+
+def test_interactive_revisions_reach_runtime_and_keep_separate_sessions(repo, mocker):
+    import json
+
+    model = ScriptedModel(
+        turns=[
+            [command("from pathlib import Path; Path('file.txt').write_text('first\\n')")],
+            [tool("finish", rationale="First proposal; no tests run", confidence=0.95)],
+            [
+                command(
+                    "from pathlib import Path; assert Path('file.txt').read_text() == 'first\\n'; "
+                    "Path('file.txt').write_text('combined\\n')"
+                )
+            ],
+            [tool("finish", rationale="Revised current proposal; no tests run", confidence=0.95)],
+        ],
+        profile={"max_input_tokens": 32768, "tool_calling": True},
+    )
+    mocker.patch("git_ez.agent_runtime.create_chat_model", return_value=model)
+    mocker.patch("builtins.input", side_effect=["r", "preserve both intentions", "a"])
+    audit = Engine(repo.root, repo.config).run("main", interactive=True)
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert len(audit.manifest["sessions"]) == 2
+    for number in (1, 2):
+        assert (audit.directory / "sessions" / f"{number:04d}" / "messages.json").is_file()
+    mission = json.loads((audit.directory / "sessions/0002/mission.json").read_text())
+    assert mission["user_feedback"] == "preserve both intentions"
+    assert mission["review_round"] == 1
+    assert (audit.directory / "proposals/0001/files/0001.bin").read_text() == "first\n"

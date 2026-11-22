@@ -67,6 +67,9 @@ def parser() -> argparse.ArgumentParser:
         run = commands.add_parser(
             operation, help=f"Run a local {operation} with AI conflict resolution"
         )
+        run.add_argument(
+            "--interactive", action="store_true", help="Review each agent proposal before staging"
+        )
         run.add_argument("target", help="Git revision to integrate into the current branch")
         run.add_argument(
             "--gpg-sign",
@@ -224,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             commit_options=commit_options,
             rerere_autoupdate=args.rerere_autoupdate,
+            interactive=args.interactive,
         )
         print(f"Status: {audit.manifest['status']}")
         print(f"Report: {audit.directory / 'report.md'}")

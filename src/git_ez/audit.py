@@ -290,7 +290,7 @@ class Audit:
                 f"- [Worktree diff]({folder}/worktree.diff)",
                 f"- [File state, including new files]({folder}/files.json)",
             ]
-            if session["status"] == "resolved":
+            if (self.directory / folder / "staged.diff").is_file():
                 lines += [
                     f"- [Full staged diff]({folder}/staged.diff)",
                 ]
@@ -304,6 +304,20 @@ class Audit:
             if session.get("capture_error"):
                 lines.append(f"Capture failed: {session['capture_error']}")
             lines.append("")
+        for review in data.get("reviews", []):
+            folder = review["artifacts"]
+            lines += [
+                f"## Proposal {review['attempt']} (conflict stop {review['round']})",
+                "",
+                f"- Status: {review['status']}",
+                f"- User decision: {review.get('decision', 'unavailable')}",
+                f"- Feedback: {review.get('user_feedback') or '—'}",
+                f"- [Proposal diff]({folder}/worktree.diff)",
+                f"- [File contents and capture limits]({folder}/files.json)",
+                f"- Rationale: {review.get('resolution', {}).get('rationale', 'unavailable')}",
+                "- Acceptance authorizes engine checks; application is recorded separately.",
+                "",
+            ]
         for native in data.get("native_resolutions", []):
             lines += ["## Reused Git resolution", "", native["rationale"], ""]
         lines += ["## Git traces", "", "- [Integration log](integration.log)"]

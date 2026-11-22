@@ -1795,16 +1795,37 @@ def test_pinned_selection_matches_native_rebase(
 
 
 @pytest.mark.parametrize(
-    "configured,requested,enabled", [(True, None, True), (False, True, True), (True, False, False)]
+    "keep,configured,requested,enabled",
+    [
+        (False, True, None, False),
+        (True, True, None, False),
+        (False, False, None, False),
+        (True, False, None, False),
+        (False, False, True, True),
+        (True, False, True, True),
+        (False, True, False, False),
+        (True, True, False, False),
+    ],
 )
-@pytest.mark.parametrize("keep", [False, True])
-def test_fork_point_cli_overrides_native_configuration(repo, configured, requested, enabled, keep):
+def test_fork_point_defaults_and_cli_match_native_configuration(
+    repo, configured, requested, enabled, keep
+):
     history = selection_history(repo, diverged=False, equivalent=False)
     repo.git.run("config", "rebase.forkPoint", str(configured).lower())
+    repo.git.run("checkout", "-b", "native-configured", history.before)
+    flags = ("--keep-base",) if keep else ()
+    if requested is not None:
+        flags += ("--fork-point" if requested else "--no-fork-point",)
+    repo.git.run("rebase", "--merge", "--no-autostash", "--no-update-refs", *flags, "upstream")
+    expected_tree = repo.git.text("rev-parse", "HEAD^{tree}")
+    expected_messages = repo.git.text("log", "--format=%B%x00", f"{history.target}..HEAD")
+    repo.git.run("checkout", "selection-topic")
     audit = integrate(
         repo, target="upstream", rebase_options=RebaseOptions(fork_point=requested, keep_base=keep)
     )
     assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.git.text("rev-parse", "HEAD^{tree}") == expected_tree
+    assert repo.git.text("log", "--format=%B%x00", f"{history.target}..HEAD") == expected_messages
     assert audit.manifest["rebase_plan"]["fork_point"]["enabled"] is enabled
     assert repo.git.text("rev-list", "--count", f"{history.target}..HEAD") == (
         "2" if enabled else "3"

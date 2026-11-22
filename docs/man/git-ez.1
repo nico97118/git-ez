@@ -57,8 +57,10 @@ The upstream tip need not be an ancestor of a successful result in this mode.
 .TP
 .B --fork-point, --no-fork-point
 Rebase only. Use the named upstream reference's local reflog to refine replay
-selection, or disable this policy. The last explicit value overrides
-rebase.forkPoint; with an explicit upstream and no setting, it defaults to disabled.
+selection, or disable this policy. The last explicit CLI value wins. With the
+required explicit upstream, fork-point defaults to disabled, including with
+--keep-base or rebase.forkPoint=true. Like native Git, that configuration does
+not enable fork-point for an explicit upstream. Use --fork-point to opt in.
 Requires a named branch, remote-tracking branch, tag or HEAD. Use --no-fork-point
 for a literal SHA or revision expression. An unavailable reflog point falls back
 to the otherwise chosen replay boundary, with an explicit audit reason.

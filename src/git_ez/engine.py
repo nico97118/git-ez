@@ -173,11 +173,9 @@ class Engine:
                 "Cannot read rebase.forkPoint: "
                 + configured.stderr.decode(errors="replace").strip()
             )
-        fork_enabled = (
-            options.fork_point
-            if options.fork_point is not None
-            else configured.stdout.strip() == b"true"
-        )
+        # An explicit upstream defaults to --no-fork-point in native Git, even
+        # with rebase.forkPoint=true. Only an explicit CLI request enables it.
+        fork_enabled = options.fork_point is True
         reapply = options.reapply_cherry_picks
         if reapply is None:
             reapply = options.keep_base

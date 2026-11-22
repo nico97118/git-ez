@@ -53,9 +53,11 @@ In this mode, `Integrated: True` means the requested rebase finished; the
 upstream tip need not be an ancestor of the result.
 
 `--fork-point` refines replay selection from the upstream's local reflog.
-`rebase.forkPoint` applies when the CLI does not choose a policy; otherwise the
-last explicit value wins. With an explicit target and no configuration, the
-default is disabled. Fork-point mode requires a named reference (a local or
+The last explicit CLI value wins. Like native Git with an explicit upstream,
+fork-point defaults to disabled, including with `--keep-base` or
+`rebase.forkPoint=true`. That configuration only disables an implicit default
+when false; it does not enable fork-point for an explicit upstream. Use
+`--fork-point` to opt in. Fork-point mode requires a named reference (a local or
 remote-tracking branch, tag, or HEAD); use `--no-fork-point` for a literal SHA or
 revision expression. A missing usable reflog point falls back to the otherwise
 chosen replay boundary, with the reason recorded in the report.

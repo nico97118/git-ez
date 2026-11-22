@@ -7,6 +7,8 @@ on:
   schedule:
     - cron: '17 4 * * 1'
   workflow_dispatch:
+permissions:
+  contents: read
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -21,14 +23,14 @@ jobs:
           version: "0.11.2"
           python-version: '3.11'
           enable-cache: true
-      - name: Sync dependencies
-        run: uv sync --locked
+      - name: Sync runtime and lint dependencies
+        run: uv sync --locked --no-default-groups --group lint
       - name: Ruff lint
-        run: uv run --locked ruff check .
+        run: uv run --locked --no-default-groups --group lint ruff check .
       - name: Ruff format check
-        run: uv run --locked ruff format --check .
+        run: uv run --locked --no-default-groups --group lint ruff format --check .
       - name: Mypy type check
-        run: uv run --locked mypy src
+        run: uv run --locked --no-default-groups --group lint mypy src
   tests:
     name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
@@ -48,18 +50,18 @@ jobs:
           version: "0.11.2"
           python-version: ${{ matrix.python }}
           enable-cache: true
-      - name: Sync dependencies
-        run: uv sync --locked
+      - name: Sync runtime and test dependencies
+        run: uv sync --locked --no-default-groups --group test
       - name: Unit tests
         id: unit
         run: >-
-          uv run --locked pytest -v -m unit --cov --cov-report=
+          uv run --locked --no-default-groups --group test pytest -v -m unit --cov --cov-report=
           --junitxml=ci-reports/unit.xml
       - name: Integration tests and combined coverage
         id: integration
         if: ${{ !cancelled() && (steps.unit.outcome == 'success' || steps.unit.outcome == 'failure') }}
         run: >-
-          uv run --locked pytest -v -m integration --cov --cov-append
+          uv run --locked --no-default-groups --group test pytest -v -m integration --cov --cov-append
           --cov-report=term-missing
           --cov-report=json:ci-reports/coverage.json
           --cov-report=xml:ci-reports/coverage.xml
@@ -97,12 +99,53 @@ jobs:
             sudo apt-get update
             sudo apt-get install --yes man-db
           fi
-      - name: Sync dependencies
-        run: uv sync --locked
+      - name: Sync runtime dependencies
+        run: uv sync --locked --no-default-groups
       - name: Build distributions
         run: uv build
       - name: Verify installed wheel outside the checkout
         run: |
           mkdir -p "$RUNNER_TEMP/git-ez-temp"
           ln -s "$RUNNER_TEMP/git-ez-temp" "$RUNNER_TEMP/git-ez-temp-alias"
-          TMPDIR="$RUNNER_TEMP/git-ez-temp-alias" uv run --locked python scripts/check_install.py dist/git_ez_ai-*.whl
+          TMPDIR="$RUNNER_TEMP/git-ez-temp-alias" uv run --locked --no-default-groups python scripts/check_install.py dist/git_ez_ai-*.whl
+  freebsd:
+    name: FreeBSD 15.1 amd64, Python 3.12
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache compiled FreeBSD wheels
+        uses: actions/cache@v6
+        with:
+          path: .uv-cache
+          key: uv-freebsd-v1-15.1-x86_64-py3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-freebsd-v1-15.1-x86_64-py3.12-
+      - name: Test and install in FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: '15.1'
+          arch: x86_64
+          mem: 8192
+          sync: rsync
+          copyback: true
+          prepare: |
+            pkg install -y git uv python312 py312-sqlite3 rust pkgconf
+          run: |
+            set -eu
+            # Keep uv's cache in the workspace copied between the runner and VM.
+            export UV_CACHE_DIR="$PWD/.uv-cache"
+            export CARGO_BUILD_JOBS=2 UV_CONCURRENT_BUILDS=2
+            uv sync --locked --no-default-groups --group test --python /usr/local/bin/python3.12
+            uv run --locked --no-default-groups --group test python -c 'import git_ez.agent_runtime'
+            uv run --locked --no-default-groups --group test pytest -v --cov --cov-report=term-missing --cov-report=xml:ci-reports/coverage.xml --junitxml=ci-reports/tests.xml
+            uv build --python .venv/bin/python
+            uv run --locked --no-default-groups python scripts/check_install.py dist/git_ez_ai-*.whl
+            uv cache prune --ci
+      - name: Preserve test and coverage reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports-freebsd-15.1-x86_64-py3.12
+          path: ci-reports/
+          retention-days: 14

@@ -34,6 +34,7 @@ consequence and clarify the intended change before implementing it.
 - `git.py`, `engine.py`, `checks.py`: Git execution, integration lifecycle, and guards.
 - `conflicts.py`: conflict evidence and resolution decisions.
 - `agent.py`, `agent_runtime.py`, `llm.py`: resolver contract, agent runtime, providers.
+- `_vendor/langgraph_sqlite/`: synchronous upstream SQLite checkpoint adapter (MIT).
 - `audit.py`: persistent evidence and reports.
 - `probe.py`: provider connectivity diagnostics.
 - `tests/`: pytest tests, temporary repositories, deterministic resolvers, and local
@@ -113,7 +114,24 @@ For packaging, dependency, or executable-entry-point changes, also run `uv build
 and run `uv run --locked python scripts/check_install.py dist/git_ez_ai-*.whl` to verify
 the installed command and manual outside the source checkout. A `man` viewer is
 required. CI covers Python 3.11 through 3.14 on Linux and macOS; consider that range
-when changing compatibility.
+when changing compatibility. Quality jobs select the `lint` group, functional
+jobs select `test`, and packaging jobs install runtime dependencies only. Use
+`uv run --locked --no-default-groups` with the job's explicit `--group` selection
+to avoid restoring the default `dev` group. Experimental FreeBSD CI targets 15.1
+amd64/Python 3.12 only, installing the test dependency group and checking isolated
+installed wheels. ARM64 emulation is outside the CI scope. Ruff and mypy remain
+in the Ubuntu quality job. Use
+FreeBSD's system Python with its SQLite module installed, plus gmake for Ruff's
+source build. Prefix Ruff commands with `RAYON_NUM_THREADS=1` on FreeBSD to avoid
+the intermittent jemalloc assertion observed on the native arm64 VM; see the
+FreeBSD section of CONTRIBUTING.md for prerequisites and the documented tool
+execution override.
+
+The synchronous SQLite checkpoint adapter is vendored under
+`src/git_ez/_vendor/langgraph_sqlite/` with upstream MIT licensing and provenance.
+Keep upstream changes bounded and documented in `UPSTREAM.json`; do not apply
+project GPL notices or unrelated formatting to third-party files. See
+`docs/licensing.md` for the update and validation requirements.
 
 - Mark every test with exactly one of `unit` or `integration`; use the existing
   module markers where applicable. Unit tests do not start Git, model runtimes, or

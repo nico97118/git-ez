@@ -47,6 +47,20 @@ environment variables.
 .PP
 Valid model configuration is required even when no conflicts occur; no model
 call is made when Git resolves the operation without assistance.
+.SH INSTALLATION ON FREEBSD
+FreeBSD support is experimental. CI targets FreeBSD 15.1 amd64/Python 3.12 only.
+ARM64 is outside the CI scope. Earlier FreeBSD 14.4 amd64 CI passed all 551 tests,
+installed-wheel checks, and manual discovery. The 15.1 amd64 target requires its
+own successful CI run.
+Install git, uv, python312, py312-sqlite3, rust, and pkgconf from FreeBSD packages.
+Use uv tool install with --python /usr/local/bin/python3.12 and the repository
+URL or local checkout. The environment remains isolated from system Python
+packages. Dependencies without FreeBSD wheels may compile from source.
+The synchronous SQLite checkpoint adapter is bundled with its original MIT
+license; sqlite-vec and a vector store are not required. Audit checkpoints are
+retained. See the README for commands and current validation limits.
+Development requirements and FreeBSD-specific tool warnings are documented in
+CONTRIBUTING.md. Ruff is not required at runtime.
 .SH OPTIONS
 .TP
 .B --keep-base, --no-keep-base

@@ -27,9 +27,9 @@ from langchain.agents.middleware.types import ToolCallRequest, hook_config
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, ToolMessage, messages_to_dict
 from langchain_core.tools import tool
-from langgraph.checkpoint.sqlite import SqliteSaver
 from langsmith import tracing_context
 
+from ._vendor.langgraph_sqlite import SqliteSaver
 from .agent import AGENT_PROMPT
 from .audit import Audit, now, write_json
 from .checks import GitStateChanged, WorktreeChecks
@@ -251,9 +251,10 @@ def run_agent(
                 "deepagents",
                 "langchain-openai",
                 "langchain-ollama",
-                "langgraph-checkpoint-sqlite",
+                "langgraph-checkpoint",
             )
         },
+        "checkpoint_adapter": {"source": "vendored", "upstream_version": "3.1.3"},
         "provider": config.provider,
         "model": config.model,
         "model_context_tokens": config.model_context_tokens,

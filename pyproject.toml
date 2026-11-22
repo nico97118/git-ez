@@ -9,19 +9,21 @@ description = "Local Git rebase/merge with traceable AI conflict resolution"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "GPL-3.0-only"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "src/git_ez/_vendor/langgraph_sqlite/LICENSE"]
 dependencies = [
     "deepagents==0.7.41",
     "langchain-openai==1.8.5",
     "langchain-ollama==1.1.0",
-    "langgraph-checkpoint-sqlite==3.1.3",
+    "langgraph-checkpoint==4.3.2",
 ]
 
 [project.scripts]
 git-ez = "git_ez.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-cov>=7.1", "pytest-mock>=3.14", "ruff>=0.9", "mypy>=1.14"]
+test = ["pytest>=8.0", "pytest-cov>=7.1", "pytest-mock>=3.14"]
+lint = ["ruff>=0.9", "mypy>=1.14"]
+dev = [{include-group = "test"}, {include-group = "lint"}]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -49,9 +51,11 @@ packages = ["src/git_ez"]
 "docs/man/git-ez.1" = "share/man/man1/git-ez.1"
 
 [tool.hatch.build.targets.sdist]
-include = ["/src/git_ez", "/tests", "/examples", "/README.md", "/LICENSE", "/pyproject.toml", "/uv.lock", "/docs", "/scripts"]
+include = ["/src/git_ez", "/tests", "/examples", "/README.md", "/CONTRIBUTING.md", "/LICENSE", "/pyproject.toml", "/uv.lock", "/docs", "/scripts"]
 
 [tool.ruff]
+# Preserve vendored upstream formatting and lint conventions.
+extend-exclude = ["src/git_ez/_vendor/langgraph_sqlite"]
 line-length = 100
 target-version = "py311"
 
@@ -61,3 +65,8 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+
+[[tool.mypy.overrides]]
+module = ["git_ez._vendor.langgraph_sqlite.*"]
+# Third-party code retains upstream typing; project-owned callers remain strict.
+ignore_errors = true

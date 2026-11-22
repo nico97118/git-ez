@@ -226,6 +226,11 @@ active
 operation to continue or abort. There is no agent session resume command.
 .PP
 The agent shell has host-process privileges and is not a system sandbox.
+Content checks apply to conflicted files and supporting files changed by the agent.
+Regular files integrated by Git without conflict are exempt when their contents and
+permissions remain unchanged during resolution, including binary and oversized
+resources. Audit file capture limits still apply.
+.PP
 Failure to write a required audit snapshot, including failure of Git commands
 that capture diffs and enumerate files, fails the run. Partial evidence is retained
 and the failure appears in the manifest and Markdown report. A completed Git

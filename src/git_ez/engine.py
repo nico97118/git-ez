@@ -753,6 +753,7 @@ class Engine:
         branch = git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.decode().strip() or None
         checks = WorktreeChecks(self.config)
         try:
+            baseline = checks.baseline(git)
             if audit.manifest.get("interactive"):
                 parsed, session = self._review(git, audit, round_number, list(stages), validation)
             else:
@@ -762,7 +763,7 @@ class Engine:
             if parsed.confidence < self.config.min_confidence:
                 raise LowConfidence("Agent confidence below threshold; worktree preserved")
             checks.guard(git, audit, head, branch)
-            checks.verify(git, list(stages))
+            checks.verify(git, list(stages), baseline)
             # Only the orchestrator stages a verified result, including supporting files.
             git.run("add", "-A", "--", ".")
             session.mkdir(parents=True, exist_ok=True)

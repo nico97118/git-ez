@@ -541,6 +541,108 @@ def test_conflict_round_limit_stops_before_calling_the_resolver_again(repo):
     assert repo.git.conflicts()
 
 
+@pytest.mark.parametrize("operation", ["merge", "rebase"])
+@pytest.mark.parametrize("side", ["main", "feature"])
+@pytest.mark.parametrize("kind", ["binary", "large"])
+@pytest.mark.parametrize("interactive", [False, True])
+def test_git_integrated_resources_do_not_require_text_resolution(
+    repo, mocker, operation, side, kind, interactive
+):
+    content = b"image\x00\xff" if kind == "binary" else b"x" * (repo.config.max_file_bytes + 1)
+    repo.git.run("checkout", side)
+    resource = repo.root / "resource.dat"
+    resource.write_bytes(content)
+    repo.git.run("add", "resource.dat")
+    repo.git.run("commit", "--amend", "--no-edit")
+    if side == "feature":
+        repo.source_oid = repo.git.branch_oid("feature")
+    repo.git.run("checkout", "feature")
+
+    if interactive:
+        mocker.patch("builtins.input", return_value="a")
+    audit = integrate(repo, operation, interactive=interactive)
+
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.manifest["integrated"]
+    assert len(repo.resolver.calls) == 1
+    assert resource.read_bytes() == content
+    assert repo.git.run("show", "HEAD:resource.dat").stdout == content
+    assert repo.git.text("status", "--porcelain") == ""
+    assert audit.manifest["conflicts"][0]["status"] == "applied"
+
+
+@pytest.mark.parametrize("operation", ["merge", "rebase"])
+@pytest.mark.parametrize("kind", ["binary", "large", "markers", "non_utf8"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_agent_supporting_changes_still_require_valid_text(repo, mocker, operation, kind, existing):
+    resource = repo.root / "resource.dat"
+    if existing:
+        repo.git.run("checkout", "feature")
+        resource.write_bytes(b"Git supplied\x00resource")
+        repo.git.run("add", "resource.dat")
+        repo.git.run("commit", "--amend", "--no-edit")
+        repo.source_oid = repo.git.branch_oid("feature")
+    contents = {
+        "binary": b"agent\x00proposal",
+        "large": b"x" * (repo.config.max_file_bytes + 1),
+        "markers": b"<<<<<<< agent\nleft\n=======\nright\n>>>>>>> other\n",
+        "non_utf8": b"agent\xffproposal",
+    }
+    resolve = repo.resolver.run
+
+    def propose(*args):
+        decision = resolve(*args)
+        resource.write_bytes(contents[kind])
+        return decision
+
+    mocker.patch.object(repo.resolver, "run", side_effect=propose)
+    audit = integrate(repo, operation)
+
+    assert audit.manifest["status"] == "failed"
+    assert "resource.dat" in audit.manifest["error"]
+    assert not audit.manifest["integrated"]
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert resource.read_bytes() == contents[kind]
+    assert audit.manifest["conflicts"][0]["status"] == "failed"
+
+
+@pytest.mark.parametrize("change", ["restore_head", "mode"])
+def test_agent_changes_to_git_resources_are_checked_even_outside_head_diff(repo, mocker, change):
+    resource = repo.root / "resource.dat"
+    resource.write_bytes(b"old\x00resource")
+    repo.git.run("add", "resource.dat")
+    repo.git.run("commit", "-m", "add shared resource")
+    common = repo.git.text("rev-parse", "HEAD")
+    repo.git.run("branch", "-f", "main", common)
+    repo.file.write_text("feature text\n")
+    repo.git.run("commit", "-am", "change feature text")
+    repo.source_oid = repo.git.branch_oid("feature")
+    repo.git.run("checkout", "main")
+    repo.file.write_text("target text\n")
+    resource.write_bytes(b"Git\x00resource")
+    repo.git.run("commit", "-am", "change target text and resource")
+    repo.git.run("checkout", "feature")
+    resolve = repo.resolver.run
+
+    def propose(*args):
+        decision = resolve(*args)
+        if change == "restore_head":
+            resource.write_bytes(repo.git.run("show", "HEAD:resource.dat").stdout)
+        else:
+            resource.chmod(0o755)
+        return decision
+
+    mocker.patch.object(repo.resolver, "run", side_effect=propose)
+    audit = integrate(repo, "merge")
+
+    assert audit.manifest["status"] == "failed"
+    assert "resource.dat" in audit.manifest["error"]
+    assert not audit.manifest["integrated"]
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+
+
 def test_oversized_proposals_cannot_be_staged_or_committed(repo):
     from dataclasses import replace
 

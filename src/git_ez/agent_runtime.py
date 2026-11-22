@@ -237,7 +237,7 @@ def run_agent(
             write_json(directory / "decision.json", proposed)
             session["status"] = "low_confidence"
             raise LowConfidence("Agent confidence below threshold; worktree preserved")
-        checks.verify(git, paths)
+        checks.verify(git, paths, baseline)
         decision.update(proposed)
         write_json(directory / "decision.json", decision)
         session.update(proposed)
@@ -261,6 +261,7 @@ def run_agent(
     write_json(directory / "runtime.json", metadata)
     result: dict[str, Any] = {}
     try:
+        baseline = checks.baseline(git)
         model = create_chat_model(config)
         # Use the public profile API to disable default delegation for this single-agent task.
         register_harness_profile(

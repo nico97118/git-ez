@@ -133,6 +133,9 @@ class Audit:
 
     def report(self) -> None:
         data = self.manifest
+        separate_base = (
+            "onto" in data or data.get("rebase_plan", {}).get("base_source") == "merge-base"
+        )
         lines = [
             "# git-ez — integration report",
             "",
@@ -140,7 +143,7 @@ class Audit:
             f"- Status: **{data['status']}**",
             f"- Operation: `{data['operation']}`",
             f"- Current branch: `{data['branch']}` (`{data['before_oid']}`)",
-            f"- {'Upstream' if 'onto' in data else 'Integrated revision'}: "
+            f"- {'Upstream' if separate_base else 'Integrated revision'}: "
             f"`{data['target']}` (`{data['target_oid']}`)",
             f"- Result commit: `{data.get('result_oid', '—')}`",
             f"- Integration completed: `{data['integrated']}`",
@@ -156,6 +159,33 @@ class Audit:
             lines += [f"- Requested fast-forward policy: `{policy}`", ""]
         if "onto" in data:
             lines += [f"- New base: `{data['onto']}` (`{data['onto_oid']}`)", ""]
+        if "rebase_plan" in data:
+            plan = data["rebase_plan"]
+            fork = plan["fork_point"]
+            lines += [
+                "## Pinned rebase selection",
+                "",
+                f"- Original upstream: `{data['target_oid']}`",
+                f"- Result base: `{plan['base_oid']}` ({plan['base_source']})",
+                f"- Replay boundary: `{plan.get('selection_oid', 'pending')}`",
+                f"- Reapply cherry-picks: `{plan['reapply_cherry_picks']}`",
+                f"- Fork point: `{fork['status']}` / `{fork['oid']}`",
+                f"- Reflog reference: `{fork['source_ref']}`",
+            ]
+            if plan.get("requires_sequence"):
+                lines.append("- Captured sequencer used to preserve fork-point replay selection")
+            if fork.get("reason"):
+                lines.append(f"- Fallback reason: {fork['reason']}")
+            if fork.get("diagnostic"):
+                lines.append(f"- Fork-point diagnostic: {fork['diagnostic']}")
+            if "selection_anchor" in plan:
+                anchor = plan["selection_anchor"]
+                lines += [
+                    f"- [Internal selection object]({anchor['artifact']})",
+                    f"- Selection object capture truncated: `{anchor['truncated']}`",
+                    f"- Selection object capture limit: `{anchor['limit_bytes']}` bytes",
+                ]
+            lines.append("")
         if "rerere_autoupdate_effective" in data:
             lines += [
                 f"- Requested rerere autoupdate: `{data['rerere_autoupdate']}`",

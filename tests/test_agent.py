@@ -524,3 +524,23 @@ def test_provider_failure_is_audited_without_persisting_exception_secrets(repo):
             assert secret.encode() not in artifact.read_bytes(), artifact.relative_to(
                 audit.directory
             )
+
+
+def test_resolver_mission_distinguishes_upstream_from_result_base(repo):
+    import json
+
+    boundary = repo.git.text("rev-parse", "main^")
+    model = ScriptedModel(
+        turns=[
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [tool("finish", rationale="Resolved on the requested new base", confidence=0.95)],
+        ],
+        profile={"max_input_tokens": 32768, "tool_calling": True},
+    )
+    repo.mocker.patch("git_ez.agent_runtime.create_chat_model", return_value=model)
+    audit = Engine(repo.root, repo.config).run(boundary, onto="main")
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    mission = json.loads((audit.directory / "sessions/0001/mission.json").read_text())
+    assert mission["target_sha"] == boundary
+    assert mission["rebase_base_sha"] == repo.parent
+    assert mission["replay_boundary_sha"] == boundary

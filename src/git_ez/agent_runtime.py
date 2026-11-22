@@ -295,6 +295,9 @@ def run_agent(
         }
         if "onto_oid" in audit.manifest:
             mission["onto_sha"] = audit.manifest["onto_oid"]
+        if "rebase_plan" in audit.manifest:
+            mission["rebase_base_sha"] = audit.manifest["rebase_plan"]["base_oid"]
+            mission["replay_boundary_sha"] = audit.manifest["rebase_plan"]["selection_oid"]
         write_json(directory / "mission.json", mission)
         with SqliteSaver.from_conn_string(str(directory / "checkpoints.sqlite")) as saver:
             agent = create_deep_agent(

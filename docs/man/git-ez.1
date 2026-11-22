@@ -49,6 +49,43 @@ Valid model configuration is required even when no conflicts occur; no model
 call is made when Git resolves the operation without assistance.
 .SH OPTIONS
 .TP
+.B --keep-base, --no-keep-base
+Rebase only. Keep the unique common ancestor with the upstream as the result's
+base, or reset this policy. Implies --reapply-cherry-picks unless explicitly
+disabled. Incompatible with --onto. Missing or ambiguous merge bases are rejected.
+The upstream tip need not be an ancestor of a successful result in this mode.
+.TP
+.B --fork-point, --no-fork-point
+Rebase only. Use the named upstream reference's local reflog to refine replay
+selection, or disable this policy. The last explicit CLI value wins. With the
+required explicit upstream, fork-point defaults to disabled, including with
+--keep-base or rebase.forkPoint=true. Like native Git, that configuration does
+not enable fork-point for an explicit upstream. Use --fork-point to opt in.
+Requires a named branch, remote-tracking branch, tag or HEAD. Use --no-fork-point
+for a literal SHA or revision expression. An unavailable reflog point falls back
+to the otherwise chosen replay boundary, with an explicit audit reason.
+.PP
+The engine pins the base and fork point before integration and passes explicit
+--onto and --no-fork-point arguments. Divergent exclusion histories may require
+an internal merge commit object to preserve native cherry-pick equivalence.
+No branch or reference is created for this object and it is excluded from the
+result. It is unsigned metadata; signing policy still applies to result commits.
+The audit records its parents, tree, command and raw capture, with any
+truncation explicit. Native pre-rebase hooks receive this effective pinned replay
+boundary rather than the original upstream name. Hook failures are not bypassed.
+Hooks requiring the original upstream argument should use native Git directly.
+.PP
+When --onto equals the fork point and combining exclusions changes the replay
+boundary, the native interactive sequencer avoids an incorrect up-to-date shortcut.
+A capture-only editor records its instructions without changing them. Autosquash
+remains disabled unless explicitly requested; the default empty policy remains
+drop and per-commit reuse is preserved. The instruction-format override and
+bounded sequence capture described below also apply to this case.
+.PP
+Original input references remain monitored. Final ancestry and range-diff use the
+computed result base and replay selection. These options combine with autosquash
+and signing; --root and rebasing merge commits remain unsupported.
+.TP
 .B --autosquash, --no-autosquash
 Rebase only. Opt in to native grouping of fixup!, squash!, and amend! commits,
 or disable it. The last explicit value wins. rebase.autoSquash alone does not

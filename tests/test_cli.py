@@ -509,3 +509,30 @@ def test_cli_autosquash_uses_native_grouping_without_a_model(cli_repo, model_ser
     assert cli_repo.text("rev-list", "--count", f"{target}..HEAD") == "1"
     assert cli_repo.text("show", "-s", "--format=%s", "HEAD") == "source"
     assert model_server.calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "flag", ["--keep-base", "--no-keep-base", "--fork-point", "--no-fork-point"]
+)
+def test_rebase_selection_flags_are_not_merge_options(flag):
+    with pytest.raises(SystemExit):
+        parser().parse_args(["merge", "main", flag])
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("keep", [True, False])
+def test_cli_rebase_selection_options_reach_the_engine(cli_repo, model_server, monkeypatch, keep):
+    import json
+
+    monkeypatch.chdir(cli_repo.path)
+    target = "main" if keep else "HEAD"
+    flags = ["--keep-base", "--no-fork-point"] if keep else ["--fork-point"]
+    before = cli_repo.text("rev-parse", "HEAD")
+    assert main(["rebase", target, *flags]) == 0
+    assert cli_repo.text("rev-parse", "HEAD") == before
+    assert model_server.calls == []
+    directory = next((cli_repo.path / ".git/ez/runs").iterdir())
+    manifest = json.loads((directory / "run.json").read_text())
+    assert manifest["rebase_options"]["keep_base"] is keep
+    assert manifest["rebase_plan"]["fork_point"]["enabled"] is (not keep)

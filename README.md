@@ -524,9 +524,11 @@ the distributions and installs the wheel into a fresh environment outside the ch
 to verify Git discovery, command help, manual lookup, audit display, and conflict-free
 merge/rebase without a model server.
 
-Pushes and pull requests both trigger CI. A newer run cancels an older run for the
-same workflow, event type, and pull request or Git reference; push and pull-request
-runs do not cancel each other.
+Only pushes to `main` trigger branch CI; pushes to other branches and tags do not.
+Pull requests targeting any branch trigger CI when opened, reopened, or updated.
+Branches other than `main` therefore receive automatic checks through pull requests.
+A newer run cancels an older run for the same workflow, event type, and pull request
+or Git reference; push and pull-request runs do not cancel each other.
 
 Run the same installation check locally after building:
 

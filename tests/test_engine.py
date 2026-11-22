@@ -2087,3 +2087,116 @@ def test_autosquash_fingerprint_is_checked_after_final_validation(repo):
     assert audit.manifest["integrated"]
     assert audit.manifest["validation"]["returncode"] == 0
     assert "fingerprint changed" in audit.manifest["rebase_sequence"]["error"]
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+@pytest.mark.parametrize("cleanup", ["strip", "whitespace", "verbatim", "scissors", "default"])
+@pytest.mark.parametrize("log", [0, 1, 20])
+def test_merge_log_cleanup_matches_native_messages(repo, conflict, cleanup, log):
+    if not conflict:
+        repo.git.run("checkout", "-b", "clean-message", repo.base_oid)
+        (repo.root / "independent.txt").write_text("new\n")
+        repo.git.run("add", ".")
+        repo.git.run("commit", "-m", "independent")
+    branch = repo.git.text("branch", "--show-current")
+    before = repo.git.text("rev-parse", "HEAD")
+    message = "  Merge title  \n\n# custom comment\n\nDetails   \n"
+    repo.git.run("checkout", "-b", "native-message", before)
+    result = repo.git.run(
+        "merge",
+        "--no-edit",
+        f"--log={log}",
+        f"--cleanup={cleanup}",
+        "--signoff",
+        "-m",
+        message,
+        repo.parent_oid,
+        check=False,
+    )
+    if conflict:
+        assert result.returncode != 0
+        repo.file.write_text("combined\n")
+        repo.git.run("add", "file.txt")
+        repo.git.run("commit", "--no-edit", "--signoff", f"--cleanup={cleanup}")
+    else:
+        assert result.returncode == 0
+    expected = repo.git.run("show", "-s", "--format=%B", "HEAD").stdout
+    repo.git.run("checkout", branch)
+    audit = integrate(
+        repo,
+        "merge",
+        commit_options=CommitOptions(
+            message=message,
+            log=log,
+            cleanup=cleanup,
+            signoff=True,
+        ),
+    )
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.git.run("show", "-s", "--format=%B", "HEAD").stdout == expected
+    assert audit.manifest["commit_options"]["log"] == log
+    assert audit.manifest["commit_options"]["cleanup"] == cleanup
+    assert len(repo.resolver.calls) == int(conflict)
+
+
+@pytest.mark.parametrize("options", [CommitOptions(log=1), CommitOptions(cleanup="strip")])
+def test_merge_message_options_rejected_for_rebase(repo, options):
+    with pytest.raises(EzError, match="only supported for merge"):
+        integrate(repo, commit_options=options)
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert not (repo.root / ".git/ez").exists()
+
+
+def test_merge_log_cleanup_do_not_force_commit_on_fast_forward(repo):
+    repo.git.run("checkout", "-b", "behind-message", repo.base_oid)
+    audit = integrate(repo, "merge", commit_options=CommitOptions(log=20, cleanup="strip"))
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.git.text("rev-parse", "HEAD") == repo.parent_oid
+    assert repo.resolver.calls == []
+
+
+@pytest.mark.parametrize("requested", [None, 0, 1])
+def test_merge_log_configuration_survives_conflict_with_custom_message(repo, requested):
+    repo.git.run("config", "merge.log", "true")
+    audit = integrate(
+        repo,
+        "merge",
+        commit_options=CommitOptions(
+            message="Configured summary",
+            log=requested,
+            signoff=True,
+        ),
+    )
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    message = repo.git.text("show", "-s", "--format=%B", "HEAD")
+    assert message.startswith("Configured summary\n")
+    assert ("  parent change" in message) is (requested != 0)
+    assert message.count("Signed-off-by:") == 1
+    assert repo.git.text("config", "merge.log") == "true"
+
+
+def test_merge_cleanup_failure_preserves_active_merge(repo):
+    hooks = repo.root / ".git/hooks"
+    hook = hooks / "commit-msg"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    audit = integrate(repo, "merge", commit_options=CommitOptions(log=1, cleanup="strip"))
+    assert audit.manifest["status"] == "failed", audit.manifest
+    assert not audit.manifest["integrated"]
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert "parent change" in (repo.root / ".git/MERGE_MSG").read_text()
+
+
+@pytest.mark.parametrize("limit", [0, 1, 20])
+def test_merge_log_limits_multiple_incoming_subjects(repo, limit):
+    repo.git.run("checkout", "main")
+    repo.git.run("commit", "--allow-empty", "-m", "second incoming")
+    repo.git.run("commit", "--allow-empty", "-m", "third incoming")
+    repo.git.run("checkout", "feature")
+    audit = integrate(repo, "merge", commit_options=CommitOptions(log=limit, cleanup="strip"))
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    message = repo.git.text("show", "-s", "--format=%B", "HEAD")
+    assert ("  third incoming" in message) is (limit > 0)
+    assert ("  second incoming" in message) is (limit > 1)
+    assert ("  parent change" in message) is (limit > 1)

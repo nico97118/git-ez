@@ -122,6 +122,19 @@ Merge only. Read a UTF-8 message file before integration. Paths are relative to
 the invocation directory, including with --repo. Standard input (-F -) is unsupported.
 The message is recorded in the audit and retained after conflicts.
 .TP
+.B --log[=n], --no-log
+Merge only. Include up to n incoming commit subjects in the message. Bare --log
+uses 20; attach another nonnegative limit with --log=5. --no-log means --log=0.
+The last explicit value wins. If omitted, merge.log applies. Git generates the
+summary, including with -m or -F; it survives conflict continuation.
+.TP
+.B --cleanup=strip|whitespace|verbatim|scissors|default
+Merge only. Apply Git's native cleanup mode to the message, also after conflicts.
+The prepared MERGE_MSG is preserved during continuation. No editor is opened;
+scissors retains native noninteractive behavior. Omission uses native defaults
+and configuration. Neither cleanup nor log forces a commit on fast-forward.
+Requested policies are recorded in the audit.
+.TP
 .B -S[key], --gpg-sign[=key], --no-gpg-sign
 Sign newly created commits or explicitly disable signing. Attach an optional key
 to the option; without one, Git's configured key is used. The policy remains

@@ -134,6 +134,9 @@ each OS/Python combination. Open `coverage-html/index.html` from an artifact for
 file-by-file detail. Reports are retained for 14 days, including when tests fail.
 FreeBSD uploads combined coverage XML and a JUnit report for the complete suite.
 Coverage measures exercised code paths; it does not establish resolution correctness.
+Execution-lock regressions use separate processes and real temporary repositories. They
+cover contention throughout the integration lifecycle, release after process termination,
+and independent linked worktrees, without invoking an external model.
 Critical tests assert committed file contents, reference ancestry, retained local state,
 and recorded audit evidence. Controlled fault injection covers input-reference races,
 audit write failures, and provider errors, including error redaction.

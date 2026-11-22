@@ -38,6 +38,16 @@ and unrelated histories are unsupported. The tool cannot attach to an
 operation
 already started with Git.
 .PP
+Only one git-ez integration can run per checkout. A concurrent invocation fails
+immediately, before repository checks, audit creation, or model calls. The lock
+covers review, validation, and final audit capture. Linked worktrees have
+independent locks. Native Git and other tools do not honor this advisory lock.
+.PP
+The lock is released when the process exits, even after abrupt termination.
+The empty ez-execution.lock file remains in the checkout's Git directory;
+its presence does not indicate an active run. Do not delete it during a run.
+Git operations and local changes are preserved for inspection and native recovery.
+.PP
 Rebase uses the merge backend with autostash, update-refs, and rebase-merges
 disabled. Merge uses --no-edit and respects Git's fast-forward policy. Git
 runs

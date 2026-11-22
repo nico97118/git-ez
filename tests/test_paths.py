@@ -57,4 +57,4 @@ def test_non_utf8_supporting_paths_are_reported_as_resolution_errors(tmp_path, m
         ),
     )
     with pytest.raises(EzError, match="Non-UTF-8 changed filenames require manual resolution"):
-        WorktreeChecks(Config(model="test")).verify(git, [])
+        WorktreeChecks(Config(model="test")).verify(git, [], {})

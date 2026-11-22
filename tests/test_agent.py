@@ -159,6 +159,63 @@ def test_real_graph_reads_context_repairs_tests_and_persists_integration(repo, o
     assert not (result.path / ".ez-agent").exists()
 
 
+@pytest.mark.parametrize("operation", ["merge", "rebase"])
+@pytest.mark.parametrize("kind", ["binary", "large"])
+def test_finish_accepts_untouched_git_resources(repo, operation, kind):
+    content = b"image\x00\xff" if kind == "binary" else b"x" * (repo.config.max_file_bytes + 1)
+    repo.git.run("checkout", "feature")
+    (repo.root / "resource.dat").write_bytes(content)
+    repo.git.run("add", "resource.dat")
+    repo.git.run("commit", "--amend", "--no-edit")
+    repo.source = repo.git.branch_oid("feature")
+
+    audit, _ = run_agent(
+        repo,
+        [
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [tool("finish", rationale="Resolved only the text conflict.", confidence=0.95)],
+        ],
+        operation=operation,
+    )
+
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert (repo.root / "resource.dat").read_bytes() == content
+    assert repo.git.run("show", "HEAD:resource.dat").stdout == content
+    assert audit.manifest["sessions"][0]["status"] == "resolved"
+
+
+def test_finish_rejects_agent_changes_to_git_integrated_binary_and_allows_repair(repo):
+    repo.git.run("checkout", "feature")
+    (repo.root / "resource.dat").write_bytes(b"Git\x00resource")
+    repo.git.run("add", "resource.dat")
+    repo.git.run("commit", "--amend", "--no-edit")
+    repo.source = repo.git.branch_oid("feature")
+
+    audit, model = run_agent(
+        repo,
+        [
+            [
+                command(
+                    "from pathlib import Path; Path('file.txt').write_text('combined\\n'); "
+                    "Path('resource.dat').write_bytes(b'bad\\x00resource')"
+                )
+            ],
+            [tool("finish", rationale="Changed the resource too.", confidence=0.95)],
+            [
+                command(
+                    "from pathlib import Path; "
+                    "Path('resource.dat').write_bytes(b'Git\\x00resource')"
+                )
+            ],
+            [tool("finish", rationale="Restored the untouched Git resource.", confidence=0.95)],
+        ],
+    )
+
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert "Binary content" in str(model.seen[2])
+    assert (repo.root / "resource.dat").read_bytes() == b"Git\x00resource"
+
+
 def test_finish_with_markers_can_recover(repo) -> None:
     audit, model = run_agent(
         repo,

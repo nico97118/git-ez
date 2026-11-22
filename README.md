@@ -302,7 +302,7 @@ git -c ez.model=another-model ez rebase main
 | `ez.allowInsecureHttp` | Explicitly allow non-loopback HTTP; default: `false` |
 | `ez.timeout` | HTTP, agent command, and validation timeout; default: 120 seconds |
 | `ez.minConfidence` | Confidence threshold; default: `0.8` |
-| `ez.maxFileBytes` | Maximum size of a modified file or snapshot; default: 128 KiB |
+| `ez.maxFileBytes` | Maximum proposal size and per-file audit capture; default: 128 KiB |
 | `ez.maxRounds` | Maximum number of conflict stops; default: 100 |
 | `ez.modelContextTokens` | Server context window; default: 32768 |
 | `ez.modelMaxOutputTokens` | Output token reserve; default: 8192 |
@@ -464,8 +464,13 @@ LangSmith tracing, and may contain sensitive code or output.
 
 ## Limitations
 
+Content checks apply to conflicted files and to supporting files changed by the agent.
+Regular files integrated by Git without conflict are exempt from these checks when
+their contents and permissions remain unchanged during resolution, including binary
+and oversized resources. Audit file capture limits still apply.
+
 Regular UTF-8 file conflicts are supported, including textual deletions and renames
-coordinated by the agent. Binaries, symlinks, submodules, file-mode conflicts, and
+coordinated by the agent. Binary conflicts, symlinks, submodules, file-mode conflicts, and
 unrelated histories require manual handling. Rebasing merge commits is rejected.
 Confidence scores are not calibrated, and passing tests do not prove semantic correctness.
 

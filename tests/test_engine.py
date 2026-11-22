@@ -1679,3 +1679,355 @@ def test_autosquash_sequence_is_checked_after_final_validation(repo):
     assert audit.manifest["validation"]["returncode"] == 0
     assert audit.manifest["rebase_sequence"]["status"] == "unavailable"
     assert "sequence capture is unavailable" in audit.manifest["error"]
+
+
+def selection_history(repo, *, diverged=True, equivalent=True, fixup=False):
+    repo.git.run("checkout", "-b", "upstream", repo.base_oid)
+    (repo.root / "old.txt").write_text("old upstream\n")
+    repo.git.run("add", ".")
+    repo.git.run("commit", "-m", "old upstream")
+    point = repo.git.text("rev-parse", "HEAD")
+    repo.git.run("checkout", "-b", "selection-topic")
+    (repo.root / "a.txt").write_text("feature A\n")
+    repo.git.run("add", ".")
+    repo.git.run("commit", "-m", "feature A")
+    feature = repo.git.text("rev-parse", "HEAD")
+    (repo.root / "b.txt").write_text("feature B\n")
+    repo.git.run("add", ".")
+    repo.git.run("commit", "-m", "feature B")
+    if fixup:
+        (repo.root / "a.txt").write_text("fixed A\n")
+        repo.git.run("commit", "-am", "fixup! feature A")
+    before = repo.git.text("rev-parse", "HEAD")
+    repo.git.run("checkout", "upstream")
+    repo.git.run("reset", "--hard", repo.base_oid)
+    if diverged:
+        (repo.root / "new.txt").write_text("new upstream\n")
+        repo.git.run("add", ".")
+        repo.git.run("commit", "-m", "new upstream")
+    if equivalent:
+        repo.git.run("cherry-pick", feature)
+    target = repo.git.text("rev-parse", "HEAD")
+    repo.git.run("checkout", "selection-topic")
+    return SimpleNamespace(point=point, before=before, target=target)
+
+
+def test_keep_base_preserves_the_base_without_claiming_upstream_ancestry(repo):
+    audit = integrate(repo, rebase_options=RebaseOptions(keep_base=True))
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert (
+        repo.git.run("merge-base", "--is-ancestor", repo.parent_oid, "HEAD", check=False).returncode
+        == 1
+    )
+    plan = audit.manifest["rebase_plan"]
+    assert plan["base_oid"] == repo.base_oid
+    assert plan["selection_oid"] == repo.base_oid
+    assert plan["reapply_cherry_picks"] is True
+    assert plan["fork_point"]["enabled"] is False
+    assert audit.manifest["range_diff"]["before"] == f"{repo.base_oid}..{repo.source_oid}"
+    assert repo.resolver.calls == []
+    assert "- Upstream: `main`" in (audit.directory / "report.md").read_text()
+
+
+@pytest.mark.parametrize(
+    "keep,fork,reapply,diverged,equivalent,autosquash",
+    [
+        (False, True, None, False, False, False),
+        (False, True, None, True, True, False),
+        (False, True, True, True, True, False),
+        (True, False, None, True, True, False),
+        (True, True, None, True, True, False),
+        (True, True, False, True, True, False),
+        (True, False, False, True, True, False),
+        (False, True, None, True, True, True),
+        (True, True, None, True, False, True),
+    ],
+)
+def test_pinned_selection_matches_native_rebase(
+    repo, keep, fork, reapply, diverged, equivalent, autosquash
+):
+    history = selection_history(repo, diverged=diverged, equivalent=equivalent, fixup=autosquash)
+    base = repo.git.text("merge-base", history.target, history.before) if keep else history.target
+    repo.git.run("checkout", "-b", "native-selection", history.before)
+    args = ["--merge", "--no-autostash", "--no-update-refs", "--no-rebase-merges", "--empty=keep"]
+    if keep:
+        args.append("--keep-base")
+    args.append("--fork-point" if fork else "--no-fork-point")
+    if reapply is not None:
+        args.append("--reapply-cherry-picks" if reapply else "--no-reapply-cherry-picks")
+    if autosquash:
+        args += ["--interactive", "--autosquash"]
+    repo.git.run("rebase", *args, "upstream")
+    expected_tree = repo.git.text("rev-parse", "HEAD^{tree}")
+    expected_messages = repo.git.text("log", "--reverse", "--format=%B%x00", f"{base}..HEAD")
+    repo.git.run("checkout", "selection-topic")
+    refs = repo.git.text("for-each-ref", "--format=%(refname)")
+    options = RebaseOptions(
+        keep_base=keep,
+        fork_point=fork,
+        reapply_cherry_picks=reapply,
+        autosquash=autosquash,
+        empty="keep",
+    )
+    audit = integrate(repo, target="upstream", rebase_options=options)
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.git.text("rev-parse", "HEAD^{tree}") == expected_tree
+    assert (
+        repo.git.text("log", "--reverse", "--format=%B%x00", f"{base}..HEAD") == expected_messages
+    )
+    assert repo.git.text("for-each-ref", "--format=%(refname)") == refs
+    assert repo.resolver.calls == []
+    plan = audit.manifest["rebase_plan"]
+    assert plan["base_oid"] == base
+    assert plan["fork_point"]["oid"] == (history.point if fork else None)
+    anchor = plan.get("selection_anchor")
+    if anchor:
+        raw = audit.directory / anchor["artifact"]
+        assert not anchor["truncated"]
+        assert repo.git.text("hash-object", "-t", "commit", str(raw)) == anchor["oid"]
+        assert (
+            repo.git.run(
+                "merge-base", "--is-ancestor", anchor["oid"], "HEAD", check=False
+            ).returncode
+            == 1
+        )
+
+
+@pytest.mark.parametrize(
+    "configured,requested,enabled", [(True, None, True), (False, True, True), (True, False, False)]
+)
+@pytest.mark.parametrize("keep", [False, True])
+def test_fork_point_cli_overrides_native_configuration(repo, configured, requested, enabled, keep):
+    history = selection_history(repo, diverged=False, equivalent=False)
+    repo.git.run("config", "rebase.forkPoint", str(configured).lower())
+    audit = integrate(
+        repo, target="upstream", rebase_options=RebaseOptions(fork_point=requested, keep_base=keep)
+    )
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.manifest["rebase_plan"]["fork_point"]["enabled"] is enabled
+    assert repo.git.text("rev-list", "--count", f"{history.target}..HEAD") == (
+        "2" if enabled else "3"
+    )
+    assert (repo.root / "old.txt").exists() is (not enabled)
+    assert repo.git.text("config", "--get", "rebase.forkPoint") == str(configured).lower()
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_fork_point_fallback_is_explicit_when_reflog_has_no_usable_entry(repo, keep):
+    selection_history(repo, equivalent=False)
+    repo.git.run("reflog", "expire", "--expire=all", "refs/heads/upstream")
+    audit = integrate(
+        repo, target="upstream", rebase_options=RebaseOptions(fork_point=True, keep_base=keep)
+    )
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.manifest["rebase_plan"]["fork_point"]["status"] == "fallback"
+    assert (repo.root / "old.txt").exists()
+    assert "Fallback reason:" in (audit.directory / "report.md").read_text()
+
+
+def test_computed_fork_point_survives_reflog_expiry_before_execution(repo, mocker):
+    history = selection_history(repo, diverged=False, equivalent=False)
+    engine = Engine(repo.root, repo.config, repo.resolver)
+    prepare = engine._prepare_run
+
+    def expire(*args):
+        audit = prepare(*args)
+        repo.git.run("reflog", "expire", "--expire=all", "refs/heads/upstream")
+        return audit
+
+    mocker.patch.object(engine, "_prepare_run", side_effect=expire)
+    audit = engine.run("upstream", rebase_options=RebaseOptions(fork_point=True))
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.manifest["rebase_plan"]["fork_point"]["oid"] == history.point
+    assert repo.git.text("rev-list", "--count", f"{history.target}..HEAD") == "2"
+    assert not (repo.root / "old.txt").exists()
+
+
+def test_keep_base_rejects_onto_before_creating_a_run(repo):
+    with pytest.raises(EzError, match="cannot be used together"):
+        integrate(repo, onto="main", rebase_options=RebaseOptions(keep_base=True))
+    assert not (repo.root / ".git/ez").exists()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+
+
+def test_keep_base_requires_a_unique_merge_base(repo):
+    left_tree = repo.git.text("rev-parse", f"{repo.source_oid}^{{tree}}")
+    right_tree = repo.git.text("rev-parse", f"{repo.parent_oid}^{{tree}}")
+    left = repo.git.text(
+        "commit-tree", left_tree, "-p", repo.source_oid, "-p", repo.parent_oid, "-m", "left merge"
+    )
+    right = repo.git.text(
+        "commit-tree", right_tree, "-p", repo.parent_oid, "-p", repo.source_oid, "-m", "right merge"
+    )
+    repo.git.run("branch", "ambiguous", right)
+    repo.git.run("reset", "--hard", left)
+    with pytest.raises(EzError, match="exactly one merge base"):
+        integrate(repo, target="ambiguous", rebase_options=RebaseOptions(keep_base=True))
+    assert not (repo.root / ".git/ez").exists()
+    assert repo.git.branch_oid("feature") == left
+
+
+@pytest.mark.parametrize("target", ["literal", "expression"])
+def test_fork_point_requires_a_named_reference(repo, target):
+    revision = repo.parent_oid if target == "literal" else "main^0"
+    with pytest.raises(EzError, match="requires a named upstream reference"):
+        integrate(repo, target=revision, rebase_options=RebaseOptions(fork_point=True))
+    assert not (repo.root / ".git/ez").exists()
+
+
+def test_fork_point_conflict_guards_the_original_upstream(repo, mocker):
+    history = selection_history(repo)
+    repo.git.run("checkout", "upstream")
+    (repo.root / "b.txt").write_text("upstream B\n")
+    repo.git.run("add", ".")
+    repo.git.run("commit", "-m", "upstream B")
+    repo.git.run("checkout", "selection-topic")
+    resolve = repo.resolver.run
+
+    def move_upstream(*args):
+        decision = resolve(*args)
+        repo.git.run("update-ref", "refs/heads/upstream", repo.base_oid)
+        return decision
+
+    mocker.patch.object(repo.resolver, "run", side_effect=move_upstream)
+    audit = integrate(repo, target="upstream", rebase_options=RebaseOptions(fork_point=True))
+    assert audit.manifest["status"] == "failed"
+    assert "input refs" in audit.manifest["error"]
+    assert repo.git.rebase_active()
+    assert repo.git.branch_oid("selection-topic") == history.before
+
+
+def test_fork_point_combines_with_a_separate_onto_base_like_native_git(repo):
+    history = selection_history(repo)
+    repo.git.run("checkout", "-b", "native-onto", history.before)
+    repo.git.run("rebase", "--merge", "--fork-point", "--empty=keep", "--onto", "main", "upstream")
+    expected = repo.git.text("rev-parse", "HEAD^{tree}")
+    messages = repo.git.text("log", "--format=%B%x00", f"{repo.parent_oid}..HEAD")
+    repo.git.run("checkout", "selection-topic")
+    audit = integrate(
+        repo,
+        target="upstream",
+        onto="main",
+        rebase_options=RebaseOptions(fork_point=True, empty="keep"),
+    )
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.git.text("rev-parse", "HEAD^{tree}") == expected
+    assert repo.git.text("log", "--format=%B%x00", f"{repo.parent_oid}..HEAD") == messages
+    assert audit.manifest["rebase_plan"]["base_oid"] == repo.parent_oid
+
+
+@pytest.mark.parametrize("phase", ["preflight", "validation"])
+def test_keep_base_still_guards_the_upstream_reference(repo, mocker, phase):
+    engine = Engine(repo.root, repo.config, repo.resolver)
+    prepare = engine._prepare_run
+
+    def move_ref(*args):
+        audit = prepare(*args)
+        repo.git.run("update-ref", "refs/heads/main", repo.source_oid)
+        return audit
+
+    if phase == "preflight":
+        mocker.patch.object(engine, "_prepare_run", side_effect=move_ref)
+    validation = (
+        ("git", "update-ref", "refs/heads/main", repo.source_oid) if phase == "validation" else ()
+    )
+    audit = engine.run("main", validation=validation, rebase_options=RebaseOptions(keep_base=True))
+    assert audit.manifest["status"] == "failed"
+    assert "Target reference changed" in audit.manifest["error"]
+    assert audit.manifest["integrated"] is (phase == "validation")
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert repo.git.branch_oid("main") == repo.source_oid
+    assert repo.resolver.calls == []
+
+
+def test_keep_base_rejects_histories_without_a_common_base(repo):
+    repo.git.run("checkout", "--orphan", "unrelated")
+    repo.git.run("rm", "-rf", ".")
+    (repo.root / "orphan.txt").write_text("orphan\n")
+    repo.git.run("add", ".")
+    repo.git.run("commit", "-m", "orphan")
+    repo.git.run("checkout", "feature")
+    with pytest.raises(EzError, match="exactly one merge base"):
+        integrate(repo, target="unrelated", rebase_options=RebaseOptions(keep_base=True))
+    assert not (repo.root / ".git/ez").exists()
+
+
+def test_no_fork_point_allows_literal_targets_with_configured_fork_point(repo):
+    repo.git.run("config", "rebase.forkPoint", "true")
+    audit = integrate(repo, target=repo.parent_oid, rebase_options=RebaseOptions(fork_point=False))
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.manifest["rebase_plan"]["fork_point"]["status"] == "disabled"
+
+
+def test_internal_selection_object_does_not_change_the_signing_policy(repo):
+    selection_history(repo)
+    repo.git.run("config", "commit.gpgSign", "true")
+    repo.git.run("config", "gpg.program", "/nonexistent/selection-test-signing-program")
+    audit = integrate(
+        repo,
+        target="upstream",
+        rebase_options=RebaseOptions(fork_point=True),
+        commit_options=CommitOptions(gpg_sign=False),
+    )
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.manifest["rebase_plan"]["selection_anchor"]
+    assert repo.git.text("config", "--get", "commit.gpgSign") == "true"
+    assert "gpgsig " not in repo.git.text("cat-file", "commit", "HEAD")
+
+
+@pytest.mark.parametrize("annotated", [False, True])
+def test_named_tag_fork_point_preserves_native_fallback_diagnostics(repo, annotated):
+    args = ("-a", "-m", "upstream tag") if annotated else ()
+    repo.git.run("tag", *args, "upstream-tag", repo.base_oid)
+    native = repo.git.run(
+        "merge-base", "--fork-point", "refs/tags/upstream-tag", repo.source_oid, check=False
+    )
+    audit = integrate(repo, target="upstream-tag", rebase_options=RebaseOptions(fork_point=True))
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    fork = audit.manifest["rebase_plan"]["fork_point"]
+    assert fork["status"] == ("found" if native.returncode == 0 else "fallback")
+    assert fork.get("diagnostic", "") == native.stderr.decode(errors="replace").strip()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert repo.resolver.calls == []
+    if native.stderr:
+        assert "Fork-point diagnostic:" in (audit.directory / "report.md").read_text()
+
+
+def test_fork_point_selection_preserves_explicit_result_signing(repo, ssh_signing):
+    selection_history(repo)
+    audit = integrate(
+        repo,
+        target="upstream",
+        rebase_options=RebaseOptions(fork_point=True),
+        commit_options=CommitOptions(gpg_sign=str(ssh_signing)),
+    )
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    anchor = audit.manifest["rebase_plan"]["selection_anchor"]
+    assert "gpgsig " not in repo.git.text("cat-file", "commit", anchor["oid"])
+    repo.git.run("verify-commit", "HEAD")
+
+
+@pytest.mark.parametrize("equivalent,fixup", [(True, False), (False, False), (False, True)])
+def test_fork_point_onto_itself_matches_native_selection(repo, equivalent, fixup):
+    history = selection_history(repo, equivalent=equivalent, fixup=fixup)
+    repo.git.run("config", "rebase.autoSquash", "true")
+    repo.git.run("checkout", "-b", "native-point", history.before)
+    repo.git.run("rebase", "--merge", "--fork-point", "--onto", history.point, "upstream")
+    expected_tree = repo.git.text("rev-parse", "HEAD^{tree}")
+    messages = repo.git.text("log", "--format=%B%x00", f"{history.point}..HEAD")
+    native_head = repo.git.text("rev-parse", "HEAD")
+    repo.git.run("checkout", "selection-topic")
+    audit = integrate(
+        repo,
+        target="upstream",
+        onto=history.point,
+        rebase_options=RebaseOptions(fork_point=True),
+    )
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert repo.git.text("rev-parse", "HEAD^{tree}") == expected_tree
+    assert repo.git.text("log", "--format=%B%x00", f"{history.point}..HEAD") == messages
+    assert audit.manifest["rebase_plan"]["requires_sequence"]
+    assert audit.manifest["rebase_sequence"]["status"] == "captured"
+    if native_head == history.before:
+        assert repo.git.text("rev-parse", "HEAD") == history.before

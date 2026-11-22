@@ -49,6 +49,9 @@ class Engine:
             raise EzError("--onto is only supported for rebase")
         if rebase_options is not None and operation != "rebase":
             raise EzError("Rebase options are only supported for rebase")
+        options = rebase_options or RebaseOptions()
+        if options.keep_base and onto is not None:
+            raise EzError("--keep-base and --onto cannot be used together")
         commit_options = commit_options or CommitOptions()
         if operation != "merge" and (
             commit_options.message is not None or commit_options.verify_signatures is not None
@@ -66,16 +69,22 @@ class Engine:
         target_ref = self._input_ref(target, branch)
         onto_oid = git.commit_oid(onto) if onto is not None else None
         onto_ref = self._input_ref(onto, branch) if onto is not None else None
-        git.run("merge-base", before_oid, target_oid)
-        if operation == "rebase" and git.text(
-            "rev-list", "--merges", f"{target_oid}..{before_oid}"
-        ):
-            raise EzError("Rebasing merge commits is outside this POC")
+        if operation != "rebase" or not options.keep_base:
+            git.run("merge-base", before_oid, target_oid)
+        plan = None
+        if operation == "rebase":
+            plan = self._plan_rebase(target, target_oid, before_oid, onto_oid, branch, options)
+            exclusions = [plan["upstream_oid"]]
+            if plan["fork_point"]["oid"] is not None:
+                exclusions.append(plan["fork_point"]["oid"])
+            if git.text("rev-list", "--merges", before_oid, "--not", *exclusions):
+                raise EzError("Rebasing merge commits is outside this POC")
         audit = self._prepare_run(branch, before_oid, target, target_oid, target_ref, operation)
         if onto is not None:
             audit.manifest.update(onto=onto, onto_oid=onto_oid, onto_ref=onto_ref)
         if operation == "rebase":
-            audit.manifest["rebase_options"] = asdict(rebase_options or RebaseOptions())
+            audit.manifest["rebase_options"] = asdict(options)
+            audit.manifest["rebase_plan"] = plan
         if operation == "merge":
             audit.manifest["merge_ff"] = merge_ff
         audit.manifest["commit_options"] = asdict(commit_options)
@@ -116,7 +125,9 @@ class Engine:
             audit.save()
         return audit
 
-    def _input_ref(self, revision: str, branch: str) -> str | None:
+    def _input_ref(
+        self, revision: str, branch: str, *, include_current: bool = False
+    ) -> str | None:
         symbolic = (
             self.git.run(
                 "rev-parse",
@@ -130,9 +141,137 @@ class Engine:
             .strip()
         )
         # HEAD-relative expressions are pinned once, rather than re-evaluated after edits.
-        if symbolic.startswith("refs/") and symbolic != f"refs/heads/{branch}":
+        if symbolic.startswith("refs/") and (include_current or symbolic != f"refs/heads/{branch}"):
             return symbolic
         return None
+
+    def _plan_rebase(
+        self,
+        target: str,
+        target_oid: str,
+        before_oid: str,
+        onto_oid: str | None,
+        branch: str,
+        options: RebaseOptions,
+    ) -> dict[str, Any]:
+        git = self.git
+        base_oid = onto_oid or target_oid
+        if options.keep_base:
+            common = git.run("merge-base", "--all", target_oid, before_oid, check=False)
+            if common.returncode not in (0, 1):
+                raise EzError(
+                    "Cannot determine rebase base: "
+                    + common.stderr.decode(errors="replace").strip()
+                )
+            bases = common.stdout.decode().strip().splitlines()
+            if len(bases) != 1:
+                raise EzError("--keep-base requires exactly one merge base with the upstream")
+            base_oid = bases[0]
+        configured = git.run("config", "--bool", "--get", "rebase.forkPoint", check=False)
+        if configured.returncode not in (0, 1):
+            raise EzError(
+                "Cannot read rebase.forkPoint: "
+                + configured.stderr.decode(errors="replace").strip()
+            )
+        fork_enabled = (
+            options.fork_point
+            if options.fork_point is not None
+            else configured.stdout.strip() == b"true"
+        )
+        reapply = options.reapply_cherry_picks
+        if reapply is None:
+            reapply = options.keep_base
+        fork: dict[str, Any] = {
+            "enabled": fork_enabled,
+            "oid": None,
+            "source_ref": None,
+            "status": "disabled",
+        }
+        if fork_enabled:
+            source_ref = self._input_ref(target, branch, include_current=True)
+            if source_ref is None:
+                raise EzError(
+                    "--fork-point requires a named upstream reference; "
+                    "use --no-fork-point for a revision expression"
+                )
+            point = git.run("merge-base", "--fork-point", source_ref, before_oid, check=False)
+            if point.returncode not in (0, 1):
+                raise EzError(
+                    "Cannot determine fork point: " + point.stderr.decode(errors="replace").strip()
+                )
+            fork.update(
+                source_ref=source_ref, status="found" if point.returncode == 0 else "fallback"
+            )
+            diagnostic = point.stderr.decode(errors="replace").strip()
+            if diagnostic:
+                fork["diagnostic"] = diagnostic
+            if point.returncode == 0:
+                fork["oid"] = git.commit_oid(point.stdout.decode().strip())
+            else:
+                fork["reason"] = (
+                    "No usable reflog fork point; retaining the pinned replay boundary."
+                )
+        return {
+            "base_oid": base_oid,
+            "base_source": "merge-base"
+            if options.keep_base
+            else "onto"
+            if onto_oid
+            else "upstream",
+            "upstream_oid": base_oid if options.keep_base and reapply else target_oid,
+            "reapply_cherry_picks": reapply,
+            "fork_point": fork,
+        }
+
+    def _pin_rebase_selection(self, audit: Audit) -> None:
+        """Represent the union of pinned exclusions without introducing any refs."""
+        plan = audit.manifest["rebase_plan"]
+        upstream = plan["upstream_oid"]
+        fork = plan["fork_point"]["oid"]
+        selection = upstream
+        if fork is not None:
+            if (
+                self.git.run("merge-base", "--is-ancestor", upstream, fork, check=False).returncode
+                == 0
+            ):
+                selection = fork
+            elif self.git.run(
+                "merge-base", "--is-ancestor", fork, upstream, check=False
+            ).returncode:
+                # Replacing upstream with fork alone would lose upstream's patch
+                # equivalence checks. This merge object preserves both exclusions;
+                # its own patch is ignored by Git's non-merge replay selection.
+                tree = self.git.text("rev-parse", f"{upstream}^{{tree}}")
+                args = (
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit-tree",
+                    tree,
+                    "-p",
+                    upstream,
+                    "-p",
+                    fork,
+                    "-m",
+                    "git-ez pinned rebase selection",
+                )
+                selection = self.git.text(*args)
+                raw = self.git.run("cat-file", "commit", selection).stdout
+                artifact = "rebase-selection-anchor.txt"
+                (audit.directory / artifact).write_bytes(raw[: self.config.max_file_bytes])
+                plan["selection_anchor"] = {
+                    "oid": selection,
+                    "parents": [upstream, fork],
+                    "tree_oid": tree,
+                    "artifact": artifact,
+                    "command": ["git", *args],
+                    "truncated": len(raw) > self.config.max_file_bytes,
+                    "limit_bytes": self.config.max_file_bytes,
+                }
+        plan["selection_oid"] = selection
+        plan["requires_sequence"] = (
+            fork is not None and selection != upstream and plan["base_oid"] == fork
+        )
+        audit.save()
 
     def _check_repository(self) -> str:
         git = self.git
@@ -237,12 +376,21 @@ class Engine:
             raise EzError("Current branch changed before integration")
         self._verify_target(audit)
         if operation == "rebase":
-            flags: tuple[str, ...] = (
-                ("--onto", audit.manifest["onto_oid"]) if "onto" in audit.manifest else ()
-            )
+            self._pin_rebase_selection(audit)
+            plan = audit.manifest["rebase_plan"]
+            flags: tuple[str, ...] = ("--onto", plan["base_oid"], "--no-fork-point")
+            if rebase_options.reapply_cherry_picks is None and plan["reapply_cherry_picks"]:
+                flags += ("--reapply-cherry-picks",)
+            sequence_mode = rebase_options.autosquash is True or plan["requires_sequence"]
+            if plan["requires_sequence"] and rebase_options.autosquash is not True:
+                # Avoid a false up-to-date shortcut after combining exclusions,
+                # while retaining Git's per-commit fast-forward behavior.
+                flags += ("--interactive", "--no-autosquash")
+                if rebase_options.empty is None:
+                    flags += ("--empty=drop",)
             sequence_editor = None
             prefix: tuple[str, ...] = ()
-            if rebase_options.autosquash is True:
+            if sequence_mode:
                 sequence = audit.directory / "rebase-todo.txt"
                 audit.manifest["rebase_sequence"] = {
                     "artifact": sequence.name,
@@ -265,11 +413,11 @@ class Engine:
                     *flags,
                     *rebase_options.flags(),
                     *commit_options.flags(),
-                    audit.manifest["target_oid"],
+                    plan["selection_oid"],
                     sequence_editor=sequence_editor,
                 )
             finally:
-                if rebase_options.autosquash is True:
+                if sequence_mode:
                     evidence = audit.manifest["rebase_sequence"]
                     try:
                         content = read_regular(
@@ -402,7 +550,7 @@ class Engine:
 
     def _record_result(self, audit: Audit) -> None:
         git = self.git
-        before_oid, target_oid = audit.manifest["before_oid"], audit.manifest["target_oid"]
+        before_oid = audit.manifest["before_oid"]
         result_oid = git.text("rev-parse", "HEAD")
         audit.manifest["result_oid"] = result_oid
         (audit.directory / "result.diff").write_bytes(
@@ -411,19 +559,21 @@ class Engine:
             ).stdout
         )
         if audit.manifest["operation"] == "rebase":
-            base_oid = audit.manifest.get("onto_oid", target_oid)
+            plan = audit.manifest["rebase_plan"]
+            selection_oid = plan["selection_oid"]
+            base_oid = plan["base_oid"]
             ranges = (
-                (f"{target_oid}..{before_oid}", f"{base_oid}..{result_oid}")
-                if "onto" in audit.manifest
-                else (target_oid, before_oid, result_oid)
+                (f"{selection_oid}..{before_oid}", f"{base_oid}..{result_oid}")
+                if selection_oid != base_oid
+                else (selection_oid, before_oid, result_oid)
             )
             # Git rejects empty ranges in its two-range syntax. Represent an empty
             # side at the other base using the three-revision syntax instead.
-            if "onto" in audit.manifest:
-                if not git.text("rev-list", f"{target_oid}..{before_oid}"):
+            if selection_oid != base_oid:
+                if not git.text("rev-list", f"{selection_oid}..{before_oid}"):
                     ranges = (base_oid, base_oid, result_oid)
                 elif not git.text("rev-list", f"{base_oid}..{result_oid}"):
-                    ranges = (target_oid, before_oid, target_oid)
+                    ranges = (selection_oid, before_oid, selection_oid)
             args = (
                 "range-diff",
                 "--no-color",
@@ -434,11 +584,11 @@ class Engine:
             (audit.directory / "range-diff.txt").write_bytes(git.run(*args).stdout)
             audit.manifest["range_diff"] = {
                 "artifact": "range-diff.txt",
-                "before": f"{target_oid}..{before_oid}",
+                "before": f"{selection_oid}..{before_oid}",
                 "after": f"{base_oid}..{result_oid}",
                 "command": ["git", *args],
             }
-            if audit.manifest.get("rebase_options", {}).get("autosquash") is True:
+            if "rebase_sequence" in audit.manifest:
                 contents = git.run(
                     "log",
                     "--reverse",
@@ -470,7 +620,7 @@ class Engine:
         if git.run(
             "merge-base",
             "--is-ancestor",
-            audit.manifest.get("onto_oid", audit.manifest["target_oid"]),
+            audit.manifest.get("rebase_plan", {}).get("base_oid", audit.manifest["target_oid"]),
             audit.manifest["result_oid"],
             check=False,
         ).returncode:

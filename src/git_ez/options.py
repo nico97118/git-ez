@@ -16,6 +16,8 @@ class RebaseOptions:
     reapply_cherry_picks: bool | None = None
     force_rebase: bool | None = None
     autosquash: bool | None = None
+    keep_base: bool = False
+    fork_point: bool | None = None
 
     def __post_init__(self) -> None:
         if self.empty is not None and self.empty not in ("drop", "keep", "stop"):

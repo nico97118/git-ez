@@ -22,7 +22,7 @@ its own small command-line interface; it does not forward arbitrary options to
 | --- | --- |
 | Target | One explicit revision is required, even when the branch has an upstream. It must already be available locally. |
 | Repository | A clean checkout on a local branch, with no active Git operation. Detached HEAD and bare repositories are unsupported. |
-| Rebase | Replay the current branch onto the pinned target, or use `--onto` to choose a separate new base, using Git's merge backend. Autostash, update-refs, and rebasing merge commits are disabled. |
+| Rebase | Replay the current branch using Git's merge backend. Use `--onto` for a separate new base or `--keep-base` to retain the unique common ancestor. Autostash, update-refs, and rebasing merge commits are disabled. |
 | Merge | Integrate one pinned target with `--no-edit`; Git's fast-forward policy still applies. |
 | Interaction | Git runs noninteractively with `diff3` conflict markers. Hooks and signing failures are not bypassed. |
 | Model | Valid `ez.*` model configuration is required before integration, even if no conflicts occur. No model call is made when Git resolves the operation without assistance. |
@@ -42,6 +42,54 @@ Git's `A...B` shorthand for the new base are not supported.
 
 ```sh
 git ez rebase --onto main old-base
+```
+
+Rebase accepts `--keep-base` / `--no-keep-base` and `--fork-point` /
+`--no-fork-point`. `--keep-base` retains the unique merge base of the current
+branch and upstream as the result's base. It implies cherry-pick reapplication
+unless `--no-reapply-cherry-picks` is explicit. It cannot be combined with
+`--onto`; absent or ambiguous merge bases are rejected before integration.
+In this mode, `Integrated: True` means the requested rebase finished; the
+upstream tip need not be an ancestor of the result.
+
+`--fork-point` refines replay selection from the upstream's local reflog.
+`rebase.forkPoint` applies when the CLI does not choose a policy; otherwise the
+last explicit value wins. With an explicit target and no configuration, the
+default is disabled. Fork-point mode requires a named reference (a local or
+remote-tracking branch, tag, or HEAD); use `--no-fork-point` for a literal SHA or
+revision expression. A missing usable reflog point falls back to the otherwise
+chosen replay boundary, with the reason recorded in the report.
+
+git-ez pins the base and computed fork point before running Git, rather than
+letting Git recompute them during replay. It passes explicit `--onto` and
+`--no-fork-point` arguments with those pinned selections. When both exclusion
+histories are needed and neither contains the other, an internal merge object represents their
+combined exclusions so native cherry-pick equivalence remains intact. This
+creates no branch or additional reference, and the object is not part of the
+result history. This object is unsigned metadata; signing options still apply to
+the resulting commits. The audit records its command, parents, tree and bounded raw
+capture, including any truncation. Git's pre-rebase hook receives the effective
+pinned replay boundary, which may be this internal object, rather than the
+original upstream name. Hooks are still executed and their failures remain terminal.
+Hooks that require the original upstream argument should use native Git directly.
+
+When `--onto` equals the fork point and combining exclusions changes the replay
+boundary, git-ez uses the native interactive sequencer to avoid an incorrect
+up-to-date shortcut. Its capture-only editor records the generated instructions
+without changing them. Autosquash stays disabled unless explicitly requested,
+the default empty-commit policy remains `drop`, and per-commit reuse is preserved.
+The instruction-format override and bounded sequence capture described below also
+apply to this case.
+
+The original upstream and any explicit new-base reference remain monitored.
+Final ancestry is checked against the pinned result base; range-diff compares
+the selected candidate series with its replay on that base. These options combine
+with autosquash and signing without changing their scope.
+
+```sh
+git ez rebase main --keep-base --autosquash
+git ez rebase origin/main --fork-point
+git ez rebase old-base --onto main --fork-point
 ```
 
 Rebase also accepts `--empty=drop|keep|stop`, `--keep-empty` /
@@ -360,8 +408,9 @@ Traces are stored in the target repository's common Git directory:
   integration.log            # Git commands and output
   result.diff                # Full before/after diff
   range-diff.txt             # Commit series comparison, rebase only
-  rebase-todo.txt            # Initial native sequence, autosquash only
-  rebase-commits.log         # Result commits/messages, autosquash only; truncation is explicit
+  rebase-todo.txt            # Initial native sequence, sequencer-backed rebases
+  rebase-commits.log         # Result commits/messages, sequencer-backed rebases; truncation is explicit
+  rebase-selection-anchor.txt # Internal exclusion object when needed; truncation is explicit
   conflicts/0001/
     base.txt / ours.txt / theirs.txt / marked.txt
     request.json             # Initial conflict evidence

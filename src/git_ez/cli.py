@@ -86,6 +86,18 @@ def parser() -> argparse.ArgumentParser:
         if operation == "rebase":
             run.add_argument("--onto", help="Replay commits after target onto this revision")
             run.add_argument(
+                "--keep-base",
+                action=argparse.BooleanOptionalAction,
+                default=False,
+                help="Replay on the unique common ancestor instead of the upstream tip",
+            )
+            run.add_argument(
+                "--fork-point",
+                action=argparse.BooleanOptionalAction,
+                default=None,
+                help="Use the upstream reflog to select commits; overrides rebase.forkPoint",
+            )
+            run.add_argument(
                 "--autosquash",
                 action=argparse.BooleanOptionalAction,
                 default=None,
@@ -184,11 +196,13 @@ def main(argv: list[str] | None = None) -> int:
             onto=getattr(args, "onto", None),
             rebase_options=(
                 RebaseOptions(
-                    args.empty,
-                    args.keep_empty,
-                    args.reapply_cherry_picks,
-                    args.force_rebase,
-                    args.autosquash,
+                    empty=args.empty,
+                    keep_empty=args.keep_empty,
+                    reapply_cherry_picks=args.reapply_cherry_picks,
+                    force_rebase=args.force_rebase,
+                    autosquash=args.autosquash,
+                    keep_base=args.keep_base,
+                    fork_point=args.fork_point,
                 )
                 if args.command == "rebase"
                 else None

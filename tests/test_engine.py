@@ -2298,6 +2298,84 @@ def test_interactive_multiple_rebase_stops(repo, mocker):
     assert [r["round"] for r in audit.manifest["reviews"]] == [1, 1, 2]
 
 
+@pytest.mark.parametrize(
+    ("operation", "previous_stop"), [("merge", False), ("rebase", False), ("rebase", True)]
+)
+@pytest.mark.parametrize("ending", ["stop", "eof", "interrupt", "resolver_error"])
+def test_interactive_failed_revision_links_latest_session(
+    repo, mocker, operation, ending, previous_stop
+):
+    if previous_stop:
+        repo.file.write_text("source second\n")
+        repo.git.run("commit", "-am", "second change")
+    original = repo.resolver.run
+    indices = []
+    heads = []
+    failing_round = 2 if previous_stop else 1
+
+    def resolve(git, audit, number, paths, check):
+        review = audit.manifest["reviews"][-1]
+        directory = audit.directory / "sessions" / f"{number:04d}"
+        directory.mkdir(parents=True)
+        (directory / "messages.json").write_text(json.dumps([f"attempt {number}"]))
+        (directory / "files.json").write_text(json.dumps({"attempt": number}))
+        audit.manifest.setdefault("sessions", []).append(
+            {
+                "round": number,
+                "artifacts": f"sessions/{number:04d}",
+                "tool_calls": 0,
+                "runtime": "deterministic test resolver",
+                "status": "failed",
+                "rationale": f"attempt {number}",
+                "confidence": 0.95,
+            }
+        )
+        if review["round"] == failing_round:
+            indices.append(git.run("ls-files", "--stage", "-z").stdout)
+            heads.append(git.text("rev-parse", "HEAD"))
+        result = original(git, audit, number, paths, check)
+        if review["feedback"] and ending == "resolver_error":
+            raise EzError("Revision resolver failed")
+        return result
+
+    repo.resolver.run = resolve
+    answers = iter((["a"] if previous_stop else []) + ["r", "revise this proposal", "s"])
+
+    def read(prompt):
+        if len(indices) == 2:
+            if ending == "eof":
+                raise EOFError
+            if ending == "interrupt":
+                raise KeyboardInterrupt
+        return next(answers)
+
+    mocker.patch("builtins.input", side_effect=read)
+    audit = Engine(repo.root, repo.config, repo.resolver).run("main", operation, interactive=True)
+    assert audit.manifest["status"] == ("interrupted" if ending == "interrupt" else "failed")
+    latest = 3 if previous_stop else 2
+    record = audit.manifest["conflicts"][-1]
+    assert record["artifacts"]["session"] == f"sessions/{latest:04d}/messages.json"
+    assert record["artifacts"]["files"] == f"sessions/{latest:04d}/files.json"
+    assert record["resolution"]["rationale"] == f"attempt {latest}"
+    assert record["status"] == ("interrupted" if ending == "interrupt" else "failed")
+    if previous_stop:
+        assert (
+            audit.manifest["conflicts"][0]["artifacts"]["session"] == "sessions/0001/messages.json"
+        )
+    assert len(audit.manifest["reviews"]) == latest
+    for review in audit.manifest["reviews"]:
+        assert (audit.directory / review["artifacts"] / "files.json").is_file()
+        assert (audit.directory / review["artifacts"] / "worktree.diff").is_file()
+    assert indices[0] == indices[1] == repo.git.run("ls-files", "--stage", "-z").stdout
+    assert heads[0] == heads[1] == repo.git.text("rev-parse", "HEAD")
+    assert repo.git.run("ls-files", "-u").stdout
+    if operation == "rebase":
+        assert repo.git.rebase_active()
+    else:
+        assert repo.git.text("rev-parse", "MERGE_HEAD") == repo.parent_oid
+    assert repo.file.read_text() == "combined\n"
+
+
 @pytest.mark.parametrize("operation", ["merge", "rebase"])
 def test_interactive_rerere_autoupdate_never_prompts(repo, mocker, operation):
     repo.git.run("config", "rerere.enabled", "true")

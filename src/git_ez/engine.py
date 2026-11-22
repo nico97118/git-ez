@@ -779,8 +779,25 @@ class Engine:
             status = "interrupted"
             raise
         finally:
+            session_number: int | None = round_number
+            if audit.manifest.get("interactive"):
+                # A failed review never returns its session; use only this stop's attempt.
+                review = next(
+                    (
+                        review
+                        for review in reversed(audit.manifest.get("reviews", []))
+                        if review["round"] == round_number
+                    ),
+                    None,
+                )
+                session_number = review["attempt"] if review else None
+            final_session = (
+                audit.directory / "sessions" / f"{session_number:04d}"
+                if session_number is not None
+                else None
+            )
             sessions = audit.manifest.get("sessions", [])
-            details = sessions[-1] if sessions and sessions[-1]["round"] == round_number else {}
+            details = sessions[-1] if sessions and sessions[-1]["round"] == session_number else {}
             if not decision and "rationale" in details:
                 decision = {"rationale": details["rationale"], "confidence": details["confidence"]}
             if details.get("status") == "low_confidence":
@@ -788,9 +805,9 @@ class Engine:
             for record, conflict in snapshots:
                 record["status"] = status
                 for label, filename in (("session", "messages.json"), ("files", "files.json")):
-                    if (session / filename).is_file():
+                    if final_session is not None and (final_session / filename).is_file():
                         record["artifacts"][label] = str(
-                            (session / filename).relative_to(audit.directory)
+                            (final_session / filename).relative_to(audit.directory)
                         )
                 try:
                     path = git.safe_path(conflict.path)

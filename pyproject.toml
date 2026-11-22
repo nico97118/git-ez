@@ -9,7 +9,7 @@ description = "Local Git rebase/merge with traceable AI conflict resolution"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "GPL-3.0-only"
-license-files = ["LICENSE", "src/git_ez/_vendor/langgraph_sqlite/LICENSE"]
+license-files = ["LICENSE"]
 dependencies = [
     "deepagents==0.7.41",
     "langchain-openai==1.8.5",
@@ -54,8 +54,6 @@ packages = ["src/git_ez"]
 include = ["/src/git_ez", "/tests", "/examples", "/README.md", "/CONTRIBUTING.md", "/LICENSE", "/pyproject.toml", "/uv.lock", "/docs", "/scripts"]
 
 [tool.ruff]
-# Preserve vendored upstream formatting and lint conventions.
-extend-exclude = ["src/git_ez/_vendor/langgraph_sqlite"]
 line-length = 100
 target-version = "py311"
 
@@ -65,8 +63,3 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-
-[[tool.mypy.overrides]]
-module = ["git_ez._vendor.langgraph_sqlite.*"]
-# Third-party code retains upstream typing; project-owned callers remain strict.
-ignore_errors = true

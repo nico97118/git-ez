@@ -129,7 +129,7 @@ def test_git_extension_resolves_through_real_http_and_agent(
     assert len(audits) == 1
     assert "Preserve both intentions" in (audits[0] / "report.md").read_text()
     assert (audits[0] / "validation.stdout").read_text() == "checked\n"
-    assert (audits[0] / "sessions/0001/checkpoints.sqlite").is_file()
+    assert (audits[0] / "sessions/0001/messages.json").is_file()
 
 
 @pytest.mark.integration

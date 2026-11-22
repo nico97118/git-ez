@@ -3,10 +3,9 @@
 
 """Real Deep Agents graph/backend/checkpoint integration with a scripted chat model."""
 
+import json
 import shlex
-import sqlite3
 import sys
-from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -154,8 +153,12 @@ def test_real_graph_reads_context_repairs_tests_and_persists_integration(repo, o
     assert "rules.txt" in events
     assert "AssertionError" in events
     assert "notes.txt" in (session / "staged.diff").read_text()
-    with closing(sqlite3.connect(session / "checkpoints.sqlite")) as db:
-        assert db.execute("select count(*) from checkpoints").fetchone()[0] > 0
+    assert not (session / "checkpoints.sqlite").exists()
+    assert json.loads((session / "runtime.json").read_text())["checkpoints"] == {
+        "storage": "memory",
+        "resumable": False,
+    }
+    assert "checkpoints.sqlite" not in (audit.directory / "report.md").read_text()
     assert not (result.path / ".ez-agent").exists()
 
 
@@ -229,7 +232,7 @@ def test_finish_with_markers_can_recover(repo) -> None:
     assert "conflict markers" in str(model.seen[1])
 
 
-def test_low_confidence_preserves_edits_and_checkpoint(repo) -> None:
+def test_low_confidence_preserves_edits_and_audit(repo) -> None:
     audit, _ = run_agent(
         repo,
         [
@@ -240,7 +243,7 @@ def test_low_confidence_preserves_edits_and_checkpoint(repo) -> None:
     assert audit.manifest["status"] == "failed"
     assert audit.manifest["sessions"][0]["status"] == "low_confidence"
     assert (Path(audit.manifest["worktree"]) / "file.txt").read_text() == "uncertain\n"
-    assert (audit.directory / "sessions/0001/checkpoints.sqlite").is_file()
+    assert (audit.directory / "sessions/0001/messages.json").is_file()
     assert "Unclear business intent" in (audit.directory / "report.md").read_text()
     assert (audit.directory / "sessions/0001/decision.json").is_file()
 
@@ -308,7 +311,7 @@ def test_plain_answer_without_finish_is_not_success(repo) -> None:
     assert "without a verified finish" in audit.manifest["error"]
 
 
-def test_later_rebase_stop_gets_an_independent_checkpoint(repo) -> None:
+def test_later_rebase_stop_gets_an_independent_session(repo) -> None:
     repo.git.run("checkout", "feature")
     (repo.root / "file.txt").write_text("source second\n")
     repo.git.run("commit", "-am", "second source change")
@@ -324,7 +327,7 @@ def test_later_rebase_stop_gets_an_independent_checkpoint(repo) -> None:
     assert audit.manifest["status"] == "succeeded", audit.manifest
     assert len(audit.manifest["sessions"]) == 2
     for number in ("0001", "0002"):
-        assert (audit.directory / "sessions" / number / "checkpoints.sqlite").is_file()
+        assert (audit.directory / "sessions" / number / "messages.json").is_file()
     assert model.position == 4
 
 
@@ -631,3 +634,70 @@ def test_interactive_revisions_reach_runtime_and_keep_separate_sessions(repo, mo
     assert mission["user_feedback"] == "preserve both intentions"
     assert mission["review_round"] == 1
     assert (audit.directory / "proposals/0001/files/0001.bin").read_text() == "first\n"
+
+
+@pytest.mark.parametrize("outcome", ["success", "low_confidence", "interrupted"])
+def test_agent_files_survive_success_failure_and_interruption(repo, outcome):
+    if outcome == "interrupted":
+        generate = ScriptedModel._generate
+
+        def interrupt_after_edits(self, *args, **kwargs):
+            if self.position == 3:
+                files = list(
+                    (repo.root / ".git/ez/runs").glob("*/sessions/0001/agent-files/proof.txt")
+                )
+                assert len(files) == 1
+                assert files[0].read_text() == "Retained evidence\n"
+                raise KeyboardInterrupt
+            return generate(self, *args, **kwargs)
+
+        repo.mocker.patch.object(ScriptedModel, "_generate", interrupt_after_edits)
+    audit, model = run_agent(
+        repo,
+        [
+            [tool("write_file", file_path="/.ez-agent/proof.txt", content="Retained evidence\n")],
+            [tool("read_file", file_path="/.ez-agent/proof.txt")],
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [
+                tool(
+                    "finish",
+                    rationale="Checked retained evidence",
+                    confidence=0.1 if outcome == "low_confidence" else 0.95,
+                )
+            ],
+        ],
+    )
+    assert "Retained evidence" in str(model.seen[2])
+    session = audit.directory / "sessions/0001"
+    assert (session / "agent-files/proof.txt").read_text() == "Retained evidence\n"
+    assert (session / "messages.json").is_file()
+    events = [json.loads(line) for line in (session / "events.jsonl").read_text().splitlines()]
+    assert any(event["event"] == "tool_result" for event in events)
+    assert not (session / "checkpoints.sqlite").exists()
+    assert not (repo.root / ".ez-agent").exists()
+    if outcome == "success":
+        assert audit.manifest["status"] == "succeeded"
+        assert repo.git.text("show", "HEAD:file.txt") == "combined"
+        assert repo.git.run("ls-files", "--", "*proof*").stdout == b""
+    else:
+        assert audit.manifest["status"] == ("interrupted" if outcome == "interrupted" else "failed")
+        assert repo.git.operation_active()
+        assert repo.git.branch_oid("feature") == repo.source
+        assert (repo.root / "file.txt").read_text() == "combined\n"
+
+
+def test_large_tool_output_is_offloaded_to_persistent_audit_files(repo):
+    audit, model = run_agent(
+        repo,
+        [
+            [command("print('0123456789' * 15000)")],
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [tool("finish", rationale="Resolved after large output", confidence=0.95)],
+        ],
+        config=replace(repo.config, tool_output_bytes=200000, agent_max_context_bytes=1000000),
+    )
+    assert audit.manifest["status"] == "succeeded", audit.manifest
+    files = list((audit.directory / "sessions/0001/agent-files").rglob("*"))
+    assert any(path.is_file() and "0123456789" * 15000 in path.read_text() for path in files)
+    assert "/.ez-agent/" in str(model.seen[1])
+    assert not (repo.root / ".ez-agent").exists()

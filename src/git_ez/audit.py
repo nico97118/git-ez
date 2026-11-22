@@ -290,7 +290,7 @@ class Audit:
                 f"- Status: `{session['status']}` — {session['tool_calls']} tool calls",
                 f"- Runtime: `{session['runtime']}`",
                 f"- [Agent configuration]({folder}/runtime.json)",
-                f"- [LangGraph checkpoints]({folder}/checkpoints.sqlite)",
+                f"- [Agent files and offloaded history]({folder}/agent-files/)",
                 f"- [Conversation]({folder}/messages.json)",
                 f"- [Tool events]({folder}/events.jsonl)",
                 f"- [Worktree diff]({folder}/worktree.diff)",

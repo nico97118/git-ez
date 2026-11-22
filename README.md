@@ -33,7 +33,8 @@ worktrees, fetch, or push.
 
 ## Installation
 
-Requires Python 3.11+, Git 2.38+, and macOS or Linux for local shell execution.
+Requires Python 3.11+ and Git 2.38+. macOS and Linux use the installation below;
+FreeBSD has an experimental [native-package installation](#freebsd-experimental).
 Using [uv](https://docs.astral.sh/uv/getting-started/installation/), install from the public repository:
 
 ```bash
@@ -55,6 +56,44 @@ The package installs a single executable, `git-ez`. Once the directory reported 
 A standard installation copies the package into an isolated environment: the source
 checkout is not required at runtime. Provider connectors and the agent runtime are
 included in the main dependencies.
+
+### FreeBSD (experimental)
+
+FreeBSD CI targets 15.1 amd64 with Python 3.12. This experimental target validates
+installation and usage on one architecture; ARM64 is not part of the CI scope.
+
+Earlier FreeBSD 14.4 amd64 CI validation passed all 551 tests, installed-wheel
+checks, and manual discovery. The 15.1 amd64 target needs its own successful run.
+
+Install the system interpreter, its SQLite module, and the toolchain needed to
+build Python dependencies that have no FreeBSD wheels:
+
+```sh
+pkg install git uv python312 py312-sqlite3 rust pkgconf
+```
+
+Then, as your regular user, use the standard isolated installation:
+
+```sh
+uv tool install --python /usr/local/bin/python3.12 git+https://github.com/nico97118/git-ez
+export PATH="$(uv tool dir --bin):$PATH"
+export MANPATH="$(uv tool dir)/git-ez-ai/share/man:${MANPATH:-}"
+git ez --version
+git help ez
+```
+
+For a local checkout, replace the Git URL with `.`. Save the exports in your
+shell profile (these examples use POSIX shell syntax). No system Python packages
+need to be exposed to the tool environment. `sqlite-vec` is not required: git-ez
+bundles the synchronous SQLite checkpoint adapter, with its original MIT license,
+without the unrelated vector store. SQLite audit checkpoints are retained.
+
+For development prerequisites and the FreeBSD-specific Ruff warning, see
+[Contributing on FreeBSD](CONTRIBUTING.md#freebsd). Ruff is not required at runtime.
+
+Dependencies without matching FreeBSD wheels compile from source. The FreeBSD CI
+runs the real conflict-resolution tests and verifies an installed wheel in an
+isolated environment for each release target.
 
 ### Command help and manual
 

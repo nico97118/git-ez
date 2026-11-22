@@ -117,7 +117,15 @@ required. CI covers Python 3.11 through 3.14 on Linux and macOS; consider that r
 when changing compatibility. Quality jobs select the `lint` group, functional
 jobs select `test`, and packaging jobs install runtime dependencies only. Use
 `uv run --locked --no-default-groups` with the job's explicit `--group` selection
-to avoid restoring the default `dev` group.
+to avoid restoring the default `dev` group. Experimental FreeBSD CI targets 15.1
+amd64/Python 3.12 only, installing the test dependency group and checking isolated
+installed wheels. ARM64 emulation is outside the CI scope. Ruff and mypy remain
+in the Ubuntu quality job. Use
+FreeBSD's system Python with its SQLite module installed, plus gmake for Ruff's
+source build. Prefix Ruff commands with `RAYON_NUM_THREADS=1` on FreeBSD to avoid
+the intermittent jemalloc assertion observed on the native arm64 VM; see the
+FreeBSD section of CONTRIBUTING.md for prerequisites and the documented tool
+execution override.
 
 The synchronous SQLite checkpoint adapter is vendored under
 `src/git_ez/_vendor/langgraph_sqlite/` with upstream MIT licensing and provenance.

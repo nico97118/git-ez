@@ -108,6 +108,19 @@ class Audit:
                 record.update(state="unavailable", error=str(exc))
         head = git.run("rev-parse", "HEAD", check=False)
         branch = git.run("symbolic-ref", "-q", "HEAD", check=False)
+        capture_errors = [
+            {
+                "command": name,
+                "returncode": result.returncode,
+                "stderr": result.stderr.decode("utf-8", errors="replace"),
+            }
+            for name, result in (
+                ("diff", diff),
+                ("changed", changed),
+                ("untracked", untracked),
+            )
+            if result.returncode
+        ]
         write_json(
             directory / "files.json",
             {
@@ -115,21 +128,14 @@ class Audit:
                 "head": head.stdout.decode().strip() or None,
                 "branch": branch.stdout.decode().strip() or None,
                 "files": records,
-                "capture_errors": [
-                    {
-                        "command": name,
-                        "returncode": result.returncode,
-                        "stderr": result.stderr.decode("utf-8", errors="replace"),
-                    }
-                    for name, result in (
-                        ("diff", diff),
-                        ("changed", changed),
-                        ("untracked", untracked),
-                    )
-                    if result.returncode
-                ],
+                "capture_errors": capture_errors,
             },
         )
+        if capture_errors:
+            commands = ", ".join(str(error["command"]) for error in capture_errors)
+            raise EzError(
+                f"Audit capture commands failed: {commands}; inspect {directory / 'files.json'}"
+            )
 
     def report(self) -> None:
         data = self.manifest

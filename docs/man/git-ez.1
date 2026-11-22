@@ -226,7 +226,9 @@ active
 operation to continue or abort. There is no agent session resume command.
 .PP
 The agent shell has host-process privileges and is not a system sandbox.
-Failure to write a required audit snapshot fails the run; a completed Git
+Failure to write a required audit snapshot, including failure of Git commands
+that capture diffs and enumerate files, fails the run. Partial evidence is retained
+and the failure appears in the manifest and Markdown report. A completed Git
 integration remains available locally. Secondary capture errors do not replace
 the original failure reason.
 .PP

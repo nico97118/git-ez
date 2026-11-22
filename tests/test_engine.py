@@ -8,9 +8,11 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
+from git_ez.audit import Audit
 from git_ez.config import Config
 from git_ez.engine import Engine
 from git_ez.errors import EzError
@@ -602,6 +604,54 @@ def test_final_audit_capture_failure_does_not_report_overall_success(repo, mocke
     saved = json.loads((audit.directory / "run.json").read_text())
     assert saved["status"] == "failed"
     assert "Final capture failed: disk full" in (audit.directory / "report.md").read_text()
+
+
+@pytest.mark.parametrize(
+    "failed_commands", [("diff",), ("changed",), ("untracked",), ("diff", "changed", "untracked")]
+)
+@pytest.mark.parametrize("resolver_error", [False, True])
+def test_final_capture_command_errors_are_reported(repo, mocker, failed_commands, resolver_error):
+    if resolver_error:
+        repo.resolver = FakeResolver(error="model unavailable")
+    capture = Audit.capture_worktree
+
+    def failing_capture(audit, git, directory, *args, **kwargs):
+        run = git.run
+
+        def failing_run(*command, **options):
+            name = None
+            if command[0] == "diff":
+                name = "changed" if "--name-only" in command else "diff"
+            elif command[:2] == ("ls-files", "--others"):
+                name = "untracked"
+            if name in failed_commands:
+                return subprocess.CompletedProcess(command, 128, b"", b"capture command failed")
+            return run(*command, **options)
+
+        with patch.object(git, "run", side_effect=failing_run):
+            return capture(audit, git, directory, *args, **kwargs)
+
+    mocker.patch("git_ez.audit.Audit.capture_worktree", side_effect=failing_capture, autospec=True)
+    audit = integrate(repo)
+    saved = json.loads((audit.directory / "run.json").read_text())
+    assert saved["status"] == "failed"
+    assert saved["integrated"] is not resolver_error
+    assert saved["exit_state"] == "exit/files.json"
+    assert "Audit capture commands failed" in saved["capture_error"]
+    if resolver_error:
+        assert saved["error"] == "model unavailable"
+        assert repo.git.branch_oid("feature") == repo.source_oid
+    else:
+        assert "Final audit capture failed" in saved["error"]
+        assert repo.git.branch_oid("feature") == saved["result_oid"]
+    assert bool(repo.git.operation_active()) is resolver_error
+    snapshot = json.loads((audit.directory / saved["exit_state"]).read_text())
+    assert [error["command"] for error in snapshot["capture_errors"]] == list(failed_commands)
+    assert all(error["returncode"] == 128 for error in snapshot["capture_errors"])
+    assert all(error["stderr"] == "capture command failed" for error in snapshot["capture_errors"])
+    report = (audit.directory / "report.md").read_text()
+    assert f"Final capture failed: {saved['capture_error']}" in report
+    assert "[Final file state](exit/files.json)" in report
 
 
 @pytest.mark.parametrize("change", ["branch", "commit"])

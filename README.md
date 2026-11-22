@@ -414,8 +414,10 @@ Low confidence, an error, or an interruption leaves local state available for in
 There is no automatic rollback. `integrated` indicates that Git completed, whereas
 `succeeded` also requires successful checks. Validation failure after integration
 therefore preserves the local result with a failed run status. Failure to write a
-required agent-session or final audit snapshot also fails the run. A session snapshot
-failure prevents Git continuation; a final snapshot failure preserves any completed
+required agent-session or final audit snapshot also fails the run, including failures
+of the Git commands that capture diffs and enumerate files. Partial capture evidence
+is retained and the failure is reported in the manifest and Markdown report.
+A session snapshot failure prevents Git continuation; a final snapshot failure preserves any completed
 integration. A secondary capture error does not replace the original failure reason.
 
 ## Audit

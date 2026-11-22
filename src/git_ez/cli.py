@@ -45,6 +45,8 @@ class GitArgumentParser(argparse.ArgumentParser):
                 validation = ([value] if separator else []) + arguments[index + 1 :]
                 arguments = arguments[:index]
                 break
+            if argument == "--log":
+                arguments[index] = "--log=20"
             if argument in ("--gpg-sign", "-S"):
                 arguments[index] = "--gpg-sign="
         parsed = super().parse_args(arguments, namespace)
@@ -120,6 +122,17 @@ def parser() -> argparse.ArgumentParser:
             )
             run.add_argument("--ff", dest="force_rebase", action="store_const", const=False)
         if operation == "merge":
+            run.add_argument(
+                "--log",
+                type=int,
+                default=None,
+                metavar="N",
+                help="Include up to N commit subjects; bare --log uses 20",
+            )
+            run.add_argument("--no-log", dest="log", action="store_const", const=0)
+            run.add_argument(
+                "--cleanup", choices=("strip", "whitespace", "verbatim", "scissors", "default")
+            )
             messages = run.add_mutually_exclusive_group()
             messages.add_argument(
                 "--message", "-m", action="append", help="Merge message paragraph"
@@ -185,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
             gpg_sign=args.gpg_sign,
             signoff=args.signoff,
             verify_signatures=getattr(args, "verify_signatures", None),
+            log=getattr(args, "log", None),
+            cleanup=getattr(args, "cleanup", None),
         )
         config = Config.from_git(args.repo)
         engine = Engine(args.repo, config)

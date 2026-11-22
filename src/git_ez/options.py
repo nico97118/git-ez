@@ -51,14 +51,30 @@ class CommitOptions:
     gpg_sign: str | Literal[False] | None = None
     signoff: bool | None = None
     verify_signatures: bool | None = None
+    log: int | None = None
+    cleanup: str | None = None
 
     def __post_init__(self) -> None:
+        if self.log is not None and self.log < 0:
+            raise EzError("Merge log limit must be nonnegative")
+        if self.cleanup is not None and self.cleanup not in (
+            "strip",
+            "whitespace",
+            "verbatim",
+            "scissors",
+            "default",
+        ):
+            raise EzError("Invalid merge cleanup mode")
         if self.message is not None and "\0" in self.message:
             raise EzError("Commit message must not contain NUL characters")
 
-    def flags(self, *, verify: bool = True) -> tuple[str, ...]:
+    def flags(self, *, verify: bool = True, prepared_message: bool = False) -> tuple[str, ...]:
         flags = []
-        if self.message is not None:
+        if verify and self.log is not None:
+            flags.append(f"--log={self.log}")
+        if self.cleanup is not None:
+            flags.append(f"--cleanup={self.cleanup}")
+        if self.message is not None and not prepared_message:
             flags.append(f"--message={self.message}")
         if self.gpg_sign is False:
             flags.append("--no-gpg-sign")

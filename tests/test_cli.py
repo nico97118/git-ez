@@ -536,3 +536,72 @@ def test_cli_rebase_selection_options_reach_the_engine(cli_repo, model_server, m
     manifest = json.loads((directory / "run.json").read_text())
     assert manifest["rebase_options"]["keep_base"] is keep
     assert manifest["rebase_plan"]["fork_point"]["enabled"] is (not keep)
+
+
+@pytest.mark.parametrize(
+    "arguments,expected",
+    [
+        (["--log", "main"], 20),
+        (["--log=2", "main"], 2),
+        (["main", "--log=0"], 0),
+        (["main", "--log", "--no-log"], 0),
+        (["main", "--no-log", "--log=3"], 3),
+    ],
+)
+@pytest.mark.unit
+def test_merge_log_parsing_preserves_target(arguments, expected):
+    args = parser().parse_args(["merge", *arguments])
+    assert args.target == "main"
+    assert args.log == expected
+
+
+@pytest.mark.unit
+def test_merge_log_does_not_change_validation_arguments():
+    args = parser().parse_args(["merge", "main", "--check", "tool", "--log"])
+    assert args.log is None
+    assert args.check == ["tool", "--log"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["rebase", "main", "--log"],
+        ["rebase", "main", "--cleanup=strip"],
+        ["merge", "main", "--cleanup=invalid"],
+        ["merge", "main", "--log=invalid"],
+    ],
+)
+@pytest.mark.unit
+def test_invalid_merge_message_options(arguments):
+    with pytest.raises(SystemExit):
+        parser().parse_args(arguments)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("from_file", [False, True])
+def test_cli_merge_log_cleanup_reaches_commit(cli_repo, tmp_path, capsys, from_file):
+    if from_file:
+        path = tmp_path / "merge-message.txt"
+        path.write_text("Custom merge\n\n# remove me\n")
+        message = ["-F", str(path)]
+    else:
+        message = ["-m", "Custom merge\n\n# remove me\n"]
+    assert (
+        main(
+            ["merge", "main", "--repo", str(cli_repo.path), "--log=1", "--cleanup=strip", *message]
+        )
+        == 0
+    )
+    result = cli_repo.text("show", "-s", "--format=%B", "HEAD")
+    assert "Custom merge" in result
+    assert "remove me" not in result
+    assert "  parent" in result
+    assert "Status: succeeded" in capsys.readouterr().out
+
+
+@pytest.mark.unit
+def test_negative_merge_log_is_rejected_before_configuration(mocker, capsys):
+    config = mocker.patch("git_ez.cli.Config.from_git")
+    assert main(["merge", "main", "--log=-1"]) == 2
+    config.assert_not_called()
+    assert "nonnegative" in capsys.readouterr().err

@@ -164,6 +164,25 @@ input (`-F -`) is unsupported. The requested message is retained through conflic
 resolution and recorded in the audit. Message options do not force a merge commit
 when Git can fast-forward.
 
+Merge also accepts `--log[=<n>]` / `--no-log` and
+`--cleanup=strip|whitespace|verbatim|scissors|default`. Bare `--log` includes up to
+20 incoming commit subjects; attach a different nonnegative limit as `--log=5`.
+`--no-log` is equivalent to `--log=0`. The last explicit log option wins; when
+omitted, Git's `merge.log` configuration applies. Git generates the summary,
+including when combined with `-m` or `-F`.
+
+Cleanup uses Git's native message rules without opening an editor. The explicit
+mode is applied both during the initial merge and when committing after a conflict;
+Git's prepared `MERGE_MSG`, including its shortlog, is preserved for continuation.
+In particular, `scissors` follows Git's noninteractive behavior rather than forcing
+editor-dependent trimming. Omitted cleanup uses native defaults/configuration.
+These options do not force a commit on fast-forward and are recorded in the audit.
+
+```sh
+git ez merge feature --log=5 --cleanup=strip
+git ez merge feature --no-log -m "Integrate feature"
+```
+
 Both operations accept `--signoff` / `--no-signoff` and `-S` /
 `--gpg-sign[=<key>]` / `--no-gpg-sign`. Attach an explicit signing key with
 `-S<key>` or `--gpg-sign=<key>`; a bare signing option uses Git's configured key.

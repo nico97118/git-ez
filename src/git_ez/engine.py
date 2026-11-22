@@ -54,9 +54,14 @@ class Engine:
             raise EzError("--keep-base and --onto cannot be used together")
         commit_options = commit_options or CommitOptions()
         if operation != "merge" and (
-            commit_options.message is not None or commit_options.verify_signatures is not None
+            commit_options.message is not None
+            or commit_options.verify_signatures is not None
+            or commit_options.log is not None
+            or commit_options.cleanup is not None
         ):
-            raise EzError("Messages and signature verification are only supported for merge")
+            raise EzError(
+                "Messages, log, cleanup and signature verification are only supported for merge"
+            )
         if merge_ff is not None:
             if operation != "merge":
                 raise EzError("Fast-forward policy is only supported for merge")
@@ -506,9 +511,21 @@ class Engine:
             ):
                 raise EzError("Merge target changed before Git continuation")
             if operation == "merge" and commit_options.flags(verify=False):
-                # Native merge --continue calls commit. Reapply explicit creation
-                # options here because merge does not persist all of them.
-                result = step("commit", "--no-edit", *commit_options.flags(verify=False))
+                # Keep Git's prepared shortlog and cleanup markers, including
+                # summaries enabled through merge.log rather than CLI options.
+                configured_log = git.run(
+                    "config", "--type=bool-or-int", "--get", "merge.log", check=False
+                ).stdout.strip()
+                prepared_message = (
+                    commit_options.log is not None
+                    or commit_options.cleanup is not None
+                    or configured_log not in (b"", b"false", b"0")
+                )
+                result = step(
+                    "commit",
+                    "--no-edit",
+                    *commit_options.flags(verify=False, prepared_message=prepared_message),
+                )
             else:
                 result = step(operation, "--continue")
         if git.operation_active() or git.conflicts():

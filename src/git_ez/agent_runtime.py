@@ -229,7 +229,6 @@ def run_agent(
     check: tuple[str, ...],
 ) -> dict[str, Any]:
     directory = audit.directory / "sessions" / f"{round_number:04d}"
-    directory.mkdir(parents=True)
     log = SessionLog(directory, audit)
     session: dict[str, Any] = {
         "round": round_number,
@@ -240,53 +239,56 @@ def run_agent(
         "artifacts": str(directory.relative_to(audit.directory)),
     }
     audit.manifest.setdefault("sessions", []).append(session)
-    audit.save()
-    checks = WorktreeChecks(config)
-    head = git.text("rev-parse", "HEAD")
-    branch = git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.decode().strip() or None
-    decision: dict[str, Any] = {}
-
-    def guard() -> None:
-        checks.guard(git, audit, head, branch)
-
-    @tool
-    def finish(rationale: str, confidence: float) -> str:
-        """Finish ALL conflicts at this Git stop; call alone after editing and testing."""
-        parsed = Decision.parse({"rationale": rationale, "confidence": confidence})
-        proposed = {"rationale": parsed.rationale, "confidence": parsed.confidence}
-        if parsed.confidence < config.min_confidence:
-            session.update(proposed)
-            write_json(directory / "decision.json", proposed)
-            session["status"] = "low_confidence"
-            raise LowConfidence("Agent confidence below threshold; worktree preserved")
-        checks.verify(git, paths, baseline)
-        decision.update(proposed)
-        write_json(directory / "decision.json", decision)
-        session.update(proposed)
-        return "Resolution verified. Git continuation belongs to git-ez."
-
-    metadata = {
-        "runtime": "deepagents",
-        "versions": {
-            package: version(package)
-            for package in (
-                "deepagents",
-                "langchain-openai",
-                "langchain-ollama",
-                "langgraph-checkpoint",
-            )
-        },
-        "checkpoints": {"storage": "memory", "resumable": False},
-        "agent_files": "agent-files/",
-        "provider": config.provider,
-        "model": config.model,
-        "model_context_tokens": config.model_context_tokens,
-    }
-    write_json(directory / "runtime.json", metadata)
     result: dict[str, Any] = {}
+    decision: dict[str, Any] = {}
+    # Initialization may fail before HEAD is pinned; capture the current Git state then.
+    head = "HEAD"
     primary_error = False
     count = len(audit.audit_errors)
     try:
+        directory.mkdir(parents=True)
+        audit.save()
+        checks = WorktreeChecks(config)
+        head = git.text("rev-parse", "HEAD")
+        branch = git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.decode().strip() or None
+
+        def guard() -> None:
+            checks.guard(git, audit, head, branch)
+
+        @tool
+        def finish(rationale: str, confidence: float) -> str:
+            """Finish ALL conflicts at this Git stop; call alone after editing and testing."""
+            parsed = Decision.parse({"rationale": rationale, "confidence": confidence})
+            proposed = {"rationale": parsed.rationale, "confidence": parsed.confidence}
+            if parsed.confidence < config.min_confidence:
+                session.update(proposed)
+                write_json(directory / "decision.json", proposed)
+                session["status"] = "low_confidence"
+                raise LowConfidence("Agent confidence below threshold; worktree preserved")
+            checks.verify(git, paths, baseline)
+            decision.update(proposed)
+            write_json(directory / "decision.json", decision)
+            session.update(proposed)
+            return "Resolution verified. Git continuation belongs to git-ez."
+
+        metadata = {
+            "runtime": "deepagents",
+            "versions": {
+                package: version(package)
+                for package in (
+                    "deepagents",
+                    "langchain-openai",
+                    "langchain-ollama",
+                    "langgraph-checkpoint",
+                )
+            },
+            "checkpoints": {"storage": "memory", "resumable": False},
+            "agent_files": "agent-files/",
+            "provider": config.provider,
+            "model": config.model,
+            "model_context_tokens": config.model_context_tokens,
+        }
+        write_json(directory / "runtime.json", metadata)
         baseline = checks.baseline(git)
         model = create_chat_model(config)
         # Use the public profile API to disable default delegation for this single-agent task.

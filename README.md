@@ -572,6 +572,9 @@ prevent capturing the worktree or attempting the other summaries. If the report
 or manifest cannot be finalized, the CLI still prints the execution outcome,
 secondary audit errors, and the audit location. Existing files may be older or
 incomplete snapshots; consult the CLI's availability warning before trusting them.
+Handled initialization failures also mark the session as failed, even when its
+folder or runtime metadata could not be prepared and no model was called. The
+remaining captures are still attempted independently.
 The session's terminal event includes the outcome of session metadata capture;
 final run summaries and validation still have their own outcomes. Unexpected
 exceptions are re-raised unchanged after cleanup. The audit records their type

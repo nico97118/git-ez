@@ -922,3 +922,86 @@ def test_terminal_event_reflects_late_metadata_failure(repo):
     assert any(item["phase"] == "session metadata" for item in saved["audit_errors"])
     assert repo.git.operation_active()
     assert repo.git.branch_oid("feature") == repo.source
+
+
+@pytest.mark.parametrize("phase", ["directory", "save", "head", "versions", "runtime"])
+@pytest.mark.parametrize("secondary_capture_error", [False, True])
+def test_startup_failure_finalizes_session_without_calling_model(
+    repo, phase, secondary_capture_error
+):
+    import git_ez.agent_runtime as runtime
+    from git_ez.audit import Audit
+
+    reason = f"startup {phase} unavailable"
+    if phase == "directory":
+        mkdir = Path.mkdir
+
+        def failing_mkdir(path, *args, **kwargs):
+            if path.name == "0001" and path.parent.name == "sessions":
+                raise OSError(reason)
+            return mkdir(path, *args, **kwargs)
+
+        repo.mocker.patch.object(Path, "mkdir", failing_mkdir)
+    elif phase == "save":
+        save = Audit.save
+
+        def failing_save(self):
+            sessions = self.manifest.get("sessions", [])
+            if sessions and sessions[-1]["status"] == "running":
+                raise OSError(reason)
+            save(self)
+
+        repo.mocker.patch.object(Audit, "save", failing_save)
+    elif phase == "head":
+        text = Git.text
+
+        def failing_head(git, *args):
+            if args == ("rev-parse", "HEAD") and list(
+                (repo.root / ".git/ez/runs").glob("*/sessions/0001")
+            ):
+                raise OSError(reason)
+            return text(git, *args)
+
+        repo.mocker.patch.object(Git, "text", failing_head)
+    elif phase == "versions":
+        repo.mocker.patch.object(runtime, "version", side_effect=OSError(reason))
+    else:
+        write = runtime.write_json
+
+        def failing_write(path, data):
+            if path.name == "runtime.json":
+                raise OSError(reason)
+            write(path, data)
+
+        repo.mocker.patch.object(runtime, "write_json", failing_write)
+    if secondary_capture_error:
+        capture = Audit.capture_worktree
+
+        def failing_capture(self, git, directory, *args, **kwargs):
+            if directory.parent.name == "sessions":
+                raise OSError("secondary session capture unavailable")
+            capture(self, git, directory, *args, **kwargs)
+
+        repo.mocker.patch.object(Audit, "capture_worktree", failing_capture)
+    model = repo.mocker.patch.object(runtime, "create_chat_model")
+    audit = Engine(repo.root, repo.config).run("main")
+    model.assert_not_called()
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["error"] == reason
+    assert audit.manifest["sessions"][0]["status"] == "failed"
+    saved = json.loads((audit.directory / "run.json").read_text())
+    assert saved["status"] == saved["sessions"][0]["status"] == "failed"
+    assert saved["error"] == reason
+    session = audit.directory / "sessions/0001"
+    if phase != "directory":
+        assert json.loads((session / "messages.json").read_text()) == []
+        events = [json.loads(line) for line in (session / "events.jsonl").read_text().splitlines()]
+        assert [item["status"] for item in events if item["event"] == "session_finished"] == [
+            "failed"
+        ]
+    if secondary_capture_error:
+        assert any(item["phase"] == "session worktree" for item in saved["audit_errors"])
+    assert (audit.directory / "exit/files.json").is_file()
+    assert not audit.manifest["integrated"]
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source

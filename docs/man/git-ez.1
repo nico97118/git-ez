@@ -260,6 +260,8 @@ tracked final captures and summaries. Partial captures include truncation, missi
 file contents, and artifacts that could not be finalized. This is not a complete
 inventory of all audit files. Missing ordinary model/tool events stop the agent
 as an audit failure; subsequent writes do not make that journal complete again.
+Handled initialization failures mark the session failed before any model call;
+remaining captures are attempted even if the folder or runtime metadata is missing.
 The terminal session event includes the session metadata capture outcome.
 Unexpected exceptions are re-raised unchanged after cleanup; the audit retains
 their type and outcome without arbitrary exception messages.

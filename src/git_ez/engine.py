@@ -8,12 +8,13 @@ import hashlib
 import json
 import subprocess
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
 from .agent import AGENT_PROMPT, AgentResolver, Resolver
-from .audit import Audit, now
+from .audit import Audit, Validation, now
 from .checks import WorktreeChecks
 from .config import Config
 from .conflicts import Conflict, Decision, LowConfidence
@@ -97,42 +98,62 @@ class Engine:
         audit.manifest["commit_options"] = asdict(commit_options)
         audit.manifest["rerere_autoupdate"] = rerere_autoupdate
         audit.manifest["interactive"] = interactive
+        audit.manifest["validation"] = Validation(
+            command=list(validation), status="not_run" if validation else "not_requested"
+        )
+        phase = "integration"
         try:
             self._integrate(audit, validation)
+            phase = "result_capture"
             self._record_result(audit)
             if validation:
+                phase = "validation"
                 self.validate(git, audit, validation)
+            phase = "verification"
             self._verify_result(audit)
-            audit.manifest["status"] = "succeeded"
+            audit.set_status("succeeded")
         except (EzError, OSError, ValueError, KeyboardInterrupt) as exc:
-            audit.manifest["status"] = (
-                "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+            audit.set_status(
+                "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed", exc, phase=phase
             )
-            audit.manifest["error"] = str(exc) or "Interrupted by user"
+        except BaseException as exc:
+            # Preserve unexpected exceptions and termination signals for the caller.
+            # Their arbitrary messages may contain credentials; retain only their type.
+            audit.set_status(
+                "interrupted" if isinstance(exc, SystemExit) else "failed",
+                exc,
+                phase=phase,
+                message=f"Unexpected {type(exc).__name__}",
+            )
+            raise
         finally:
-            try:
-                audit.capture_worktree(
+            capture_error = audit.attempt(
+                "exit worktree",
+                lambda: audit.capture_worktree(
                     git,
                     audit.directory / "exit",
                     self.config.max_file_bytes,
                     reference=audit.manifest.get("result_oid", audit.manifest["before_oid"]),
-                )
+                ),
+                "exit/files.json",
+            )
+            if audit.has_artifact("exit/files.json"):
                 audit.manifest["exit_state"] = "exit/files.json"
-            except (EzError, OSError, ValueError) as exc:
-                if (audit.directory / "exit/files.json").is_file():
-                    audit.manifest["exit_state"] = "exit/files.json"
-                audit.manifest["capture_error"] = str(exc)
+            if capture_error is not None:
+                audit.manifest["capture_error"] = str(capture_error)
                 if audit.manifest["status"] == "succeeded":
-                    audit.manifest["status"] = "failed"
-                    audit.manifest["error"] = "Final audit capture failed; inspect the report"
+                    audit.set_status(
+                        "failed", EzError("Final audit capture failed; inspect the report")
+                    )
             if "rebase_sequence" in audit.manifest:
-                try:
-                    self._verify_sequence_capture(audit)
-                except EzError as exc:
-                    if audit.manifest["status"] == "succeeded":
-                        audit.manifest["status"] = "failed"
-                        audit.manifest["error"] = str(exc)
-            audit.save()
+                sequence_error = audit.attempt(
+                    "rebase sequence",
+                    lambda: self._verify_sequence_capture(audit),
+                    audit.manifest["rebase_sequence"]["artifact"],
+                )
+                if sequence_error is not None and audit.manifest["status"] == "succeeded":
+                    audit.set_status("failed", sequence_error, phase="verification")
+            audit.finalize()
         return audit
 
     def _input_ref(
@@ -748,6 +769,7 @@ class Engine:
         snapshots = [self.snapshot(git, audit, name, versions) for name, versions in stages.items()]
         decision: dict[str, Any] = {}
         status = "failed"
+        primary_error = False
         session = audit.directory / "sessions" / f"{round_number:04d}"
         head = git.text("rev-parse", "HEAD")
         branch = git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.decode().strip() or None
@@ -776,10 +798,15 @@ class Engine:
             if audit.manifest.get("interactive"):
                 audit.manifest["reviews"][-1]["status"] = "applied"
         except LowConfidence:
+            primary_error = True
             status = "low_confidence"
             raise
         except KeyboardInterrupt:
+            primary_error = True
             status = "interrupted"
+            raise
+        except BaseException:
+            primary_error = True
             raise
         finally:
             session_number: int | None = round_number
@@ -808,7 +835,9 @@ class Engine:
             for record, conflict in snapshots:
                 record["status"] = status
                 for label, filename in (("session", "messages.json"), ("files", "files.json")):
-                    if final_session is not None and (final_session / filename).is_file():
+                    if final_session is not None and audit.has_artifact(
+                        (final_session / filename).relative_to(audit.directory).as_posix()
+                    ):
                         record["artifacts"][label] = str(
                             (final_session / filename).relative_to(audit.directory)
                         )
@@ -839,7 +868,9 @@ class Engine:
                     )
                 except (EzError, OSError, ValueError) as exc:
                     record["capture_error"] = str(exc)
-            audit.save()
+            save_error = audit.attempt("conflict metadata", audit.save)
+            if save_error is not None and not primary_error:
+                raise EzError("Conflict audit capture failed; inspect audit errors") from save_error
 
     def _review(
         self,
@@ -866,6 +897,7 @@ class Engine:
             reviews.append(proposal)
             audit.save()
             directory = audit.directory / proposal["artifacts"]
+            primary_error = False
             try:
                 raw = self.resolver.run(git, audit, number, paths, validation)
                 parsed = Decision.parse(raw)
@@ -891,20 +923,46 @@ class Engine:
                 if action == "accept":
                     return parsed, audit.directory / "sessions" / f"{number:04d}"
             except (EzError, OSError, ValueError, KeyboardInterrupt) as exc:
+                primary_error = True
                 proposal["status"] = (
                     "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
                 )
                 proposal["error"] = str(exc) or "Interrupted by user"
                 raise
+            except BaseException as exc:
+                primary_error = True
+                proposal["status"] = "interrupted" if isinstance(exc, SystemExit) else "failed"
+                proposal["error"] = f"Unexpected {type(exc).__name__}"
+                raise
             finally:
-                # Also retain unfinished or failed attempts, before another attempt can edit files.
-                if not (directory / "files.json").exists():
-                    audit.capture_worktree(git, directory, self.config.max_file_bytes, paths)
-                audit.save()
+                capture_error = None
+                if not audit.has_artifact(f"{proposal['artifacts']}/files.json"):
+                    capture_error = audit.attempt(
+                        "review worktree",
+                        partial(
+                            audit.capture_worktree,
+                            git,
+                            directory,
+                            self.config.max_file_bytes,
+                            paths,
+                        ),
+                        f"{proposal['artifacts']}/files.json",
+                    )
+                save_error = audit.attempt("review metadata", audit.save)
+                if not primary_error and (capture_error is not None or save_error is not None):
+                    raise EzError("Review audit capture failed; inspect audit errors") from (
+                        capture_error or save_error
+                    )
 
     def validate(self, git: Git, audit: Audit, command: tuple[str, ...]) -> None:
-        audit.manifest["validation"] = {"command": list(command)}
-        audit.save()
+        validation = Validation(command=list(command), status="running")
+        audit.manifest["validation"] = validation
+        try:
+            audit.save()
+        except Exception:
+            validation["status"] = "not_run"
+            raise
+        failure: EzError | None = None
         try:
             result = subprocess.run(
                 command,
@@ -915,11 +973,37 @@ class Engine:
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            (audit.directory / "validation.stdout").write_bytes(exc.stdout or b"")
-            (audit.directory / "validation.stderr").write_bytes(exc.stderr or b"")
-            raise EzError("Validation command timed out") from exc
-        (audit.directory / "validation.stdout").write_bytes(result.stdout)
-        (audit.directory / "validation.stderr").write_bytes(result.stderr)
-        audit.manifest["validation"]["returncode"] = result.returncode
-        if result.returncode:
-            raise EzError(f"Validation failed with code {result.returncode}")
+            validation["status"] = "timed_out"
+            stdout, stderr = exc.stdout or b"", exc.stderr or b""
+            failure = EzError("Validation command timed out")
+            failure.__cause__ = exc
+        except (OSError, KeyboardInterrupt) as exc:
+            validation["status"] = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+            for name in ("validation.stdout", "validation.stderr"):
+                audit.evidence[name] = {
+                    "status": "unavailable",
+                    "reason": "Validation did not return output",
+                }
+            raise
+        else:
+            stdout, stderr = result.stdout, result.stderr
+            validation["status"] = "passed" if result.returncode == 0 else "failed"
+            validation["returncode"] = result.returncode
+            if result.returncode:
+                failure = EzError(f"Validation failed with code {result.returncode}")
+        output_error = audit.attempt(
+            "validation stdout",
+            lambda: (audit.directory / "validation.stdout").write_bytes(stdout),
+            "validation.stdout",
+        )
+        error_output_error = audit.attempt(
+            "validation stderr",
+            lambda: (audit.directory / "validation.stderr").write_bytes(stderr),
+            "validation.stderr",
+        )
+        if failure is not None:
+            raise failure
+        if output_error is not None or error_output_error is not None:
+            raise EzError("Validation audit capture failed; inspect audit errors") from (
+                output_error or error_output_error
+            )

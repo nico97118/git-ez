@@ -548,8 +548,41 @@ failure. Copies are limited to `ez.maxFileBytes`; truncation and read errors are
 Symlinks are not followed. The final capture also retains the effects of validation
 that changed files or HEAD.
 
+The manifest separates the execution outcome from audit capture:
+
+- `status` and `integrated` describe the run and whether Git completed the integration.
+- `failure` records the primary error's phase, type, and message. `error` retains
+  the human-readable reason. Secondary capture errors appear in `audit_errors`
+  without replacing that reason.
+- `validation.status` is `not_requested`, `not_run`, `running`, `passed`, `failed`,
+  `timed_out`, or `interrupted`. A successful command can coexist with a failed run
+  if its output could not be saved or a later invariant check failed.
+- `evidence` records availability for worktree captures, final session messages and
+  events, validation output, rebase-sequence verification, and final summaries.
+  `available` means that capture succeeded; `partial` means a capture is truncated,
+  contains unavailable files, or an existing artifact could not be finalized;
+  `unavailable` means no usable artifact could be confirmed for that capture. This is not an
+  exhaustive inventory of every audit file. A journal stays partial after a failed
+  append even when later events can be saved. Failure to retain an ordinary model
+  or tool event stops the agent as an audit failure, rather than reporting a model
+  service failure. Error-event capture does not replace an existing failure.
+
+Final captures are attempted independently. Losing a conversation file does not
+prevent capturing the worktree or attempting the other summaries. If the report
+or manifest cannot be finalized, the CLI still prints the execution outcome,
+secondary audit errors, and the audit location. Existing files may be older or
+incomplete snapshots; consult the CLI's availability warning before trusting them.
+Handled initialization failures also mark the session as failed, even when its
+folder or runtime metadata could not be prepared and no model was called. The
+remaining captures are still attempted independently.
+The session's terminal event includes the outcome of session metadata capture;
+final run summaries and validation still have their own outcomes. Unexpected
+exceptions are re-raised unchanged after cleanup. The audit records their type
+and failed/interrupted status without copying arbitrary exception messages.
+No write durability across power loss or automatic recovery is promised.
+
 The `range-diff` compares pinned SHAs, but commit matching remains heuristic and does
-not prove semantic equivalence. Checkpoints and events retain the execution trajectory;
+not prove semantic equivalence. Events and agent files retain execution evidence;
 `messages.json` is a potentially compacted snapshot. Traces remain local, without
 LangSmith tracing, and may contain sensitive code or output.
 

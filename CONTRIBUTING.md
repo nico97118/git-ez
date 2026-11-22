@@ -136,7 +136,11 @@ FreeBSD uploads combined coverage XML and a JUnit report for the complete suite.
 Coverage measures exercised code paths; it does not establish resolution correctness.
 Critical tests assert committed file contents, reference ancestry, retained local state,
 and recorded audit evidence. Controlled fault injection covers input-reference races,
-audit write failures, and provider errors, including error redaction. Scripted
+audit write failures, and provider errors, including error redaction.
+Finalization tests combine primary failures or interruption with secondary errors
+in error callbacks, session messages/events, interactive proposal capture, validation output, and
+final report/manifest writes. They verify error precedence, evidence availability,
+CLI fallback diagnostics, branch identity, and whether Git remains active. Scripted
 model replies validate orchestration and protocol behavior, not the quality of a real
 model's decisions or every possible concurrent filesystem change.
 

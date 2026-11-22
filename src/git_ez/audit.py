@@ -6,12 +6,36 @@
 import hashlib
 import json
 import stat
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
 from .errors import EzError
 from .git import Git
+
+RunStatus = Literal["running", "succeeded", "failed", "interrupted"]
+ValidationStatus = Literal[
+    "not_requested", "not_run", "running", "passed", "failed", "timed_out", "interrupted"
+]
+
+
+class Failure(TypedDict):
+    phase: str
+    type: str
+    message: str
+    artifact: NotRequired[str]
+
+
+class Evidence(TypedDict):
+    status: Literal["available", "partial", "unavailable"]
+    reason: NotRequired[str]
+
+
+class Validation(TypedDict):
+    command: list[str]
+    status: ValidationStatus
+    returncode: NotRequired[int]
 
 
 def now() -> str:
@@ -36,6 +60,92 @@ class Audit:
         self.manifest["updated_at"] = now()
         write_json(self.directory / "run.json", self.manifest)
         self.report()
+
+    def set_status(
+        self,
+        status: RunStatus,
+        error: BaseException | None = None,
+        *,
+        phase: str = "audit",
+        message: str | None = None,
+    ) -> None:
+        self.manifest["status"] = status
+        if error is not None:
+            if message is None:
+                message = str(error) or "Interrupted by user"
+            self.manifest["error"] = message
+            failure: Failure = {"phase": phase, "type": type(error).__name__, "message": message}
+            self.manifest["failure"] = failure
+
+    @property
+    def audit_errors(self) -> list[Failure]:
+        return cast(list[Failure], self.manifest.setdefault("audit_errors", []))
+
+    @property
+    def evidence(self) -> dict[str, Evidence]:
+        return cast(dict[str, Evidence], self.manifest.setdefault("evidence", {}))
+
+    def has_artifact(self, artifact: str) -> bool:
+        try:
+            return (self.directory / artifact).is_file()
+        except OSError:
+            return False
+
+    def attempt(
+        self,
+        phase: str,
+        action: Callable[[], object],
+        artifact: str | None = None,
+        *,
+        append: bool = False,
+    ) -> Exception | None:
+        """Capture each independent artifact without replacing an operation's failure."""
+        if artifact is not None:
+            previous = self.evidence.get(artifact)
+            if append and previous is not None and previous["status"] != "available":
+                self.evidence[artifact] = {**previous, "status": "partial"}
+            else:
+                self.evidence[artifact] = {"status": "available"}
+        try:
+            action()
+        except Exception as exc:
+            # Serialization/report bugs are secondary too; termination signals propagate.
+            failure: Failure = {"phase": phase, "type": type(exc).__name__, "message": str(exc)}
+            if artifact is not None:
+                failure["artifact"] = artifact
+            self.audit_errors.append(failure)
+            if artifact is not None:
+                self.evidence[artifact] = {
+                    "status": "partial" if self.has_artifact(artifact) else "unavailable",
+                    "reason": str(exc),
+                }
+            return exc
+        return None
+
+    def finalize(self) -> None:
+        """Attempt both summaries and expose failures even when one cannot be saved."""
+
+        def fail_if_needed() -> None:
+            if self.audit_errors and self.manifest["status"] == "succeeded":
+                self.set_status(
+                    "failed", EzError("Audit finalization failed; inspect audit errors")
+                )
+
+        def manifest() -> None:
+            self.manifest["updated_at"] = now()
+            write_json(self.directory / "run.json", self.manifest)
+
+        fail_if_needed()
+        # Publish the final manifest last, after the report's actual outcome is known.
+        self.evidence["run.json"] = {"status": "available"}
+        report_error = self.attempt("report", self.report, "report.md")
+        fail_if_needed()
+        manifest_error = self.attempt("manifest", manifest, "run.json")
+        fail_if_needed()
+        if manifest_error is not None and report_error is None:
+            # The report is still writable: record the manifest failure there.
+            self.attempt("report", self.report, "report.md")
+        fail_if_needed()
 
     def artifact(self, number: int, filename: str, content: str) -> str:
         folder = self.directory / "conflicts" / f"{number:04d}"
@@ -131,6 +241,15 @@ class Audit:
                 "capture_errors": capture_errors,
             },
         )
+        artifact_name = (directory / "files.json").relative_to(self.directory).as_posix()
+        partial = capture_errors or any(
+            record.get("state") == "unavailable" or record.get("truncated") for record in records
+        )
+        self.evidence[artifact_name] = {"status": "partial" if partial else "available"}
+        if partial:
+            self.evidence[artifact_name]["reason"] = (
+                "File capture is truncated or unavailable; inspect files.json"
+            )
         if capture_errors:
             commands = ", ".join(str(error["command"]) for error in capture_errors)
             raise EzError(
@@ -326,6 +445,24 @@ class Audit:
             ]
         for native in data.get("native_resolutions", []):
             lines += ["## Reused Git resolution", "", native["rationale"], ""]
+        if data.get("failure"):
+            lines += [f"Failure phase: `{data['failure']['phase']}`", ""]
+        if data.get("audit_errors"):
+            lines += [
+                "## Audit errors",
+                "",
+                "These errors do not replace the original failure.",
+                "",
+            ]
+            for error in data["audit_errors"]:
+                lines.append(f"- {error['phase']}: {error['type']}: {error['message']}")
+            lines.append("")
+        if data.get("evidence"):
+            lines += ["## Evidence availability", ""]
+            for artifact, evidence in sorted(data["evidence"].items()):
+                detail = f" — {evidence['reason']}" if evidence.get("reason") else ""
+                lines.append(f"- `{artifact}`: **{evidence['status']}**{detail}")
+            lines.append("")
         lines += ["## Git traces", "", "- [Integration log](integration.log)"]
         if data.get("exit_state"):
             lines += [
@@ -339,8 +476,9 @@ class Audit:
         lines.append("")
         if "validation" in data:
             lines += [
+                f"Validation status: `{data['validation'].get('status', 'unknown')}`",
                 f"Validation command: `{data['validation']['command']}`",
-                f"Exit code: `{data['validation'].get('returncode', 'interrupted')}`",
+                f"Exit code: `{data['validation'].get('returncode', 'unavailable')}`",
                 "",
             ]
         (self.directory / "report.md").write_text("\n".join(lines), encoding="utf-8")

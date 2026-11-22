@@ -85,6 +85,12 @@ def parser() -> argparse.ArgumentParser:
         )
         if operation == "rebase":
             run.add_argument("--onto", help="Replay commits after target onto this revision")
+            run.add_argument(
+                "--autosquash",
+                action=argparse.BooleanOptionalAction,
+                default=None,
+                help="Group fixup!/squash!/amend! commits without opening an editor",
+            )
             run.add_argument("--empty", choices=("drop", "keep", "stop"))
             run.add_argument("--keep-empty", action=argparse.BooleanOptionalAction, default=None)
             run.add_argument(
@@ -178,7 +184,11 @@ def main(argv: list[str] | None = None) -> int:
             onto=getattr(args, "onto", None),
             rebase_options=(
                 RebaseOptions(
-                    args.empty, args.keep_empty, args.reapply_cherry_picks, args.force_rebase
+                    args.empty,
+                    args.keep_empty,
+                    args.reapply_cherry_picks,
+                    args.force_rebase,
+                    args.autosquash,
                 )
                 if args.command == "rebase"
                 else None

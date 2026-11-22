@@ -180,6 +180,29 @@ class Audit:
                 "```",
                 "",
             ]
+        if "rebase_sequence" in data:
+            sequence = data["rebase_sequence"]
+            lines += [
+                "## Generated rebase sequence",
+                "",
+                f"- Capture: `{sequence['status']}`",
+                f"- Capture limit: `{sequence['limit_bytes']}` bytes",
+            ]
+            if sequence["status"] == "captured":
+                lines.append(f"- [Native Git instructions]({sequence['artifact']})")
+            elif sequence.get("error"):
+                lines.append(f"- Unavailable evidence: {sequence['error']}")
+            lines.append("")
+        if "result_commits" in data:
+            commits = data["result_commits"]
+            lines += [
+                "## Resulting commits and messages",
+                "",
+                f"- [Native Git raw log]({commits['artifact']})",
+                f"- Truncated: `{commits['truncated']}`",
+                f"- Capture limit: `{commits['limit_bytes']}` bytes",
+                "",
+            ]
         if data.get("empty_commits"):
             lines += ["## Empty conflict resolutions", ""]
             for entry in data["empty_commits"]:

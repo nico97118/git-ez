@@ -15,6 +15,7 @@ class RebaseOptions:
     keep_empty: bool | None = None
     reapply_cherry_picks: bool | None = None
     force_rebase: bool | None = None
+    autosquash: bool | None = None
 
     def __post_init__(self) -> None:
         if self.empty is not None and self.empty not in ("drop", "keep", "stop"):
@@ -32,6 +33,13 @@ class RebaseOptions:
                 flags.append(f"--{'' if value else 'no-'}{name}")
         if self.force_rebase is not None:
             flags.append("--force-rebase" if self.force_rebase else "--ff")
+        if self.autosquash is True:
+            flags += ["--interactive", "--autosquash"]
+            if self.empty is None:
+                # Interactive rebase otherwise changes the default to stop.
+                flags.append("--empty=drop")
+        elif self.autosquash is False:
+            flags.append("--no-autosquash")
         return tuple(flags)
 
 

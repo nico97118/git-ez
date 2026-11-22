@@ -40,7 +40,12 @@ class Git:
     def __init__(self, path: Path):
         self.path = path
 
-    def run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+    def run(
+        self, *args: str, check: bool = True, sequence_editor: str | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
+        environment = git_environment()
+        if sequence_editor is not None:
+            environment["GIT_SEQUENCE_EDITOR"] = sequence_editor
         result = subprocess.run(
             [
                 "git",
@@ -50,7 +55,7 @@ class Git:
                 *args,
             ],
             cwd=self.path,
-            env=git_environment(),
+            env=environment,
             capture_output=True,
             check=False,
         )

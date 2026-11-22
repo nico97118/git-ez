@@ -30,6 +30,7 @@ consequence and clarify the intended change before implementing it.
 - `src/git_ez/cli.py`: command parsing and user-facing results.
 - `config.py`: native Git configuration and redacted configuration output.
 - `options.py`: explicitly supported native Git options and argument conversion.
+- `sequence_editor.py`: bounded capture of native autosquash instructions without editing them.
 - `git.py`, `engine.py`, `checks.py`: Git execution, integration lifecycle, and guards.
 - `conflicts.py`: conflict evidence and resolution decisions.
 - `agent.py`, `agent_runtime.py`, `llm.py`: resolver contract, agent runtime, providers.

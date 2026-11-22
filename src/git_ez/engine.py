@@ -20,6 +20,7 @@ from .config import Config
 from .conflicts import Conflict, Decision, LowConfidence
 from .errors import EzError
 from .git import Git, Stage, git_environment
+from .locking import checkout_lock
 from .options import CommitOptions, RebaseOptions
 from .review import review_proposal
 from .sequence_editor import editor_command, read_regular
@@ -70,91 +71,94 @@ class Engine:
                 raise EzError("Fast-forward policy is only supported for merge")
             if merge_ff not in ("ff", "no-ff", "ff-only"):
                 raise EzError("Merge fast-forward policy must be ff, no-ff or ff-only")
-        branch = self._check_repository()
-        git = self.git
-        before_oid = git.branch_oid(branch)
-        target_oid = git.commit_oid(target)
-        target_ref = self._input_ref(target, branch)
-        onto_oid = git.commit_oid(onto) if onto is not None else None
-        onto_ref = self._input_ref(onto, branch) if onto is not None else None
-        if operation != "rebase" or not options.keep_base:
-            git.run("merge-base", before_oid, target_oid)
-        plan = None
-        if operation == "rebase":
-            plan = self._plan_rebase(target, target_oid, before_oid, onto_oid, branch, options)
-            exclusions = [plan["upstream_oid"]]
-            if plan["fork_point"]["oid"] is not None:
-                exclusions.append(plan["fork_point"]["oid"])
-            if git.text("rev-list", "--merges", before_oid, "--not", *exclusions):
-                raise EzError("Rebasing merge commits is outside this POC")
-        audit = self._prepare_run(branch, before_oid, target, target_oid, target_ref, operation)
-        if onto is not None:
-            audit.manifest.update(onto=onto, onto_oid=onto_oid, onto_ref=onto_ref)
-        if operation == "rebase":
-            audit.manifest["rebase_options"] = asdict(options)
-            audit.manifest["rebase_plan"] = plan
-        if operation == "merge":
-            audit.manifest["merge_ff"] = merge_ff
-        audit.manifest["commit_options"] = asdict(commit_options)
-        audit.manifest["rerere_autoupdate"] = rerere_autoupdate
-        audit.manifest["interactive"] = interactive
-        audit.manifest["validation"] = Validation(
-            command=list(validation), status="not_run" if validation else "not_requested"
-        )
-        phase = "integration"
-        try:
-            self._integrate(audit, validation)
-            phase = "result_capture"
-            self._record_result(audit)
-            if validation:
-                phase = "validation"
-                self.validate(git, audit, validation)
-            phase = "verification"
-            self._verify_result(audit)
-            audit.set_status("succeeded")
-        except (EzError, OSError, ValueError, KeyboardInterrupt) as exc:
-            audit.set_status(
-                "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed", exc, phase=phase
+        with checkout_lock(self.git):
+            branch = self._check_repository()
+            git = self.git
+            before_oid = git.branch_oid(branch)
+            target_oid = git.commit_oid(target)
+            target_ref = self._input_ref(target, branch)
+            onto_oid = git.commit_oid(onto) if onto is not None else None
+            onto_ref = self._input_ref(onto, branch) if onto is not None else None
+            if operation != "rebase" or not options.keep_base:
+                git.run("merge-base", before_oid, target_oid)
+            plan = None
+            if operation == "rebase":
+                plan = self._plan_rebase(target, target_oid, before_oid, onto_oid, branch, options)
+                exclusions = [plan["upstream_oid"]]
+                if plan["fork_point"]["oid"] is not None:
+                    exclusions.append(plan["fork_point"]["oid"])
+                if git.text("rev-list", "--merges", before_oid, "--not", *exclusions):
+                    raise EzError("Rebasing merge commits is outside this POC")
+            audit = self._prepare_run(branch, before_oid, target, target_oid, target_ref, operation)
+            if onto is not None:
+                audit.manifest.update(onto=onto, onto_oid=onto_oid, onto_ref=onto_ref)
+            if operation == "rebase":
+                audit.manifest["rebase_options"] = asdict(options)
+                audit.manifest["rebase_plan"] = plan
+            if operation == "merge":
+                audit.manifest["merge_ff"] = merge_ff
+            audit.manifest["commit_options"] = asdict(commit_options)
+            audit.manifest["rerere_autoupdate"] = rerere_autoupdate
+            audit.manifest["interactive"] = interactive
+            audit.manifest["validation"] = Validation(
+                command=list(validation), status="not_run" if validation else "not_requested"
             )
-        except BaseException as exc:
-            # Preserve unexpected exceptions and termination signals for the caller.
-            # Their arbitrary messages may contain credentials; retain only their type.
-            audit.set_status(
-                "interrupted" if isinstance(exc, SystemExit) else "failed",
-                exc,
-                phase=phase,
-                message=f"Unexpected {type(exc).__name__}",
-            )
-            raise
-        finally:
-            capture_error = audit.attempt(
-                "exit worktree",
-                lambda: audit.capture_worktree(
-                    git,
-                    audit.directory / "exit",
-                    self.config.max_file_bytes,
-                    reference=audit.manifest.get("result_oid", audit.manifest["before_oid"]),
-                ),
-                "exit/files.json",
-            )
-            if audit.has_artifact("exit/files.json"):
-                audit.manifest["exit_state"] = "exit/files.json"
-            if capture_error is not None:
-                audit.manifest["capture_error"] = str(capture_error)
-                if audit.manifest["status"] == "succeeded":
-                    audit.set_status(
-                        "failed", EzError("Final audit capture failed; inspect the report")
-                    )
-            if "rebase_sequence" in audit.manifest:
-                sequence_error = audit.attempt(
-                    "rebase sequence",
-                    lambda: self._verify_sequence_capture(audit),
-                    audit.manifest["rebase_sequence"]["artifact"],
+            phase = "integration"
+            try:
+                self._integrate(audit, validation)
+                phase = "result_capture"
+                self._record_result(audit)
+                if validation:
+                    phase = "validation"
+                    self.validate(git, audit, validation)
+                phase = "verification"
+                self._verify_result(audit)
+                audit.set_status("succeeded")
+            except (EzError, OSError, ValueError, KeyboardInterrupt) as exc:
+                audit.set_status(
+                    "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                    exc,
+                    phase=phase,
                 )
-                if sequence_error is not None and audit.manifest["status"] == "succeeded":
-                    audit.set_status("failed", sequence_error, phase="verification")
-            audit.finalize()
-        return audit
+            except BaseException as exc:
+                # Preserve unexpected exceptions and termination signals for the caller.
+                # Their arbitrary messages may contain credentials; retain only their type.
+                audit.set_status(
+                    "interrupted" if isinstance(exc, SystemExit) else "failed",
+                    exc,
+                    phase=phase,
+                    message=f"Unexpected {type(exc).__name__}",
+                )
+                raise
+            finally:
+                capture_error = audit.attempt(
+                    "exit worktree",
+                    lambda: audit.capture_worktree(
+                        git,
+                        audit.directory / "exit",
+                        self.config.max_file_bytes,
+                        reference=audit.manifest.get("result_oid", audit.manifest["before_oid"]),
+                    ),
+                    "exit/files.json",
+                )
+                if audit.has_artifact("exit/files.json"):
+                    audit.manifest["exit_state"] = "exit/files.json"
+                if capture_error is not None:
+                    audit.manifest["capture_error"] = str(capture_error)
+                    if audit.manifest["status"] == "succeeded":
+                        audit.set_status(
+                            "failed", EzError("Final audit capture failed; inspect the report")
+                        )
+                if "rebase_sequence" in audit.manifest:
+                    sequence_error = audit.attempt(
+                        "rebase sequence",
+                        lambda: self._verify_sequence_capture(audit),
+                        audit.manifest["rebase_sequence"]["artifact"],
+                    )
+                    if sequence_error is not None and audit.manifest["status"] == "succeeded":
+                        audit.set_status("failed", sequence_error, phase="verification")
+                audit.finalize()
+            return audit
 
     def _input_ref(
         self, revision: str, branch: str, *, include_current: bool = False

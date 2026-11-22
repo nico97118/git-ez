@@ -114,7 +114,10 @@ For packaging, dependency, or executable-entry-point changes, also run `uv build
 and run `uv run --locked python scripts/check_install.py dist/git_ez_ai-*.whl` to verify
 the installed command and manual outside the source checkout. A `man` viewer is
 required. CI covers Python 3.11 through 3.14 on Linux and macOS; consider that range
-when changing compatibility.
+when changing compatibility. Quality jobs select the `lint` group, functional
+jobs select `test`, and packaging jobs install runtime dependencies only. Use
+`uv run --locked --no-default-groups` with the job's explicit `--group` selection
+to avoid restoring the default `dev` group.
 
 The synchronous SQLite checkpoint adapter is vendored under
 `src/git_ez/_vendor/langgraph_sqlite/` with upstream MIT licensing and provenance.

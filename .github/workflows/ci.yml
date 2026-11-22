@@ -21,14 +21,14 @@ jobs:
           version: "0.11.2"
           python-version: '3.11'
           enable-cache: true
-      - name: Sync dependencies
-        run: uv sync --locked
+      - name: Sync runtime and lint dependencies
+        run: uv sync --locked --no-default-groups --group lint
       - name: Ruff lint
-        run: uv run --locked ruff check .
+        run: uv run --locked --no-default-groups --group lint ruff check .
       - name: Ruff format check
-        run: uv run --locked ruff format --check .
+        run: uv run --locked --no-default-groups --group lint ruff format --check .
       - name: Mypy type check
-        run: uv run --locked mypy src
+        run: uv run --locked --no-default-groups --group lint mypy src
   tests:
     name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
@@ -48,18 +48,18 @@ jobs:
           version: "0.11.2"
           python-version: ${{ matrix.python }}
           enable-cache: true
-      - name: Sync dependencies
-        run: uv sync --locked
+      - name: Sync runtime and test dependencies
+        run: uv sync --locked --no-default-groups --group test
       - name: Unit tests
         id: unit
         run: >-
-          uv run --locked pytest -v -m unit --cov --cov-report=
+          uv run --locked --no-default-groups --group test pytest -v -m unit --cov --cov-report=
           --junitxml=ci-reports/unit.xml
       - name: Integration tests and combined coverage
         id: integration
         if: ${{ !cancelled() && (steps.unit.outcome == 'success' || steps.unit.outcome == 'failure') }}
         run: >-
-          uv run --locked pytest -v -m integration --cov --cov-append
+          uv run --locked --no-default-groups --group test pytest -v -m integration --cov --cov-append
           --cov-report=term-missing
           --cov-report=json:ci-reports/coverage.json
           --cov-report=xml:ci-reports/coverage.xml
@@ -97,12 +97,12 @@ jobs:
             sudo apt-get update
             sudo apt-get install --yes man-db
           fi
-      - name: Sync dependencies
-        run: uv sync --locked
+      - name: Sync runtime dependencies
+        run: uv sync --locked --no-default-groups
       - name: Build distributions
         run: uv build
       - name: Verify installed wheel outside the checkout
         run: |
           mkdir -p "$RUNNER_TEMP/git-ez-temp"
           ln -s "$RUNNER_TEMP/git-ez-temp" "$RUNNER_TEMP/git-ez-temp-alias"
-          TMPDIR="$RUNNER_TEMP/git-ez-temp-alias" uv run --locked python scripts/check_install.py dist/git_ez_ai-*.whl
+          TMPDIR="$RUNNER_TEMP/git-ez-temp-alias" uv run --locked --no-default-groups python scripts/check_install.py dist/git_ez_ai-*.whl

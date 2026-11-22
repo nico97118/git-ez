@@ -11,6 +11,19 @@ Requires Python 3.11+, Git 2.38+, and uv. From a local checkout:
 uv sync --locked
 ```
 
+The default `dev` group includes `test` (pytest and its helpers) and `lint`
+(Ruff and mypy). CI selects the tools needed for each responsibility:
+
+| Job | Dependency selection | Validation |
+| --- | --- | --- |
+| Quality (Ubuntu) | Runtime + `lint` | Lint, formatting, and strict typing |
+| Tests (Linux/macOS) | Runtime + `test` | Functional suites and coverage |
+| Packages (Linux/macOS) | Runtime only | Build and installed-wheel checks |
+
+The quality job validates development guardrails; the test and packaging jobs
+establish behavior in the supported usage environments. Ruff and mypy are not
+required to install or use git-ez.
+
 ## Required checks
 
 Before every code-changing commit, run:

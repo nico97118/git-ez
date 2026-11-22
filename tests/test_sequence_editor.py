@@ -3,6 +3,8 @@
 
 """Bounded capture of the native Git sequence, without starting Git."""
 
+import hashlib
+
 import pytest
 
 from git_ez.sequence_editor import capture_sequence
@@ -18,6 +20,7 @@ def test_sequence_capture_preserves_instructions(tmp_path):
     capture_sequence(source, destination, len(contents))
     assert source.read_bytes() == contents
     assert destination.read_bytes() == contents
+    assert (tmp_path / "captured.sha256").read_text() == hashlib.sha256(contents).hexdigest()
 
 
 @pytest.mark.parametrize("kind", ["symlink", "directory", "oversized"])
@@ -37,14 +40,24 @@ def test_sequence_capture_rejects_incomplete_or_nonregular_evidence(tmp_path, ki
     assert not destination.exists()
 
 
-def test_sequence_capture_does_not_follow_destination_symlink(tmp_path):
+@pytest.mark.parametrize("artifact", ["captured", "captured.sha256"])
+def test_sequence_capture_does_not_follow_destination_symlink(tmp_path, artifact):
     source = tmp_path / "todo"
     source.write_bytes(b"noop\n")
     target = tmp_path / "untouched"
     target.write_bytes(b"original\n")
     destination = tmp_path / "captured"
-    destination.symlink_to(target)
+    (tmp_path / artifact).symlink_to(target)
     capture_sequence(source, destination, 32)
     assert destination.read_bytes() == b"noop\n"
     assert not destination.is_symlink()
     assert target.read_bytes() == b"original\n"
+    assert not (tmp_path / artifact).is_symlink()
+
+
+def test_sequence_capture_requires_a_writable_fingerprint(tmp_path):
+    source = tmp_path / "todo"
+    source.write_bytes(b"noop\n")
+    (tmp_path / "captured.sha256.tmp").write_bytes(b"existing\n")
+    with pytest.raises(FileExistsError):
+        capture_sequence(source, tmp_path / "captured", 32)

@@ -20,6 +20,7 @@ from .conflicts import Conflict, Decision, LowConfidence
 from .errors import EzError
 from .git import Git, Stage, git_environment
 from .options import CommitOptions, RebaseOptions
+from .review import review_proposal
 from .sequence_editor import editor_command, read_regular
 
 
@@ -41,6 +42,7 @@ class Engine:
         rebase_options: RebaseOptions | None = None,
         commit_options: CommitOptions | None = None,
         rerere_autoupdate: bool | None = None,
+        interactive: bool = False,
     ) -> Audit:
         """Integrate into the current branch; preserve local state and evidence on failure."""
         if operation not in ("rebase", "merge"):
@@ -94,6 +96,7 @@ class Engine:
             audit.manifest["merge_ff"] = merge_ff
         audit.manifest["commit_options"] = asdict(commit_options)
         audit.manifest["rerere_autoupdate"] = rerere_autoupdate
+        audit.manifest["interactive"] = interactive
         try:
             self._integrate(audit, validation)
             self._record_result(audit)
@@ -748,8 +751,11 @@ class Engine:
         branch = git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.decode().strip() or None
         checks = WorktreeChecks(self.config)
         try:
-            raw = self.resolver.run(git, audit, round_number, list(stages), validation)
-            parsed = Decision.parse(raw)
+            if audit.manifest.get("interactive"):
+                parsed, session = self._review(git, audit, round_number, list(stages), validation)
+            else:
+                raw = self.resolver.run(git, audit, round_number, list(stages), validation)
+                parsed = Decision.parse(raw)
             decision = asdict(parsed)
             if parsed.confidence < self.config.min_confidence:
                 raise LowConfidence("Agent confidence below threshold; worktree preserved")
@@ -764,6 +770,8 @@ class Engine:
                 ).stdout
             )
             status = "applied"
+            if audit.manifest.get("interactive"):
+                audit.manifest["reviews"][-1]["status"] = "applied"
         except LowConfidence:
             status = "low_confidence"
             raise
@@ -812,6 +820,67 @@ class Engine:
                 except (EzError, OSError, ValueError) as exc:
                     record["capture_error"] = str(exc)
             audit.save()
+
+    def _review(
+        self,
+        git: Git,
+        audit: Audit,
+        round_number: int,
+        paths: list[str],
+        validation: tuple[str, ...],
+    ) -> tuple[Decision, Path]:
+        feedback = None
+        head = git.text("rev-parse", "HEAD")
+        branch = git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.decode().strip() or None
+        checks = WorktreeChecks(self.config)
+        while True:
+            reviews = audit.manifest.setdefault("reviews", [])
+            number = len(reviews) + 1
+            proposal: dict[str, Any] = {
+                "round": round_number,
+                "attempt": number,
+                "feedback": feedback,
+                "status": "running",
+                "artifacts": f"proposals/{number:04d}",
+            }
+            reviews.append(proposal)
+            audit.save()
+            directory = audit.directory / proposal["artifacts"]
+            try:
+                raw = self.resolver.run(git, audit, number, paths, validation)
+                parsed = Decision.parse(raw)
+                proposal["resolution"] = asdict(parsed)
+                audit.capture_worktree(git, directory, self.config.max_file_bytes, paths)
+                proposal["status"] = "proposed"
+                audit.save()
+                index = git.run("ls-files", "--stage", "-z").stdout
+                action, feedback = review_proposal(directory, parsed)
+                proposal["decision"] = action
+                proposal["user_feedback"] = feedback
+                audit.save()
+                if action == "stop":
+                    raise EzError("Review stopped; proposed files and Git operation preserved")
+                checks.guard(git, audit, head, branch)
+                if git.run("ls-files", "--stage", "-z").stdout != index:
+                    raise EzError("Index changed during review; integration stopped")
+                comparison = directory / "after-review"
+                audit.capture_worktree(git, comparison, self.config.max_file_bytes, paths)
+                for filename in ("files.json", "worktree.diff"):
+                    if (directory / filename).read_bytes() != (comparison / filename).read_bytes():
+                        raise EzError("Worktree changed during review; review no longer applies")
+                if action == "accept":
+                    return parsed, audit.directory / "sessions" / f"{number:04d}"
+            except (EzError, OSError, ValueError, KeyboardInterrupt) as exc:
+                proposal["status"] = (
+                    "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+                )
+                proposal["error"] = str(exc) or "Interrupted by user"
+                raise
+            finally:
+                # Also retain unfinished or failed attempts, before another attempt can edit files.
+                if not (directory / "files.json").exists():
+                    audit.capture_worktree(git, directory, self.config.max_file_bytes, paths)
+                audit.save()
 
     def validate(self, git: Git, audit: Audit, command: tuple[str, ...]) -> None:
         audit.manifest["validation"] = {"command": list(command)}

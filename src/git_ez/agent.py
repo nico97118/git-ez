@@ -32,6 +32,13 @@ If unsure, finish with low confidence to request human intervention.
 
 
 class Resolver(Protocol):
+    """Propose edits without staging.
+
+    In interactive mode round_number identifies a unique attempt. The latest
+    audit.manifest["reviews"] entry supplies the conflict stop and user feedback;
+    revisions must start from the current files. Noninteractive calls are unchanged.
+    """
+
     def run(
         self, git: Git, audit: Audit, round_number: int, paths: list[str], check: tuple[str, ...]
     ) -> dict[str, Any]: ...

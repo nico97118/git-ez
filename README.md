@@ -585,3 +585,24 @@ Licensed under the GNU General Public License, version 3 only
 git-ez; it does not change the license of repositories processed by the tool.
 Third-party dependencies retain their own licenses. See the
 [dependency licensing review](docs/licensing.md) for the current scope and open item.
+
+### Interactive proposal review
+
+Use `git ez merge <target> --interactive` or `git ez rebase <target> --interactive`
+to review each harness proposal before the engine stages it. This reviews conflict
+resolutions; it does not open Git's interactive rebase sequence editor.
+
+The terminal shows the diff, captured file contents (including additions), capture
+limits, and the agent's rationale with reported checks and uncertainties. Final
+validation runs later. Choose **accept**, **revise** (then enter feedback), or
+**stop**. Revisions start from the current proposal and require another explicit
+approval. Empty or invalid input never accepts; EOF and interruption stop the run.
+Engine confidence, file, reference and operation checks still apply after approval.
+Changes during review invalidate approval. Each attempt, feedback and decision is
+retained in the audit; acceptance and actual application are recorded separately.
+
+Stopping preserves proposed files, the unresolved index and the active Git operation.
+Inspect the report and use native `git merge` / `git rebase` continuation or abort
+commands as appropriate. No automatic rollback occurs. Without conflicts there is
+no prompt or model call. Resolutions already staged by native rerere autoupdate
+keep their existing path and do not receive harness proposal review.

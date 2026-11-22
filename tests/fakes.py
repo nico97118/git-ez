@@ -21,7 +21,7 @@ class FakeResolver:
     def run(self, git, audit, round_number, paths, check):
         if self.error:
             raise EzError(self.error)
-        for record in audit.manifest["conflicts"][-len(paths) :]:
+        for record in audit.view["conflicts"][-len(paths) :]:
             evidence = json.loads((audit.directory / record["artifacts"]["request"]).read_text())
             conflict = Conflict(**evidence)
             self.calls.append(conflict)

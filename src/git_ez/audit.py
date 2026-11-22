@@ -1,65 +1,328 @@
 # SPDX-FileCopyrightText: 2026 git-ez contributors
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Durable integration manifests, resolution evidence and reports."""
+"""Single-owner run state, evidence gates and independent audit finalization."""
 
+import copy
 import hashlib
 import json
-import stat
-from collections.abc import Callable
-from datetime import UTC, datetime
+import os
+import re
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
-from typing import Any, Literal, NotRequired, TypedDict, cast
+from threading import RLock
+from typing import Any
+from uuid import UUID, uuid4
 
-from .errors import EzError
+from .audit_capture import capture_worktree, observe
+from .audit_report import render_markdown
+from .audit_state import (
+    Evidence,
+    Failure,
+    PinnedInputs,
+    PinnedRef,
+    RunState,
+    RunStatus,
+    now,
+    safe_error,
+)
+from .audit_storage import AuditStore, directory_fd, encode_json, fingerprint, regular_fd
+from .errors import AuditError, EzError
 from .git import Git
 
-RunStatus = Literal["running", "succeeded", "failed", "interrupted"]
-ValidationStatus = Literal[
-    "not_requested", "not_run", "running", "passed", "failed", "timed_out", "interrupted"
-]
+
+def redact_chunks(source: Iterable[bytes], secrets: tuple[bytes, ...]) -> Iterator[bytes]:
+    """Redact configured credentials even when a token crosses source chunks."""
+    if not secrets:
+        yield from source
+        return
+    pattern = re.compile(b"|".join(re.escape(secret) for secret in secrets))
+    overlap = max(map(len, secrets)) - 1
+    pending = b""
+    for block in source:
+        pending += block
+        boundary = max(0, len(pending) - overlap)
+        position = 0
+        for match in pattern.finditer(pending):
+            if match.start() >= boundary:
+                break
+            yield pending[position : match.start()] + b"<redacted>"
+            position = match.end()
+        end = max(position, boundary)
+        yield pending[position:end]
+        pending = pending[end:]
+    yield pattern.sub(b"<redacted>", pending)
 
 
-class Failure(TypedDict):
-    phase: str
-    type: str
-    message: str
-    artifact: NotRequired[str]
+class Record(Mapping[str, Any]):
+    """A scoped record handle; only its owner updates the backing state."""
 
+    def __init__(self, audit: "Audit", group: str, index: int):
+        self._audit = audit
+        self._group = group
+        self._index = index
 
-class Evidence(TypedDict):
-    status: Literal["available", "partial", "unavailable"]
-    reason: NotRequired[str]
+    def __getitem__(self, key: str) -> Any:
+        with self._audit._lock:
+            return copy.deepcopy(self._audit._state.details[self._group][self._index][key])
 
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._audit.view[self._group][self._index])
 
-class Validation(TypedDict):
-    command: list[str]
-    status: ValidationStatus
-    returncode: NotRequired[int]
+    def __len__(self) -> int:
+        return len(self._audit.view[self._group][self._index])
 
+    def update(self, *args: Mapping[str, Any], **values: Any) -> None:
+        data = dict(args[0]) if args else {}
+        data.update(values)
+        self._audit.update_record(self._group, self._index, data)
 
-def now() -> str:
-    return datetime.now(UTC).isoformat()
-
-
-def write_json(path: Path, data: object) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    def artifact(self, label: str, path: str) -> None:
+        data = self.get("artifacts", {})
+        data[label] = path
+        self.update(artifacts=data)
 
 
 class Audit:
-    def __init__(self, directory: Path, manifest: dict[str, Any]):
+    """One run. Construction has no I/O; initialize inside the handled-exit boundary."""
+
+    def __init__(self, directory: Path, metadata: dict[str, Any]):
         self.directory = directory
-        self.manifest = manifest
-        self.manifest["id"] = directory.name
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._lock = RLock()
+        self._store = AuditStore(directory)
+        data = copy.deepcopy(metadata)
+        data.setdefault("created_at", now())
+        data.pop("schema_version", None)
+        data.pop("status", None)
+        data.pop("integrated", None)
+        self._state = RunState(directory.name, data)
+        self._secrets: tuple[str, ...] = ()
+        self._published_revision: int | None = None
+        self._published_bytes: bytes | None = None
+        self._finalized = False
+        self._blocked_streams: set[str] = set()
+        self._stream_hashes: dict[str, Any] = {}
+        self.presentation_errors: list[str] = []
+
+    @property
+    def inputs(self) -> PinnedInputs:
+        with self._lock:
+            data = self._state.details
+            onto = (
+                PinnedRef(data["onto_oid"], data.get("onto_ref")) if data.get("onto_oid") else None
+            )
+            return PinnedInputs(
+                data["branch"],
+                data["before_oid"],
+                PinnedRef(data["target_oid"], data.get("target_ref")),
+                onto,
+            )
+
+    @property
+    def operation(self) -> str:
+        return str(self._state.details["operation"])
+
+    @property
+    def view(self) -> dict[str, Any]:
+        with self._lock:
+            return self._state.view()
+
+    @property
+    def evidence(self) -> dict[str, Evidence]:
+        with self._lock:
+            return copy.deepcopy(self._state.evidence)
+
+    @property
+    def audit_errors(self) -> list[Failure]:
+        with self._lock:
+            return copy.deepcopy(self._state.audit_errors)
+
+    @property
+    def published(self) -> bool:
+        return (
+            self._published_bytes is not None
+            and self._finalized
+            and self._published_revision == self._state.revision
+        )
+
+    def protect(self, *secrets: str) -> None:
+        self._secrets = tuple(
+            sorted({secret for secret in secrets if secret}, key=len, reverse=True)
+        )
+
+    def _redact(self, data: Any, *, enabled: bool = True) -> Any:
+        """Redact content values, never format keys or arbitrary object reprs."""
+        if isinstance(data, str):
+            if not enabled:
+                return data
+            for secret in self._secrets:
+                data = "<redacted>".join(
+                    part.replace(secret, "<redacted>") for part in data.split("<redacted>")
+                )
+            return data
+        if isinstance(data, dict):
+            return {key: self._redact(value, enabled=enabled) for key, value in data.items()}
+        if isinstance(data, (list, tuple)):
+            return [self._redact(value, enabled=enabled) for value in data]
+        if isinstance(data, UUID):
+            return str(data)
+        if data is None or isinstance(data, (int, float, bool)):
+            return data
+        raise ValueError("Non-JSON audit value")
+
+    def _redact_schema(self, data: Any) -> Any:
+        # A token can be a short word such as "failed". That must not rewrite the
+        # schema's outcome enum, IDs, references, hashes, or generated file addresses.
+        protected = {
+            "id",
+            "run_id",
+            "capture_id",
+            "schema_version",
+            "revision",
+            "lifecycle",
+            "outcome",
+            "status",
+            "integration",
+            "audit_health",
+            "role",
+            "requirement",
+            "applicability",
+            "result",
+            "type",
+            "domain",
+            "sha256",
+            "retained_sha256",
+            "operation",
+            "event",
+            "primary_failure_id",
+            "artifact",
+            "fact",
+            "head",
+            "branch",
+            "branch_ref",
+            "target_ref",
+            "onto_ref",
+            "git_directory",
+            "common_git_directory",
+            "worktree",
+            "before_oid",
+            "target_oid",
+            "onto_oid",
+            "result_oid",
+        }
+        if isinstance(data, dict):
+            result: dict[str, Any] = {}
+            for key, value in data.items():
+                if key == "configuration":
+                    result[key] = self._redact(value)
+                elif isinstance(value, str) and (key in protected or key.endswith("_artifact")):
+                    result[key] = value
+                elif (
+                    key == "artifacts"
+                    and isinstance(value, dict)
+                    and all(isinstance(v, str) for v in value.values())
+                ):
+                    result[key] = dict(value)
+                else:
+                    result[key] = self._redact_schema(value)
+            return result
+        if isinstance(data, (list, tuple)):
+            return [self._redact_schema(value) for value in data]
+        return self._redact(data)
+
+    def initialize(self) -> None:
+        try:
+            self._store.initialize()
+        except Exception as exc:
+            raise AuditError("Cannot initialize private audit storage") from exc
+        self._state.lifecycle = "active"
         self.save()
 
+    def annotate(self, **values: Any) -> None:
+        protected = {
+            "status",
+            "integrated",
+            "integration",
+            "result_oid",
+            "failure",
+            "evidence",
+            "audit_errors",
+        }
+        if protected & values.keys():
+            raise ValueError("Execution facts require an explicit audit transition")
+        with self._lock:
+            self._ensure_open()
+            immutable = {
+                "branch",
+                "before_oid",
+                "target",
+                "target_oid",
+                "target_ref",
+                "onto",
+                "onto_oid",
+                "onto_ref",
+                "configuration",
+                "prompt",
+                "worktree",
+                "provider",
+                "model",
+                "operation",
+                "rebase_options",
+                "commit_options",
+                "merge_ff",
+                "interactive",
+                "rerere_autoupdate",
+            }
+            if self._store.owned and immutable & values.keys():
+                raise ValueError("Admitted request and pinned inputs cannot be changed")
+            encode_json(values)
+            self._state.details.update(copy.deepcopy(values))
+
+    def add_record(self, group: str, data: Mapping[str, Any]) -> Record:
+        if group not in ("sessions", "conflicts", "reviews", "native_resolutions", "empty_commits"):
+            raise ValueError("Unknown audit record scope")
+        with self._lock:
+            self._ensure_open()
+            encode_json(dict(data))
+            records = self._state.details.setdefault(group, [])
+            values = copy.deepcopy(dict(data))
+            values.setdefault("id", uuid4().hex)
+            records.append(values)
+            return Record(self, group, len(records) - 1)
+
+    def update_record(self, group: str, index: int, data: dict[str, Any]) -> None:
+        with self._lock:
+            self._ensure_open()
+            if "id" in data:
+                raise ValueError("Audit record identity cannot change")
+            encode_json(data)
+            record = self._state.details[group][index]
+            if (
+                group == "sessions"
+                and record.get("status") == "resolved"
+                and data.get("status") == "failed"
+            ):
+                raise ValueError("Evidence failure cannot erase resolved session execution")
+            record.update(copy.deepcopy(data))
+
+    def record(self, group: str, index: int = -1) -> Record:
+        records = self._state.details.get(group, [])
+        if not records:
+            raise ValueError("Audit record does not exist")
+        return Record(self, group, index % len(records))
+
     def save(self) -> None:
-        self.manifest["updated_at"] = now()
-        write_json(self.directory / "run.json", self.manifest)
-        self.report()
+        with self._lock:
+            if self._finalized:
+                raise ValueError("A finalized audit cannot be changed")
+            self._state.revision += 1
+            try:
+                payload = self._redact_schema(self._state.snapshot())
+                content = self._store.snapshot(payload)
+            except Exception as exc:
+                raise AuditError("Cannot publish audit checkpoint") from exc
+            self._published_revision = self._state.revision
+            self._published_bytes = content
 
     def set_status(
         self,
@@ -69,27 +332,376 @@ class Audit:
         phase: str = "audit",
         message: str | None = None,
     ) -> None:
-        self.manifest["status"] = status
+        with self._lock:
+            if self._finalized:
+                return
+            if error is not None and self._state.failure is None:
+                diagnostic = (
+                    self._redact(message)
+                    if message is not None
+                    else safe_error(error, self._secrets)
+                )
+                self._state.failure = {
+                    "id": uuid4().hex,
+                    "domain": "audit" if isinstance(error, AuditError) else "execution",
+                    "owner": self.directory.name,
+                    "phase": phase,
+                    "type": type(error).__name__,
+                    "message": diagnostic,
+                }
+                if isinstance(error, AuditError) and error.artifact is not None:
+                    self._state.failure["artifact"] = error.artifact
+                self._state.issues.append(self._state.failure)
+            if self._state.failure is None or status != "succeeded":
+                self._state.status = status
+
+    def completed(self, oid: str) -> None:
+        with self._lock:
+            if self._state.integration == "completed" and self._state.result_oid != oid:
+                raise EzError("HEAD changed after the observed Git integration result")
+            self._state.integration = "completed"
+            self._state.result_oid = oid
+            self.expect("result.diff", "result_diff")
+            if self.view.get("operation") == "rebase":
+                self.expect("range-diff.txt", "range_diff")
+
+    def result(self, oid: str) -> None:
+        if self._state.result_oid is not None and self._state.result_oid != oid:
+            raise EzError("HEAD changed after the observed Git integration result")
+        self._state.result_oid = oid
+
+    def checked(self, error: BaseException | None = None) -> None:
         if error is not None:
-            if message is None:
-                message = str(error) or "Interrupted by user"
-            self.manifest["error"] = message
-            failure: Failure = {"phase": phase, "type": type(error).__name__, "message": message}
-            self.manifest["failure"] = failure
+            self._state.final_checks = "failed" if isinstance(error, EzError) else "unknown"
+            self._state.details["final_check_facts"] = {
+                "checked_at": now(),
+                "status": self._state.final_checks,
+                "error_type": type(error).__name__,
+                "reason": safe_error(error, self._secrets),
+            }
+            return
+        self._state.final_checks = "passed"
+        self._state.details["final_check_facts"] = {
+            "checked_at": now(),
+            "result_oid": self._state.result_oid,
+            "branch": self.view["branch"],
+            "target_oid": self.view["target_oid"],
+            "checks": ["HEAD", "clean_checkout", "branch_identity", "pinned_inputs", "ancestry"],
+        }
 
-    @property
-    def audit_errors(self) -> list[Failure]:
-        return cast(list[Failure], self.manifest.setdefault("audit_errors", []))
+    def record_observation(self, git: Git) -> dict[str, Any]:
+        value = observe(git)
+        with self._lock:
+            self._state.observations.append(copy.deepcopy(value))
+        return value
 
-    @property
-    def evidence(self) -> dict[str, Evidence]:
-        return cast(dict[str, Evidence], self.manifest.setdefault("evidence", {}))
+    def step_id(self, index: int) -> str:
+        return str(self._state.steps[index]["id"])
 
-    def has_artifact(self, artifact: str) -> bool:
+    def begin_step(self, git: Git, command: tuple[str, ...]) -> int:
+        if not self.evidence_ready:
+            raise AuditError("Required audit evidence is incomplete; refusing another Git mutation")
+        with self._lock:
+            previous_integration = self._state.integration
+            self._state.steps.append(
+                {
+                    "id": uuid4().hex,
+                    "argv": self._redact(list(command)),
+                    "intent_at": now(),
+                    "purpose": "stage" if command[0] == "add" else "integration",
+                    "result": "pending",
+                    "returncode": None,
+                }
+            )
+            index = len(self._state.steps) - 1
         try:
-            return (self.directory / artifact).is_file()
-        except OSError:
-            return False
+            before = self.record_observation(git)
+            self._state.steps[index]["before"] = before["id"]
+            if before["errors"]:
+                raise AuditError("Cannot observe Git state before mutation")
+            self._state.integration = "in_progress"
+            self.save()
+        except BaseException as exc:
+            self._state.steps[index].update(result="not_launched", error_type=type(exc).__name__)
+            self._state.integration = previous_integration
+            raise
+        return index
+
+    def returned(self, git: Git, index: int, returncode: int) -> bool:
+        # The native result is known before any fallible capture/observation.
+        with self._lock:
+            self._state.steps[index].update(
+                result="returned", returncode=returncode, returned_at=now()
+            )
+        after = self.record_observation(git)
+        with self._lock:
+            self._state.steps[index]["after"] = after["id"]
+            for channel in ("stdout", "stderr"):
+                artifact = f"git-steps/{index + 1:04d}.{channel}"
+                self.expect(artifact, f"git_step_{channel}")
+                self._state.steps[index][channel + "_artifact"] = artifact
+            if (
+                self._state.steps[index]["purpose"] == "integration"
+                and returncode == 0
+                and not after["errors"]
+                and after["operation_active"] is False
+            ):
+                self.completed(after["head"])
+            elif self._state.integration != "completed":
+                self._state.integration = "unknown" if after["errors"] else "not_completed"
+        return not after["errors"]
+
+    def _ensure_open(self) -> None:
+        if self._finalized:
+            raise ValueError("A finalized audit cannot be changed")
+
+    @property
+    def owned(self) -> bool:
+        return self._store.owned
+
+    def expect(self, artifact: str, role: str) -> None:
+        self._state.evidence.setdefault(
+            artifact,
+            {
+                "status": "unavailable",
+                "result": "not_attempted",
+                "requirement": "blocking",
+                "role": role,
+            },
+        )
+
+    def unavailable(self, artifact: str, reason: str, *, optional: bool = False) -> None:
+        with self._lock:
+            self._state.evidence[artifact] = {
+                "status": "unavailable",
+                "result": "not_attempted",
+                "reason": reason,
+                "requirement": "optional" if optional else "blocking",
+            }
+
+    def limit_evidence(self, artifact: str, result: str, reason: str) -> None:
+        with self._lock:
+            self._state.evidence[artifact]["status"] = "partial"
+            self._state.evidence[artifact]["result"] = result
+            self._state.evidence[artifact]["reason"] = reason
+            if result == "redacted":
+                self._state.evidence[artifact]["redacted"] = True
+            elif result == "truncated":
+                self._state.evidence[artifact]["truncated"] = True
+
+    def _registered(
+        self,
+        artifact: str,
+        *,
+        optional: bool = False,
+        prefix: bool = False,
+        capture_id: str | None = None,
+        role: str = "proof",
+    ) -> None:
+        size, digest = fingerprint(self._store.path(artifact))
+        previous: Evidence = self._state.evidence.get(artifact, {"status": "unavailable"})
+        self._state.evidence[artifact] = {
+            **previous,
+            "status": (
+                "available"
+                if previous.get("result") in (None, "not_attempted")
+                else previous["status"]
+            ),
+            "result": "ok"
+            if previous.get("result") in (None, "not_attempted")
+            else previous["result"],
+            "requirement": "optional" if optional else "blocking",
+            "retained_bytes": size,
+            "sha256": digest,
+            "prefix": prefix,
+            "capture_id": capture_id or uuid4().hex,
+            "role": previous.get("role", "metadata_export" if optional else role),
+        }
+
+    @property
+    def evidence_health(self) -> str:
+        return self._state.health()
+
+    @property
+    def evidence_ready(self) -> bool:
+        return self._state.health() != "incomplete"
+
+    def create_directory(self, path: Path) -> None:
+        if not self._store.owned:
+            raise OSError("Audit directory is not owned by this run")
+        relative = path.relative_to(self.directory).as_posix()
+        with directory_fd(self._store.path(relative), create=True):
+            pass
+
+    def export_json(self, path: Path, data: object) -> None:
+        relative = path.relative_to(self.directory).as_posix()
+        self.attempt(
+            "metadata export",
+            lambda: self.write_json(relative, data, optional=True),
+            relative,
+            optional=True,
+        )
+
+    def register_external(self, path: str) -> None:
+        with self._lock:
+            self._registered(path)
+
+    def step_unknown(self, index: int, error: BaseException) -> None:
+        with self._lock:
+            self._state.steps[index].update(result="unknown", error_type=type(error).__name__)
+            if self._state.integration != "completed":
+                self._state.integration = "unknown"
+
+    def trace(self, command: tuple[str, ...], output: bytes) -> None:
+        def append() -> None:
+            if "integration.log" in self._blocked_streams:
+                return
+            text = ("git " + " ".join(command) + "\n").encode() + output + b"\n"
+            for secret in self._secrets:
+                text = text.replace(secret.encode(), b"<redacted>")
+            self._store.append("integration.log", text)
+            self._registered("integration.log", optional=True, prefix=True)
+
+        failure = self.attempt("native trace export", append, "integration.log", optional=True)
+        if failure is not None:
+            self._blocked_streams.add("integration.log")
+
+    def write(
+        self,
+        artifact: str,
+        content: bytes,
+        *,
+        optional: bool = False,
+        capture_id: str | None = None,
+        role: str = "proof",
+        retained_limit: int | None = None,
+    ) -> None:
+        with self._lock:
+            self._ensure_open()
+            original = content
+            for secret in self._secrets:
+                content = content.replace(secret.encode(), b"<redacted>")
+            redacted = original != content
+            truncated = retained_limit is not None and len(content) > retained_limit
+            if retained_limit is not None:
+                content = content[:retained_limit]
+            try:
+                self._store.write(artifact, content)
+                self._registered(artifact, optional=optional, capture_id=capture_id, role=role)
+                self._state.evidence[artifact]["source_bytes"] = len(original)
+            except (OSError, ValueError) as exc:
+                self._state.evidence[artifact] = {
+                    "status": "unavailable",
+                    "result": "io_error",
+                    "reason": safe_error(exc, self._secrets),
+                    "requirement": "optional" if optional else "blocking",
+                    "role": self._state.evidence.get(artifact, {"status": "unavailable"}).get(
+                        "role", "metadata_export" if optional else role
+                    ),
+                }
+                if optional:
+                    raise
+                raise AuditError("Cannot publish required audit evidence", artifact) from exc
+            if redacted:
+                self._state.evidence[artifact]["redacted"] = True
+                self.limit_evidence(artifact, "redacted", "Known credentials removed from evidence")
+            if truncated:
+                self._state.evidence[artifact]["truncated"] = True
+                self.limit_evidence(
+                    artifact, "truncated", "Retained evidence exceeds configured limit"
+                )
+
+    def write_json(
+        self,
+        artifact: str,
+        data: object,
+        *,
+        optional: bool = False,
+        schema: bool = False,
+        capture_id: str | None = None,
+        role: str = "proof",
+    ) -> None:
+        normalized = self._redact(data, enabled=False)
+        transformed = self._redact_schema(normalized) if schema else self._redact(normalized)
+        self.write(
+            artifact, encode_json(transformed), optional=optional, capture_id=capture_id, role=role
+        )
+        if transformed != normalized:
+            self.limit_evidence(
+                artifact, "redacted", "Known credentials removed from JSON evidence"
+            )
+
+    def append_event(self, artifact: str, data: object) -> None:
+        with self._lock:
+            self._ensure_open()
+            if artifact in self._blocked_streams:
+                raise EzError("Audit event stream has an earlier capture gap")
+            normalized = self._redact(data, enabled=False)
+            if isinstance(normalized, dict):
+                if "run_id" in normalized:
+                    normalized["callback_run_id"] = normalized["run_id"]
+                normalized["run_id"] = self._state.run_id
+            transformed = self._redact(normalized)
+            if isinstance(normalized, dict) and isinstance(transformed, dict):
+                for key in ("at", "event", "run_id"):
+                    if key in normalized:
+                        transformed[key] = normalized[key]
+            content = (json.dumps(transformed, ensure_ascii=True, allow_nan=False) + "\n").encode()
+            digest = self._stream_hashes.get(artifact)
+            digest = hashlib.sha256() if digest is None else digest.copy()
+            previous = self._state.evidence.get(artifact, {"status": "available"})
+            self._store.append(artifact, content)
+            digest.update(content)
+            self._stream_hashes[artifact] = digest
+            self._state.evidence[artifact] = {
+                **previous,
+                "status": previous.get("status", "available"),
+                "result": previous.get("result", "ok"),
+                "role": "event_stream",
+                "requirement": "blocking",
+                "retained_bytes": previous.get("retained_bytes", 0) + len(content),
+                "sha256": digest.hexdigest(),
+                "prefix": True,
+                "capture_id": previous.get("capture_id", uuid4().hex),
+            }
+            if transformed != normalized:
+                self.limit_evidence(
+                    artifact, "redacted", "Known credentials removed from event content"
+                )
+
+    def capture_error(
+        self, phase: str, error: Exception, artifact: str | None, *, optional: bool = False
+    ) -> None:
+        with self._lock:
+            underlying = (
+                error.__cause__ if isinstance(error, AuditError) and error.__cause__ else error
+            )
+            failure: Failure = {
+                "phase": phase,
+                "type": type(underlying).__name__,
+                "message": safe_error(error, self._secrets),
+            }
+            if artifact is not None:
+                failure["artifact"] = artifact
+                previous: Evidence = self._state.evidence.get(artifact, {"status": "unavailable"})
+                self._state.evidence[artifact] = {
+                    **previous,
+                    "status": "partial" if previous.get("sha256") else "unavailable",
+                    "result": previous["result"]
+                    if previous.get("result") in ("observation_error", "invalid", "interrupted")
+                    else "io_error",
+                    "reason": failure["message"],
+                    "requirement": "optional" if optional else "blocking",
+                    "role": previous.get("role", "metadata_export" if optional else "proof"),
+                }
+            failure["id"] = uuid4().hex
+            failure["domain"] = "audit"
+            failure["owner"] = self.directory.name
+            failure["blocking"] = not optional
+            self._state.audit_errors.append(failure)
+            self._state.issues.append(failure)
+            if optional:
+                self.presentation_errors.append(f"{phase}: {failure['message']}")
 
     def attempt(
         self,
@@ -98,61 +710,36 @@ class Audit:
         artifact: str | None = None,
         *,
         append: bool = False,
+        optional: bool = False,
     ) -> Exception | None:
-        """Capture each independent artifact without replacing an operation's failure."""
-        if artifact is not None:
-            previous = self.evidence.get(artifact)
-            if append and previous is not None and previous["status"] != "available":
-                self.evidence[artifact] = {**previous, "status": "partial"}
-            else:
-                self.evidence[artifact] = {"status": "available"}
         try:
             action()
+            if artifact is not None and artifact not in self._state.evidence:
+                self._registered(artifact, optional=optional, prefix=append)
         except Exception as exc:
-            # Serialization/report bugs are secondary too; termination signals propagate.
-            failure: Failure = {"phase": phase, "type": type(exc).__name__, "message": str(exc)}
-            if artifact is not None:
-                failure["artifact"] = artifact
-            self.audit_errors.append(failure)
-            if artifact is not None:
-                self.evidence[artifact] = {
-                    "status": "partial" if self.has_artifact(artifact) else "unavailable",
-                    "reason": str(exc),
-                }
+            self.capture_error(phase, exc, artifact, optional=optional)
+            if append and artifact is not None:
+                self._blocked_streams.add(artifact)
             return exc
         return None
 
-    def finalize(self) -> None:
-        """Attempt both summaries and expose failures even when one cannot be saved."""
-
-        def fail_if_needed() -> None:
-            if self.audit_errors and self.manifest["status"] == "succeeded":
-                self.set_status(
-                    "failed", EzError("Audit finalization failed; inspect audit errors")
-                )
-
-        def manifest() -> None:
-            self.manifest["updated_at"] = now()
-            write_json(self.directory / "run.json", self.manifest)
-
-        fail_if_needed()
-        # Publish the final manifest last, after the report's actual outcome is known.
-        self.evidence["run.json"] = {"status": "available"}
-        report_error = self.attempt("report", self.report, "report.md")
-        fail_if_needed()
-        manifest_error = self.attempt("manifest", manifest, "run.json")
-        fail_if_needed()
-        if manifest_error is not None and report_error is None:
-            # The report is still writable: record the manifest failure there.
-            self.attempt("report", self.report, "report.md")
-        fail_if_needed()
+    def has_artifact(self, artifact: str) -> bool:
+        entry = self.evidence.get(artifact)
+        if entry is None or "sha256" not in entry:
+            return False
+        try:
+            size, digest = fingerprint(
+                self._store.path(artifact),
+                entry.get("retained_bytes") if entry.get("prefix") else None,
+            )
+            return (size, digest) == (entry.get("retained_bytes"), entry["sha256"])
+        except (OSError, ValueError):
+            return False
 
     def artifact(self, number: int, filename: str, content: str) -> str:
-        folder = self.directory / "conflicts" / f"{number:04d}"
-        folder.mkdir(parents=True, exist_ok=True)
-        target = folder / filename
-        target.write_bytes(content.encode("utf-8"))
-        return target.relative_to(self.directory).as_posix()
+        path = f"conflicts/{number:04d}/{filename}"
+        self.write(path, content.encode("utf-8"))
+        return path
 
     def capture_worktree(
         self,
@@ -162,323 +749,121 @@ class Audit:
         paths: list[str] | None = None,
         reference: str = "HEAD",
     ) -> None:
-        """Archive tracked edits and non-ignored new files without staging or following links."""
-        directory.mkdir(parents=True, exist_ok=True)
-        diff = git.run(
-            "diff", "--no-ext-diff", "--no-textconv", "--binary", reference, "--", check=False
-        )
-        (directory / "worktree.diff").write_bytes(diff.stdout)
-        changed = git.run(
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--name-only",
-            "-z",
-            reference,
-            "--",
-            check=False,
-        )
-        untracked = git.run("ls-files", "--others", "--exclude-standard", "-z", check=False)
-        names = set(
-            (changed.stdout + untracked.stdout)
-            .decode("utf-8", errors="surrogateescape")
-            .split("\0")
-        )
-        names.update(paths or [])
-        records: list[dict[str, Any]] = []
-        for name in sorted(names - {""}):
-            record: dict[str, Any] = {"path": name}
-            records.append(record)
-            try:
-                path = git.safe_path(name)
-                if not path.exists():
-                    record["state"] = "deleted"
-                    continue
-                info = path.stat()
-                if not stat.S_ISREG(info.st_mode):
-                    raise EzError("Not a regular file")
-                # Retain raw bytes, including files an unfinished agent left invalid or binary.
-                with path.open("rb") as stream:
-                    content = stream.read(limit + 1)
-                truncated = len(content) > limit
-                content = content[:limit]
-                artifact = Path("files") / f"{len(records):04d}.bin"
-                (directory / "files").mkdir(exist_ok=True)
-                (directory / artifact).write_bytes(content)
-                record.update(
-                    state="file",
-                    artifact=artifact.as_posix(),
-                    size=info.st_size,
-                    mode=stat.S_IMODE(info.st_mode),
-                    recorded_bytes=len(content),
-                    truncated=truncated,
-                    recorded_sha256=hashlib.sha256(content).hexdigest(),
+        self._ensure_open()
+        capture_worktree(self, git, directory, limit, paths, reference)
+
+    def seal_directory(self, directory: Path) -> None:
+        # SDK-owned files are indexed only after its writers have settled. Walk
+        # without following directory links; regular_fd rejects unsafe file entries.
+        def failed(error: OSError) -> None:
+            raise error
+
+        with directory_fd(directory):
+            pass
+        for parent, directories, files in os.walk(directory, followlinks=False, onerror=failed):
+            for name in [*directories, *files]:
+                path = Path(parent) / name
+                if path.is_symlink():
+                    raise EzError("Unsafe agent file in audit directory")
+            for name in files:
+                relative = (Path(parent) / name).relative_to(self.directory).as_posix()
+                self._seal_file(relative)
+
+    def _seal_file(self, relative: str) -> None:
+        if relative in self._state.evidence:
+            raise AuditError("Agent file was already sealed", relative)
+        digest = hashlib.sha256()
+        with regular_fd(self._store.path(relative)) as descriptor:
+            before = os.fstat(descriptor)
+
+            def blocks() -> Iterator[bytes]:
+                while block := os.read(descriptor, 65536):
+                    digest.update(block)
+                    yield block
+                after = os.fstat(descriptor)
+                if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                ):
+                    raise AuditError("Agent file changed while being sealed", relative)
+
+            self._store.write(
+                relative,
+                redact_chunks(blocks(), tuple(secret.encode() for secret in self._secrets)),
+                replace=True,
+            )
+        self._registered(relative)
+        self._state.evidence[relative]["source_bytes"] = before.st_size
+        if digest.hexdigest() != self._state.evidence[relative]["sha256"]:
+            self.limit_evidence(relative, "redacted", "Known credentials removed")
+
+    def finalize(self) -> None:
+        with self._lock:
+            if self._finalized:
+                return
+            for group in ("sessions", "conflicts", "reviews"):
+                for record in self._state.details.get(group, []):
+                    if record.get("status") in ("created", "running", "pending"):
+                        record.update(
+                            status="unknown",
+                            termination_reason="No terminal scope outcome observed",
+                        )
+            self._state.lifecycle = "finished"
+            if self._state.health() == "incomplete" and self._state.status in (
+                "running",
+                "succeeded",
+            ):
+                self.set_status(
+                    "failed",
+                    AuditError("Required audit evidence is incomplete; inspect audit errors"),
                 )
-            except (EzError, OSError, ValueError) as exc:
-                record.update(state="unavailable", error=str(exc))
-        head = git.run("rev-parse", "HEAD", check=False)
-        branch = git.run("symbolic-ref", "-q", "HEAD", check=False)
-        capture_errors = [
-            {
-                "command": name,
-                "returncode": result.returncode,
-                "stderr": result.stderr.decode("utf-8", errors="replace"),
-            }
-            for name, result in (
-                ("diff", diff),
-                ("changed", changed),
-                ("untracked", untracked),
-            )
-            if result.returncode
-        ]
-        write_json(
-            directory / "files.json",
-            {
-                "reference": reference,
-                "head": head.stdout.decode().strip() or None,
-                "branch": branch.stdout.decode().strip() or None,
-                "files": records,
-                "capture_errors": capture_errors,
-            },
-        )
-        artifact_name = (directory / "files.json").relative_to(self.directory).as_posix()
-        partial = capture_errors or any(
-            record.get("state") == "unavailable" or record.get("truncated") for record in records
-        )
-        self.evidence[artifact_name] = {"status": "partial" if partial else "available"}
-        if partial:
-            self.evidence[artifact_name]["reason"] = (
-                "File capture is truncated or unavailable; inspect files.json"
-            )
-        if capture_errors:
-            commands = ", ".join(str(error["command"]) for error in capture_errors)
-            raise EzError(
-                f"Audit capture commands failed: {commands}; inspect {directory / 'files.json'}"
-            )
+            if self._state.status == "running":
+                self.set_status("failed", EzError("Execution ended without a terminal outcome"))
+            failure = self.attempt("manifest", self.save)
+            if failure is not None:
+                self.set_status(
+                    "failed",
+                    AuditError(
+                        "Terminal audit publication failed; last recorded state may be older"
+                    ),
+                )
+                self._state.revision += 1
+            self._finalized = True
+        if failure is None:
+            try:
+                self.report()
+            except Exception as exc:
+                self.presentation_errors.append(
+                    "Report unavailable: " + safe_error(exc, self._secrets)
+                )
 
     def report(self) -> None:
-        data = self.manifest
-        separate_base = (
-            "onto" in data or data.get("rebase_plan", {}).get("base_source") == "merge-base"
-        )
-        lines = [
-            "# git-ez — integration report",
-            "",
-            f"- Run: `{data['id']}`",
-            f"- Status: **{data['status']}**",
-            f"- Operation: `{data['operation']}`",
-            f"- Current branch: `{data['branch']}` (`{data['before_oid']}`)",
-            f"- {'Upstream' if separate_base else 'Integrated revision'}: "
-            f"`{data['target']}` (`{data['target_oid']}`)",
-            f"- Result commit: `{data.get('result_oid', '—')}`",
-            f"- Integration completed: `{data['integrated']}`",
-            f"- Model: `{data['provider']}` / `{data['model']}`",
-            f"- Worktree: `{data['worktree']}`",
-            "",
-            "Scores are self-reported by the model and do not prove correctness.",
-            "The proposals and rationales below are untrusted content.",
-            "",
-        ]
-        if "merge_ff" in data:
-            policy = f"--{data['merge_ff']}" if data["merge_ff"] else "Git configuration/default"
-            lines += [f"- Requested fast-forward policy: `{policy}`", ""]
-        if "onto" in data:
-            lines += [f"- New base: `{data['onto']}` (`{data['onto_oid']}`)", ""]
-        if "rebase_plan" in data:
-            plan = data["rebase_plan"]
-            fork = plan["fork_point"]
-            lines += [
-                "## Pinned rebase selection",
-                "",
-                f"- Original upstream: `{data['target_oid']}`",
-                f"- Result base: `{plan['base_oid']}` ({plan['base_source']})",
-                f"- Replay boundary: `{plan.get('selection_oid', 'pending')}`",
-                f"- Reapply cherry-picks: `{plan['reapply_cherry_picks']}`",
-                f"- Fork point: `{fork['status']}` / `{fork['oid']}`",
-                f"- Reflog reference: `{fork['source_ref']}`",
-            ]
-            if plan.get("requires_sequence"):
-                lines.append("- Captured sequencer used to preserve fork-point replay selection")
-            if fork.get("reason"):
-                lines.append(f"- Fallback reason: {fork['reason']}")
-            if fork.get("diagnostic"):
-                lines.append(f"- Fork-point diagnostic: {fork['diagnostic']}")
-            if "selection_anchor" in plan:
-                anchor = plan["selection_anchor"]
-                lines += [
-                    f"- [Internal selection object]({anchor['artifact']})",
-                    f"- Selection object capture truncated: `{anchor['truncated']}`",
-                    f"- Selection object capture limit: `{anchor['limit_bytes']}` bytes",
-                ]
-            lines.append("")
-        if "rerere_autoupdate_effective" in data:
-            lines += [
-                f"- Requested rerere autoupdate: `{data['rerere_autoupdate']}`",
-                f"- Effective rerere autoupdate: `{data['rerere_autoupdate_effective']}`",
-                "",
-            ]
-        if "rebase_options" in data:
-            lines += [
-                "## Rebase options",
-                "",
-                "```json",
-                json.dumps(data["rebase_options"], indent=2),
-                "```",
-                "",
-            ]
-        if "commit_options" in data:
-            lines += [
-                "## Commit options",
-                "",
-                "```json",
-                json.dumps(data["commit_options"], indent=2),
-                "```",
-                "",
-            ]
-        if "rebase_sequence" in data:
-            sequence = data["rebase_sequence"]
-            lines += [
-                "## Generated rebase sequence",
-                "",
-                f"- Capture: `{sequence['status']}`",
-                f"- Capture limit: `{sequence['limit_bytes']}` bytes",
-            ]
-            if sequence["status"] == "captured":
-                lines.append(f"- [Native Git instructions]({sequence['artifact']})")
-            elif sequence.get("error"):
-                lines.append(f"- Unavailable evidence: {sequence['error']}")
-            lines.append("")
-        if "result_commits" in data:
-            commits = data["result_commits"]
-            lines += [
-                "## Resulting commits and messages",
-                "",
-                f"- [Native Git raw log]({commits['artifact']})",
-                f"- Truncated: `{commits['truncated']}`",
-                f"- Capture limit: `{commits['limit_bytes']}` bytes",
-                "",
-            ]
-        if data.get("empty_commits"):
-            lines += ["## Empty conflict resolutions", ""]
-            for entry in data["empty_commits"]:
-                lines += [f"- `{entry['commit']}`: `{entry['policy']}` — {entry['reason']}"]
-            lines.append("")
-        if data.get("error"):
-            lines += ["## Run stopped", "", str(data["error"]), ""]
-        if "range_diff" in data:
-            comparison = data["range_diff"]
-            lines += [
-                "## Commit comparison before / after rebase",
-                "",
-                f"- Before: `{comparison['before']}`",
-                f"- After: `{comparison['after']}`",
-                f"- [Before / after range-diff]({comparison['artifact']})",
-                "",
-                "`=`: equivalent patch; `!`: modified patch; "
-                "`<`: removed commit; `>`: added commit.",
-                "Commit matching is heuristic; this diff does not prove "
-                "semantic equivalence between the two series.",
-                "",
-            ]
-        for conflict in data.get("conflicts", []):
-            lines += [
-                f"## Conflict {conflict['number']}: {conflict['path']!r}",
-                "",
-                f"- Status: `{conflict['status']}`",
-                f"- Replayed commit / HEAD: `{conflict['head']}`",
-            ]
-            if "resolution" in conflict:
-                resolution = conflict["resolution"]
-                lines += [
-                    f"- Action: `{resolution['action']}`",
-                    f"- Confidence: {resolution['confidence']}",
-                    "",
-                    *["> " + line for line in resolution["rationale"].splitlines()],
-                    "",
-                ]
-            for label, path in conflict.get("artifacts", {}).items():
-                lines.append(f"- [{label}]({path})")
-            if conflict.get("capture_error"):
-                lines.append(f"Partial capture: {conflict['capture_error']}")
-            lines.append("")
-        for session in data.get("sessions", []):
-            folder = session["artifacts"]
-            lines += [
-                f"## Agent session {session['round']}",
-                "",
-                f"- Status: `{session['status']}` — {session['tool_calls']} tool calls",
-                f"- Runtime: `{session['runtime']}`",
-                f"- [Agent configuration]({folder}/runtime.json)",
-                f"- [Agent files and offloaded history]({folder}/agent-files/)",
-                f"- [Conversation]({folder}/messages.json)",
-                f"- [Tool events]({folder}/events.jsonl)",
-                f"- [Worktree diff]({folder}/worktree.diff)",
-                f"- [File state, including new files]({folder}/files.json)",
-            ]
-            if (self.directory / folder / "staged.diff").is_file():
-                lines += [
-                    f"- [Full staged diff]({folder}/staged.diff)",
-                ]
-            if "rationale" in session:
-                lines += [
-                    f"- Confidence: {session['confidence']}",
-                    f"- [Decision and rationale]({folder}/decision.json)",
-                    "",
-                    *["> " + line for line in session["rationale"].splitlines()],
-                ]
-            if session.get("capture_error"):
-                lines.append(f"Capture failed: {session['capture_error']}")
-            lines.append("")
-        for review in data.get("reviews", []):
-            folder = review["artifacts"]
-            lines += [
-                f"## Proposal {review['attempt']} (conflict stop {review['round']})",
-                "",
-                f"- Status: {review['status']}",
-                f"- User decision: {review.get('decision', 'unavailable')}",
-                f"- Feedback: {review.get('user_feedback') or '—'}",
-                f"- [Proposal diff]({folder}/worktree.diff)",
-                f"- [File contents and capture limits]({folder}/files.json)",
-                f"- Rationale: {review.get('resolution', {}).get('rationale', 'unavailable')}",
-                "- Acceptance authorizes engine checks; application is recorded separately.",
-                "",
-            ]
-        for native in data.get("native_resolutions", []):
-            lines += ["## Reused Git resolution", "", native["rationale"], ""]
-        if data.get("failure"):
-            lines += [f"Failure phase: `{data['failure']['phase']}`", ""]
-        if data.get("audit_errors"):
-            lines += [
-                "## Audit errors",
-                "",
-                "These errors do not replace the original failure.",
-                "",
-            ]
-            for error in data["audit_errors"]:
-                lines.append(f"- {error['phase']}: {error['type']}: {error['message']}")
-            lines.append("")
-        if data.get("evidence"):
-            lines += ["## Evidence availability", ""]
-            for artifact, evidence in sorted(data["evidence"].items()):
-                detail = f" — {evidence['reason']}" if evidence.get("reason") else ""
-                lines.append(f"- `{artifact}`: **{evidence['status']}**{detail}")
-            lines.append("")
-        lines += ["## Git traces", "", "- [Integration log](integration.log)"]
-        if data.get("exit_state"):
-            lines += [
-                "- [Final file state](exit/files.json)",
-                "- [Exit diff](exit/worktree.diff)",
-            ]
-        if data.get("capture_error"):
-            lines += [f"Final capture failed: {data['capture_error']}"]
-        if data.get("result_oid"):
-            lines.append("- [Full before / after diff](result.diff)")
-        lines.append("")
-        if "validation" in data:
-            lines += [
-                f"Validation status: `{data['validation'].get('status', 'unknown')}`",
-                f"Validation command: `{data['validation']['command']}`",
-                f"Exit code: `{data['validation'].get('returncode', 'unavailable')}`",
-                "",
-            ]
-        (self.directory / "report.md").write_text("\n".join(lines), encoding="utf-8")
+        if self._published_bytes is None:
+            return
+        from .audit_state import snapshot_view
+
+        payload = json.loads(self._published_bytes)
+        try:
+            body = render_markdown(snapshot_view(payload))
+            header = {
+                "schema": 2,
+                "run_id": payload["run_id"],
+                "revision": payload["revision"],
+                "manifest_sha256": hashlib.sha256(self._published_bytes).hexdigest(),
+                "renderer": 1,
+                "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+            }
+            content = (
+                "<!-- git-ez-cache "
+                + json.dumps(header)
+                + " -->\n"
+                + (
+                    "> Derived report. Use `git ez show` to verify "
+                    "the current manifest and evidence.\n\n"
+                )
+                + body
+            )
+            self._store.write("report.md", content.encode(), replace=True)
+        except Exception as exc:
+            self.presentation_errors.append("Report unavailable: " + safe_error(exc, self._secrets))

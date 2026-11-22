@@ -11,6 +11,8 @@ import stat
 import sys
 from pathlib import Path
 
+from git_ez.audit_storage import publish
+
 
 def read_regular(path: Path, limit: int) -> bytes:
     """Read bounded regular-file evidence without following symlinks or blocking on FIFOs."""
@@ -34,10 +36,7 @@ def capture_sequence(source: Path, destination: Path, limit: int) -> None:
         (destination, content),
         (digest, hashlib.sha256(content).hexdigest().encode()),
     ):
-        temporary = path.with_name(path.name + ".tmp")
-        with temporary.open("xb") as stream:
-            stream.write(data)
-        temporary.replace(path)
+        publish(path, data)
 
 
 def editor_command(destination: Path, limit: int) -> str:

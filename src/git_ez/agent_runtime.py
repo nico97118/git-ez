@@ -31,11 +31,12 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langsmith import tracing_context
 
 from .agent import AGENT_PROMPT
-from .audit import Audit, now, write_json
+from .audit import Audit
+from .audit_state import now
 from .checks import GitStateChanged, WorktreeChecks
 from .config import Config
 from .conflicts import Decision, LowConfidence
-from .errors import EzError
+from .errors import AuditError, EzError
 from .git import Git, git_environment
 from .llm import create_chat_model
 
@@ -69,7 +70,7 @@ def error_info(error: BaseException) -> dict[str, Any]:
     return {"type": type(error).__name__, "status_code": getattr(error, "status_code", None)}
 
 
-class EventCaptureError(EzError):
+class EventCaptureError(AuditError):
     """A required audit event could not be retained."""
 
 
@@ -88,8 +89,11 @@ class SessionLog(BaseCallbackHandler):
         self.messages: list[Any] = []
 
     def event(self, event: str, **data: Any) -> None:
-        with self.lock, (self.directory / "events.jsonl").open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps({"at": now(), "event": event, **data}, default=str) + "\n")
+        with self.lock:
+            self.audit.append_event(
+                (self.directory / "events.jsonl").relative_to(self.audit.directory).as_posix(),
+                {"at": now(), "event": event, **data},
+            )
 
     def capture_event(self, event: str, **data: Any) -> Exception | None:
         return self.audit.attempt(
@@ -230,7 +234,7 @@ def run_agent(
 ) -> dict[str, Any]:
     directory = audit.directory / "sessions" / f"{round_number:04d}"
     log = SessionLog(directory, audit)
-    session: dict[str, Any] = {
+    session_data: dict[str, Any] = {
         "round": round_number,
         "status": "running",
         "conflicts": paths,
@@ -238,15 +242,14 @@ def run_agent(
         "tool_calls": 0,
         "artifacts": str(directory.relative_to(audit.directory)),
     }
-    audit.manifest.setdefault("sessions", []).append(session)
+    session = audit.add_record("sessions", session_data)
     result: dict[str, Any] = {}
     decision: dict[str, Any] = {}
     # Initialization may fail before HEAD is pinned; capture the current Git state then.
     head = "HEAD"
     primary_error = False
-    count = len(audit.audit_errors)
     try:
-        directory.mkdir(parents=True)
+        audit.create_directory(directory)
         audit.save()
         checks = WorktreeChecks(config)
         head = git.text("rev-parse", "HEAD")
@@ -262,13 +265,13 @@ def run_agent(
             proposed = {"rationale": parsed.rationale, "confidence": parsed.confidence}
             if parsed.confidence < config.min_confidence:
                 session.update(proposed)
-                write_json(directory / "decision.json", proposed)
-                session["status"] = "low_confidence"
+                session.update(status="low_confidence")
+                audit.export_json(directory / "decision.json", proposed)
                 raise LowConfidence("Agent confidence below threshold; worktree preserved")
             checks.verify(git, paths, baseline)
             decision.update(proposed)
-            write_json(directory / "decision.json", decision)
             session.update(proposed)
+            audit.export_json(directory / "decision.json", decision)
             return "Resolution verified. Git continuation belongs to git-ez."
 
         metadata = {
@@ -288,7 +291,8 @@ def run_agent(
             "model": config.model,
             "model_context_tokens": config.model_context_tokens,
         }
-        write_json(directory / "runtime.json", metadata)
+        session.update(runtime_metadata=metadata)
+        audit.export_json(directory / "runtime.json", metadata)
         baseline = checks.baseline(git)
         model = create_chat_model(config)
         # Use the public profile API to disable default delegation for this single-agent task.
@@ -306,7 +310,7 @@ def run_agent(
         )
 
         # Deep Agents offloads history/large results without polluting the project or git add -A.
-        (directory / "agent-files").mkdir()
+        audit.create_directory(directory / "agent-files")
         backend = CompositeBackend(
             default=shell,
             routes={
@@ -318,29 +322,31 @@ def run_agent(
         )
 
         mission = {
-            "operation": audit.manifest["operation"],
+            "operation": audit.view["operation"],
             "conflicts": paths,
             "worktree": str(git.path),
-            "branch_sha": audit.manifest["before_oid"],
-            "target_sha": audit.manifest["target_oid"],
+            "branch_sha": audit.view["before_oid"],
+            "target_sha": audit.view["target_oid"],
             "head_sha": head,
             "validation_command": shlex.join(check) if check else None,
             "task": "Investigate and resolve this Git integration using your tools.",
         }
-        if audit.manifest.get("interactive"):
-            review = audit.manifest["reviews"][-1]
+        if audit.view.get("interactive"):
+            review = audit.view["reviews"][-1]
             mission["review_round"] = review["round"]
             mission["user_feedback"] = review["feedback"]
             mission["revision_instruction"] = (
                 "Revise the current worktree proposal using user_feedback; do not restore "
                 "the initial conflict markers. Explain checks performed and uncertainties."
             )
-        if "onto_oid" in audit.manifest:
-            mission["onto_sha"] = audit.manifest["onto_oid"]
-        if "rebase_plan" in audit.manifest:
-            mission["rebase_base_sha"] = audit.manifest["rebase_plan"]["base_oid"]
-            mission["replay_boundary_sha"] = audit.manifest["rebase_plan"]["selection_oid"]
-        write_json(directory / "mission.json", mission)
+        if "onto_oid" in audit.view:
+            mission["onto_sha"] = audit.view["onto_oid"]
+        if "rebase_plan" in audit.view:
+            mission["rebase_base_sha"] = audit.view["rebase_plan"]["base_oid"]
+            mission["replay_boundary_sha"] = audit.view["rebase_plan"]["selection_oid"]
+        session.update(mission=mission)
+        audit.export_json(directory / "mission.json", mission)
+        audit.save()
         agent = create_deep_agent(
             model=model,
             backend=backend,
@@ -360,7 +366,7 @@ def run_agent(
             result = agent.invoke(
                 {"messages": [{"role": "user", "content": json.dumps(mission)}]},
                 config={
-                    "configurable": {"thread_id": f"{audit.manifest['id']}-{round_number}"},
+                    "configurable": {"thread_id": f"{audit.view['id']}-{round_number}"},
                     "callbacks": [log],
                     "recursion_limit": config.agent_max_turns * 20 + 100,
                     "max_concurrency": 1,
@@ -374,7 +380,11 @@ def run_agent(
     except BaseException as exc:
         primary_error = True
         if session["status"] == "running":
-            session["status"] = "failed"
+            session.update(
+                status="interrupted"
+                if isinstance(exc, (KeyboardInterrupt, SystemExit))
+                else "failed"
+            )
         if isinstance(exc, (EzError, OSError, KeyboardInterrupt, SystemExit)):
             raise
         log.capture_event("agent_error", **error_info(exc))
@@ -390,31 +400,31 @@ def run_agent(
             f"{folder}/files.json",
         )
         if capture_failure is not None:
-            session["capture_error"] = str(capture_failure)
-        messages_failure = audit.attempt(
+            session.update(capture_error="Session worktree capture failed")
+        audit.attempt(
             "session messages",
-            lambda: write_json(
-                directory / "messages.json", messages_to_dict(result.get("messages", log.messages))
+            lambda: audit.write_json(
+                str((directory / "messages.json").relative_to(audit.directory)),
+                messages_to_dict(result.get("messages", log.messages)),
+                optional=True,
             ),
             f"{folder}/messages.json",
+            optional=True,
         )
-        if len(audit.audit_errors) > count and session["status"] == "resolved":
-            session["status"] = "failed"
         metadata_failure = audit.attempt("session metadata", audit.save)
-        if len(audit.audit_errors) > count and session["status"] == "resolved":
-            session["status"] = "failed"
-        # The terminal event includes the outcome of the session metadata attempt.
-        # The engine still publishes the final run summaries after this returns.
+        # This event records session execution, not the outcome of its own capture.
+        # The engine publishes evidence health independently in the final manifest.
         events_failure = audit.attempt(
             "session events",
             lambda: log.event("session_finished", status=session["status"]),
             f"{folder}/events.jsonl",
             append=True,
         )
-        if len(audit.audit_errors) > count:
-            if session["status"] == "resolved":
-                session["status"] = "failed"
-            if not primary_error:
-                raise EzError("Agent session audit capture failed; inspect audit errors") from (
-                    capture_failure or messages_failure or events_failure or metadata_failure
-                )
+        agent_files_failure = audit.attempt(
+            "agent files", lambda: audit.seal_directory(directory / "agent-files")
+        )
+        session.update(evidence_health=audit.evidence_health)
+        if not audit.evidence_ready and not primary_error:
+            raise AuditError("Agent session audit capture failed; inspect audit errors") from (
+                capture_failure or events_failure or metadata_failure or agent_files_failure
+            )

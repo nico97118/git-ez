@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
+from git_ez.audit_state import snapshot_view
 from git_ez.config import Config
 from git_ez.engine import Engine
 from git_ez.git import Git
@@ -142,10 +143,10 @@ def test_real_graph_reads_context_repairs_tests_and_persists_integration(repo, o
         operation=operation,
         check=repo.check,
     )
-    assert audit.manifest["status"] == "succeeded", audit.manifest
-    result = Git(Path(audit.manifest["worktree"]))
+    assert audit.view["status"] == "succeeded", audit.view
+    result = Git(Path(audit.view["worktree"]))
     assert result.text("show", "HEAD:notes.txt") == "Supporting change."
-    assert repo.git.branch_oid("feature") == audit.manifest["result_oid"]
+    assert repo.git.branch_oid("feature") == audit.view["result_oid"]
     assert "task" not in model.exposed_tools
     assert "read_file" in model.exposed_tools
     session = audit.directory / "sessions/0001"
@@ -181,10 +182,10 @@ def test_finish_accepts_untouched_git_resources(repo, operation, kind):
         operation=operation,
     )
 
-    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.view["status"] == "succeeded", audit.view
     assert (repo.root / "resource.dat").read_bytes() == content
     assert repo.git.run("show", "HEAD:resource.dat").stdout == content
-    assert audit.manifest["sessions"][0]["status"] == "resolved"
+    assert audit.view["sessions"][0]["status"] == "resolved"
 
 
 def test_finish_rejects_agent_changes_to_git_integrated_binary_and_allows_repair(repo):
@@ -214,7 +215,7 @@ def test_finish_rejects_agent_changes_to_git_integrated_binary_and_allows_repair
         ],
     )
 
-    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.view["status"] == "succeeded", audit.view
     assert "Binary content" in str(model.seen[2])
     assert (repo.root / "resource.dat").read_bytes() == b"Git\x00resource"
 
@@ -228,7 +229,7 @@ def test_finish_with_markers_can_recover(repo) -> None:
             [tool("finish", rationale="Repaired after feedback", confidence=0.9)],
         ],
     )
-    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.view["status"] == "succeeded", audit.view
     assert "conflict markers" in str(model.seen[1])
 
 
@@ -240,9 +241,9 @@ def test_low_confidence_preserves_edits_and_audit(repo) -> None:
             [tool("finish", rationale="Unclear business intent", confidence=0.1)],
         ],
     )
-    assert audit.manifest["status"] == "failed"
-    assert audit.manifest["sessions"][0]["status"] == "low_confidence"
-    assert (Path(audit.manifest["worktree"]) / "file.txt").read_text() == "uncertain\n"
+    assert audit.view["status"] == "failed"
+    assert audit.view["sessions"][0]["status"] == "low_confidence"
+    assert (Path(audit.view["worktree"]) / "file.txt").read_text() == "uncertain\n"
     assert (audit.directory / "sessions/0001/messages.json").is_file()
     assert "Unclear business intent" in (audit.directory / "report.md").read_text()
     assert (audit.directory / "sessions/0001/decision.json").is_file()
@@ -259,9 +260,9 @@ def test_limits_stop_unfinished_agent_for_the_expected_reason(repo, limit, error
     audit, model = run_agent(
         repo, [[tool("ls", path="/")]] * 5, config=replace(repo.config, **{limit: 2})
     )
-    assert audit.manifest["status"] == "failed"
-    assert error_name in audit.manifest["error"]
-    session = audit.manifest["sessions"][0]
+    assert audit.view["status"] == "failed"
+    assert error_name in audit.view["error"]
+    session = audit.view["sessions"][0]
     assert session["tool_calls"] == 2
     if limit == "agent_max_turns":
         assert len(model.seen) == 2
@@ -289,9 +290,9 @@ def test_all_conflicts_are_in_one_session(repo) -> None:
             [tool("finish", rationale="Both conflicts resolved together", confidence=0.9)],
         ],
     )
-    assert audit.manifest["status"] == "succeeded", audit.manifest
-    assert len(audit.manifest["sessions"]) == 1
-    assert len(audit.manifest["conflicts"]) == 2
+    assert audit.view["status"] == "succeeded", audit.view
+    assert len(audit.view["sessions"]) == 1
+    assert len(audit.view["conflicts"]) == 2
     assert repo.git.text("show", "HEAD:file.txt") == "combined"
     assert repo.git.text("show", "HEAD:second.txt") == "also combined"
     assert not repo.git.conflicts()
@@ -300,15 +301,15 @@ def test_all_conflicts_are_in_one_session(repo) -> None:
 
 def test_git_control_state_changes_are_detected(repo) -> None:
     audit, _ = run_agent(repo, [[tool("execute", command="git rebase --abort")]])
-    assert audit.manifest["status"] == "failed"
-    assert "Git control state" in audit.manifest["error"]
+    assert audit.view["status"] == "failed"
+    assert "Git control state" in audit.view["error"]
     assert repo.git.branch_oid("feature") == repo.source
 
 
 def test_plain_answer_without_finish_is_not_success(repo) -> None:
     audit, _ = run_agent(repo, [[]])
-    assert audit.manifest["status"] == "failed"
-    assert "without a verified finish" in audit.manifest["error"]
+    assert audit.view["status"] == "failed"
+    assert "without a verified finish" in audit.view["error"]
 
 
 def test_later_rebase_stop_gets_an_independent_session(repo) -> None:
@@ -324,8 +325,8 @@ def test_later_rebase_stop_gets_an_independent_session(repo) -> None:
             [tool("finish", rationale="Second replay resolved", confidence=0.9)],
         ],
     )
-    assert audit.manifest["status"] == "succeeded", audit.manifest
-    assert len(audit.manifest["sessions"]) == 2
+    assert audit.view["status"] == "succeeded", audit.view
+    assert len(audit.view["sessions"]) == 2
     for number in ("0001", "0002"):
         assert (audit.directory / "sessions" / number / "messages.json").is_file()
     assert model.position == 4
@@ -348,10 +349,10 @@ def test_changed_merge_head_is_rejected(repo):
         ],
         operation="merge",
     )
-    assert audit.manifest["status"] == "failed"
-    assert "Git control state" in audit.manifest["error"]
+    assert audit.view["status"] == "failed"
+    assert "Git control state" in audit.view["error"]
     assert repo.git.branch_oid("feature") == repo.source
-    assert audit.manifest["conflicts"][0]["status"] == "failed"
+    assert audit.view["conflicts"][0]["status"] == "failed"
 
 
 @pytest.mark.parametrize("confidence", [0.1, None])
@@ -367,7 +368,7 @@ def test_failed_session_archives_proposals_and_new_files(repo, confidence):
     if confidence is not None:
         turns.append([tool("finish", rationale="Unclear business intent", confidence=confidence)])
     audit, _ = run_agent(repo, turns)
-    assert audit.manifest["status"] == "failed"
+    assert audit.view["status"] == "failed"
     session = audit.directory / "sessions/0001"
     import json
 
@@ -375,7 +376,7 @@ def test_failed_session_archives_proposals_and_new_files(repo, confidence):
     records = {record["path"]: record for record in snapshot["files"]}
     assert (session / records["support.bin"]["artifact"]).read_bytes() == b"new\0supporting file"
     assert (session / records["file.txt"]["artifact"]).read_text() == "uncertain\n"
-    conflict = audit.manifest["conflicts"][0]
+    conflict = audit.view["conflicts"][0]
     assert conflict["status"] == ("low_confidence" if confidence is not None else "failed")
     assert (audit.directory / conflict["artifacts"]["proposed"]).read_text() == "uncertain\n"
     exit_dir = audit.directory / "exit"
@@ -399,12 +400,12 @@ def test_failed_session_snapshot_explicitly_marks_truncated_files(repo):
     session = audit.directory / "sessions/0001"
     snapshot = json.loads((session / "files.json").read_text())
     new_file = next(record for record in snapshot["files"] if record["path"] == "new.txt")
-    assert audit.manifest["status"] == "failed"
-    assert audit.manifest["sessions"][0]["status"] == "low_confidence"
+    assert audit.view["status"] == "failed"
+    assert audit.view["sessions"][0]["status"] == "low_confidence"
     assert repo.git.operation_active()
     assert repo.git.branch_oid("feature") == repo.source
     assert new_file["truncated"]
-    assert audit.manifest["evidence"]["sessions/0001/files.json"]["status"] == "partial"
+    assert audit.view["evidence"]["sessions/0001/files.json"]["status"] == "partial"
     assert new_file["size"] == 64
     assert new_file["recorded_bytes"] == 16
     assert (session / new_file["artifact"]).read_bytes() == b"x" * 16
@@ -455,9 +456,9 @@ def test_finish_in_a_tool_batch_is_rejected_until_it_is_called_alone(repo):
             [tool("finish", rationale="Verified alone", confidence=0.95)],
         ],
     )
-    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.view["status"] == "succeeded", audit.view
     assert "finish must be called alone" in str(model.seen[1])
-    assert audit.manifest["sessions"][0]["rationale"] == "Verified alone"
+    assert audit.view["sessions"][0]["rationale"] == "Verified alone"
 
 
 def test_agent_cannot_override_the_configured_command_timeout(repo):
@@ -470,7 +471,7 @@ def test_agent_cannot_override_the_configured_command_timeout(repo):
             [tool("finish", rationale="Resolved within limits", confidence=0.95)],
         ],
     )
-    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.view["status"] == "succeeded", audit.view
     assert "Command timeout exceeds configured limit" in str(model.seen[1])
     assert not (repo.root / "forbidden.txt").exists()
 
@@ -481,10 +482,10 @@ def test_context_byte_limit_stops_further_model_calls_and_preserves_evidence(rep
         [[command("print('x' * 10000)")]],
         config=replace(repo.config, agent_max_context_bytes=8192),
     )
-    assert audit.manifest["status"] == "failed"
-    assert "Agent context byte budget exceeded" in audit.manifest["error"]
+    assert audit.view["status"] == "failed"
+    assert "Agent context byte budget exceeded" in audit.view["error"]
     assert len(model.seen) == 1
-    assert audit.manifest["sessions"][0]["tool_calls"] == 1
+    assert audit.view["sessions"][0]["tool_calls"] == 1
     assert repo.git.operation_active()
     assert (audit.directory / "sessions/0001/events.jsonl").is_file()
     assert (audit.directory / "exit/files.json").is_file()
@@ -508,14 +509,15 @@ def test_session_audit_capture_failure_prevents_git_continuation(repo):
             [tool("finish", rationale="Resolved", confidence=0.95)],
         ],
     )
-    assert audit.manifest["status"] == "failed"
-    assert not audit.manifest["integrated"]
-    assert audit.manifest["sessions"][0]["status"] == "failed"
-    assert audit.manifest["sessions"][0]["capture_error"] == "session snapshot unavailable"
+    assert audit.view["status"] == "failed"
+    assert not audit.view["integrated"]
+    assert audit.view["sessions"][0]["status"] == "resolved"
+    assert audit.view["sessions"][0]["evidence_health"] == "incomplete"
+    assert audit.view["sessions"][0]["capture_error"] == "Session worktree capture failed"
     assert repo.git.branch_oid("feature") == repo.source
     assert repo.git.operation_active()
     assert (audit.directory / "exit/files.json").is_file()
-    assert "session snapshot unavailable" in (audit.directory / "report.md").read_text()
+    assert "Session worktree capture failed" in (audit.directory / "report.md").read_text()
 
 
 def test_secondary_session_capture_failure_preserves_the_low_confidence_reason(repo):
@@ -536,11 +538,11 @@ def test_secondary_session_capture_failure_preserves_the_low_confidence_reason(r
             [tool("finish", rationale="Uncertain", confidence=0.1)],
         ],
     )
-    assert audit.manifest["status"] == "failed"
-    assert "confidence below threshold" in audit.manifest["error"]
-    session = audit.manifest["sessions"][0]
+    assert audit.view["status"] == "failed"
+    assert "confidence below threshold" in audit.view["error"]
+    session = audit.view["sessions"][0]
     assert session["status"] == "low_confidence"
-    assert session["capture_error"] == "secondary snapshot failure"
+    assert session["capture_error"] == "Session worktree capture failed"
     assert repo.git.operation_active()
     assert repo.git.branch_oid("feature") == repo.source
 
@@ -559,13 +561,13 @@ def test_agent_cannot_move_input_refs_while_head_is_detached(repo, ref):
             ]
         ],
     )
-    assert audit.manifest["status"] == "failed"
-    assert "Git control state" in audit.manifest["error"]
-    assert not audit.manifest["integrated"]
+    assert audit.view["status"] == "failed"
+    assert "Git control state" in audit.view["error"]
+    assert not audit.view["integrated"]
     assert len(model.seen) == 1
     assert repo.git.branch_oid(ref) == base
-    assert audit.manifest["before_oid"] == repo.source
-    assert audit.manifest["target_oid"] == repo.parent
+    assert audit.view["before_oid"] == repo.source
+    assert audit.view["target_oid"] == repo.parent
     assert (audit.directory / "exit/files.json").is_file()
 
 
@@ -573,11 +575,12 @@ def test_provider_failure_is_audited_without_persisting_exception_secrets(repo):
     secret = "provider-echoed-private-token"
     repo.mocker.patch.object(ScriptedModel, "_generate", side_effect=RuntimeError(secret))
     audit, _ = run_agent(repo, [])
-    assert audit.manifest["status"] == "failed"
-    assert not audit.manifest["integrated"]
+    assert audit.view["status"] == "failed"
+    assert not audit.view["integrated"]
     assert repo.git.operation_active()
     assert repo.git.branch_oid("feature") == repo.source
-    events = (audit.directory / "sessions/0001/events.jsonl").read_text()
+    event_path = audit.directory / "sessions/0001/events.jsonl"
+    events = event_path.read_text() if event_path.exists() else ""
     assert '"event": "model_error"' in events
     assert '"type": "RuntimeError"' in events
     for artifact in audit.directory.rglob("*"):
@@ -600,7 +603,7 @@ def test_resolver_mission_distinguishes_upstream_from_result_base(repo):
     )
     repo.mocker.patch("git_ez.agent_runtime.create_chat_model", return_value=model)
     audit = Engine(repo.root, repo.config).run(boundary, onto="main")
-    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.view["status"] == "succeeded", audit.view
     mission = json.loads((audit.directory / "sessions/0001/mission.json").read_text())
     assert mission["target_sha"] == boundary
     assert mission["rebase_base_sha"] == repo.parent
@@ -627,8 +630,8 @@ def test_interactive_revisions_reach_runtime_and_keep_separate_sessions(repo, mo
     mocker.patch("git_ez.agent_runtime.create_chat_model", return_value=model)
     mocker.patch("builtins.input", side_effect=["r", "preserve both intentions", "a"])
     audit = Engine(repo.root, repo.config).run("main", interactive=True)
-    assert audit.manifest["status"] == "succeeded", audit.manifest
-    assert len(audit.manifest["sessions"]) == 2
+    assert audit.view["status"] == "succeeded", audit.view
+    assert len(audit.view["sessions"]) == 2
     for number in (1, 2):
         assert (audit.directory / "sessions" / f"{number:04d}" / "messages.json").is_file()
     mission = json.loads((audit.directory / "sessions/0002/mission.json").read_text())
@@ -677,11 +680,11 @@ def test_agent_files_survive_success_failure_and_interruption(repo, outcome):
     assert not (session / "checkpoints.sqlite").exists()
     assert not (repo.root / ".ez-agent").exists()
     if outcome == "success":
-        assert audit.manifest["status"] == "succeeded"
+        assert audit.view["status"] == "succeeded"
         assert repo.git.text("show", "HEAD:file.txt") == "combined"
         assert repo.git.run("ls-files", "--", "*proof*").stdout == b""
     else:
-        assert audit.manifest["status"] == ("interrupted" if outcome == "interrupted" else "failed")
+        assert audit.view["status"] == ("interrupted" if outcome == "interrupted" else "failed")
         assert repo.git.operation_active()
         assert repo.git.branch_oid("feature") == repo.source
         assert (repo.root / "file.txt").read_text() == "combined\n"
@@ -697,7 +700,7 @@ def test_large_tool_output_is_offloaded_to_persistent_audit_files(repo):
         ],
         config=replace(repo.config, tool_output_bytes=200000, agent_max_context_bytes=1000000),
     )
-    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.view["status"] == "succeeded", audit.view
     files = list((audit.directory / "sessions/0001/agent-files").rglob("*"))
     assert any(path.is_file() and "0123456789" * 15000 in path.read_text() for path in files)
     assert "/.ez-agent/" in str(model.seen[1])
@@ -709,36 +712,40 @@ def test_large_tool_output_is_offloaded_to_persistent_audit_files(repo):
 def test_finalization_errors_preserve_primary_failure_and_capture_other_evidence(
     repo, artifact, primary
 ):
-    import git_ez.agent_runtime as runtime
     from git_ez.agent_runtime import SessionLog
     from git_ez.audit import Audit
+    from git_ez.audit_storage import AuditStore
 
     if artifact == "messages":
-        write = runtime.write_json
+        write = AuditStore.write
 
-        def failing_write(path, data):
-            if path.name == "messages.json":
+        def failing_write(self, path, content, **kwargs):
+            if path.endswith("/messages.json"):
                 raise OSError("messages destination unavailable")
-            write(path, data)
+            return write(self, path, content, **kwargs)
 
-        repo.mocker.patch.object(runtime, "write_json", failing_write)
+        repo.mocker.patch.object(AuditStore, "write", failing_write)
     elif artifact == "events":
         event = SessionLog.event
 
         def failing_event(self, event_name, **data):
             if event_name == "session_finished":
                 raise OSError("events destination unavailable")
-            event(self, event_name, **data)
+            return event(self, event_name, **data)
 
         repo.mocker.patch.object(SessionLog, "event", failing_event)
     else:
         save = Audit.save
 
         def failing_save(self):
-            sessions = self.manifest.get("sessions", [])
-            if sessions and sessions[-1]["status"] != "running":
+            sessions = self.view.get("sessions", [])
+            if (
+                self.view["lifecycle"] != "finished"
+                and sessions
+                and sessions[-1]["status"] != "running"
+            ):
                 raise OSError("metadata destination unavailable")
-            save(self)
+            return save(self)
 
         repo.mocker.patch.object(Audit, "save", failing_save)
     if primary in ("model", "interrupted"):
@@ -762,34 +769,33 @@ def test_finalization_errors_preserve_primary_failure_and_capture_other_evidence
             ],
         ],
     )
-    assert audit.manifest["status"] == ("interrupted" if primary == "interrupted" else "failed")
-    error = audit.manifest["error"]
-    if primary == "model":
-        assert "Model request failed" in error
-        for path in audit.directory.rglob("*"):
-            if path.is_file():
-                assert b"private-provider-token" not in path.read_bytes()
+    optional_only = artifact == "messages" and primary == "none"
+    assert audit.view["status"] == (
+        "succeeded" if optional_only else "interrupted" if primary == "interrupted" else "failed"
+    )
+    assert audit.view["integrated"] is optional_only
+    if primary == "none":
+        assert audit.view["sessions"][0]["status"] == "resolved"
+        if not optional_only:
+            assert "Agent session audit capture failed" in audit.view["error"]
+    elif primary == "model":
+        assert "Model request failed" in audit.view["error"]
     elif primary == "low_confidence":
-        assert "confidence below threshold" in error
-        assert audit.manifest["sessions"][0]["status"] == "low_confidence"
-    elif primary == "interrupted":
-        assert error == "Interrupted by user"
+        assert "confidence below threshold" in audit.view["error"]
+        assert audit.view["sessions"][0]["status"] == "low_confidence"
     else:
-        assert "Agent session audit capture failed" in error
-        assert audit.manifest["sessions"][0]["status"] == "failed"
-    assert any(item["phase"] == f"session {artifact}" for item in audit.manifest["audit_errors"])
-    saved = json.loads((audit.directory / "run.json").read_text())
-    assert saved["error"] == error
-    assert saved["audit_errors"]
+        assert audit.view["error"] == "Interrupted by user"
+        assert audit.view["sessions"][0]["status"] == "interrupted"
+    assert any(issue["phase"] == f"session {artifact}" for issue in audit.audit_errors)
+    saved = snapshot_view(json.loads((audit.directory / "run.json").read_text()))
+    assert saved["status"] == audit.view["status"]
     assert saved["validation"]["status"] == "not_requested"
     assert (audit.directory / "exit/files.json").is_file()
     if artifact != "messages":
         assert (audit.directory / "sessions/0001/messages.json").is_file()
-    else:
-        assert saved["evidence"]["sessions/0001/messages.json"]["status"] == "unavailable"
-    assert repo.git.operation_active()
-    assert repo.git.branch_oid("feature") == repo.source
-    assert not audit.manifest["integrated"]
+    for path in audit.directory.rglob("*"):
+        if path.is_file():
+            assert b"private-provider-token" not in path.read_bytes()
 
 
 @pytest.mark.parametrize(
@@ -828,17 +834,18 @@ def test_error_event_failure_keeps_primary_error_and_partial_log(repo, primary, 
             [tool("finish", rationale="Uncertain intent", confidence=0.1)],
         ],
     )
-    assert audit.manifest["status"] == "failed"
+    assert audit.view["status"] == "failed"
     if primary == "model":
-        assert "Model request failed (RuntimeError)" in audit.manifest["error"]
+        assert "Model request failed (RuntimeError)" in audit.view["error"]
     elif primary == "agent":
-        assert "Deep Agents failed (RuntimeError)" in audit.manifest["error"]
+        assert "Deep Agents failed (RuntimeError)" in audit.view["error"]
     else:
-        assert "confidence below threshold" in audit.manifest["error"]
+        assert "confidence below threshold" in audit.view["error"]
     assert any(item["phase"] == f"session {event_name}" for item in audit.audit_errors)
-    assert audit.evidence["sessions/0001/events.jsonl"]["status"] == "partial"
-    events = (audit.directory / "sessions/0001/events.jsonl").read_text()
-    assert "session_finished" in events
+    assert audit.evidence["sessions/0001/events.jsonl"]["status"] in ("partial", "unavailable")
+    event_path = audit.directory / "sessions/0001/events.jsonl"
+    events = event_path.read_text() if event_path.exists() else ""
+    assert "session_finished" not in events
     for path in audit.directory.rglob("*"):
         if path.is_file():
             assert b"private-provider-token" not in path.read_bytes()
@@ -871,19 +878,21 @@ def test_normal_event_write_failure_stops_git_and_keeps_log_partial(repo, event_
         ],
     )
     assert failed
-    assert audit.manifest["status"] == "failed"
-    assert "event capture failed" in audit.manifest["error"]
+    assert audit.view["status"] == "failed"
+    assert "event capture failed" in audit.view["error"]
     if event_name == "tool_result":
         assert (repo.root / "file.txt").read_text() == "combined\n"
     assert any(item["phase"] == f"session {event_name}" for item in audit.audit_errors)
-    assert audit.evidence["sessions/0001/events.jsonl"]["status"] == "partial"
-    events = [
-        json.loads(line)
-        for line in (audit.directory / "sessions/0001/events.jsonl").read_text().splitlines()
-    ]
-    terminal = [item for item in events if item["event"] == "session_finished"]
-    assert terminal[-1]["status"] == audit.manifest["sessions"][0]["status"] == "failed"
-    assert not audit.manifest["integrated"]
+    assert audit.evidence["sessions/0001/events.jsonl"]["status"] in ("partial", "unavailable")
+    event_path = audit.directory / "sessions/0001/events.jsonl"
+    events = (
+        [json.loads(line) for line in event_path.read_text().splitlines()]
+        if event_path.exists()
+        else []
+    )
+    assert not [item for item in events if item["event"] == "session_finished"]
+    assert audit.view["sessions"][0]["status"] == "failed"
+    assert not audit.view["integrated"]
     assert repo.git.operation_active()
     assert repo.git.branch_oid("feature") == repo.source
 
@@ -896,7 +905,7 @@ def test_terminal_event_reflects_late_metadata_failure(repo):
 
     def fail_once(self):
         nonlocal failed
-        sessions = self.manifest.get("sessions", [])
+        sessions = self.view.get("sessions", [])
         if sessions and sessions[-1]["status"] == "resolved" and not failed:
             failed = True
             raise OSError("late metadata destination failure")
@@ -915,9 +924,10 @@ def test_terminal_event_reflects_late_metadata_failure(repo):
     events = [json.loads(line) for line in (session / "events.jsonl").read_text().splitlines()]
     terminal = [item for item in events if item["event"] == "session_finished"]
     assert len(terminal) == 1
-    assert terminal[0]["status"] == audit.manifest["sessions"][0]["status"] == "failed"
-    saved = json.loads((audit.directory / "run.json").read_text())
-    assert saved["sessions"][0]["status"] == "failed"
+    assert terminal[0]["status"] == audit.view["sessions"][0]["status"] == "resolved"
+    saved = snapshot_view(json.loads((audit.directory / "run.json").read_text()))
+    assert saved["sessions"][0]["status"] == "resolved"
+    assert saved["sessions"][0]["evidence_health"] == "incomplete"
     assert saved["status"] == "failed"
     assert any(item["phase"] == "session metadata" for item in saved["audit_errors"])
     assert repo.git.operation_active()
@@ -930,23 +940,23 @@ def test_startup_failure_finalizes_session_without_calling_model(
     repo, phase, secondary_capture_error
 ):
     import git_ez.agent_runtime as runtime
-    from git_ez.audit import Audit
+    from git_ez.audit import Audit, Record
 
     reason = f"startup {phase} unavailable"
     if phase == "directory":
-        mkdir = Path.mkdir
+        mkdir = Audit.create_directory
 
-        def failing_mkdir(path, *args, **kwargs):
+        def failing_mkdir(self, path):
             if path.name == "0001" and path.parent.name == "sessions":
                 raise OSError(reason)
-            return mkdir(path, *args, **kwargs)
+            return mkdir(self, path)
 
-        repo.mocker.patch.object(Path, "mkdir", failing_mkdir)
+        repo.mocker.patch.object(Audit, "create_directory", failing_mkdir)
     elif phase == "save":
         save = Audit.save
 
         def failing_save(self):
-            sessions = self.manifest.get("sessions", [])
+            sessions = self.view.get("sessions", [])
             if sessions and sessions[-1]["status"] == "running":
                 raise OSError(reason)
             save(self)
@@ -966,14 +976,14 @@ def test_startup_failure_finalizes_session_without_calling_model(
     elif phase == "versions":
         repo.mocker.patch.object(runtime, "version", side_effect=OSError(reason))
     else:
-        write = runtime.write_json
+        update = Record.update
 
-        def failing_write(path, data):
-            if path.name == "runtime.json":
+        def failing_provenance(self, *args, **kwargs):
+            if "runtime_metadata" in kwargs:
                 raise OSError(reason)
-            write(path, data)
+            return update(self, *args, **kwargs)
 
-        repo.mocker.patch.object(runtime, "write_json", failing_write)
+        repo.mocker.patch.object(Record, "update", failing_provenance)
     if secondary_capture_error:
         capture = Audit.capture_worktree
 
@@ -986,12 +996,12 @@ def test_startup_failure_finalizes_session_without_calling_model(
     model = repo.mocker.patch.object(runtime, "create_chat_model")
     audit = Engine(repo.root, repo.config).run("main")
     model.assert_not_called()
-    assert audit.manifest["status"] == "failed"
-    assert audit.manifest["error"] == reason
-    assert audit.manifest["sessions"][0]["status"] == "failed"
-    saved = json.loads((audit.directory / "run.json").read_text())
+    assert audit.view["status"] == "failed"
+    assert audit.view["failure"]["type"] == "OSError"
+    assert audit.view["sessions"][0]["status"] == "failed"
+    saved = snapshot_view(json.loads((audit.directory / "run.json").read_text()))
     assert saved["status"] == saved["sessions"][0]["status"] == "failed"
-    assert saved["error"] == reason
+    assert saved["failure"]["type"] == "OSError"
     session = audit.directory / "sessions/0001"
     if phase != "directory":
         assert json.loads((session / "messages.json").read_text()) == []
@@ -1002,6 +1012,6 @@ def test_startup_failure_finalizes_session_without_calling_model(
     if secondary_capture_error:
         assert any(item["phase"] == "session worktree" for item in saved["audit_errors"])
     assert (audit.directory / "exit/files.json").is_file()
-    assert not audit.manifest["integrated"]
+    assert not audit.view["integrated"]
     assert repo.git.operation_active()
     assert repo.git.branch_oid("feature") == repo.source

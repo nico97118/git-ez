@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from git_ez.audit_state import snapshot_view
 from git_ez.cli import main, parser
 from git_ez.git import Git
 
@@ -40,13 +41,15 @@ def test_only_supported_git_commands_are_accepted(args):
 
 
 @pytest.mark.unit
-def test_show_displays_report_without_modifying_audit(tmp_path, capsys):
+def test_show_rejects_report_without_authoritative_manifest(tmp_path, capsys):
     report = tmp_path / "report.md"
     content = "# Integration\nConflict: file.txt\nDecision: combine\nRationale: preserve intent\n"
     report.write_text(content)
     before = report.stat().st_mtime_ns
-    assert main(["show", str(tmp_path)]) == 0
-    assert capsys.readouterr().out.strip() == content.strip()
+    assert main(["show", str(tmp_path)]) == 2
+    output = capsys.readouterr()
+    assert not output.out
+    assert "Cannot verify audit manifest" in output.err
     assert report.stat().st_mtime_ns == before
     assert list(tmp_path.iterdir()) == [report]
 
@@ -447,7 +450,7 @@ def test_cli_rerere_policy_reaches_engine(cli_repo, monkeypatch):
     monkeypatch.chdir(cli_repo.path)
     assert main(["merge", "main", "--no-rerere-autoupdate"]) == 0
     directory = next((cli_repo.path / ".git/ez/runs").iterdir())
-    manifest = json.loads((directory / "run.json").read_text())
+    manifest = snapshot_view(json.loads((directory / "run.json").read_text()))
     assert manifest["rerere_autoupdate"] is False
     assert manifest["rerere_autoupdate_effective"] is False
 
@@ -533,7 +536,7 @@ def test_cli_rebase_selection_options_reach_the_engine(cli_repo, model_server, m
     assert cli_repo.text("rev-parse", "HEAD") == before
     assert model_server.calls == []
     directory = next((cli_repo.path / ".git/ez/runs").iterdir())
-    manifest = json.loads((directory / "run.json").read_text())
+    manifest = snapshot_view(json.loads((directory / "run.json").read_text()))
     assert manifest["rebase_options"]["keep_base"] is keep
     assert manifest["rebase_plan"]["fork_point"]["enabled"] is (not keep)
 
@@ -611,30 +614,23 @@ def test_negative_merge_log_is_rejected_before_configuration(mocker, capsys):
 def test_cli_prints_primary_failure_and_audit_errors_when_summaries_cannot_be_saved(
     cli_repo, monkeypatch, mocker, capsys
 ):
-    import git_ez.audit as module
-    from git_ez.audit import Audit
+    from git_ez.audit_storage import AuditStore
 
-    write, report = module.write_json, Audit.report
+    snapshot = AuditStore.snapshot
 
-    def failing_write(path, data):
-        if path.name == "run.json" and data["status"] != "running":
-            raise OSError("manifest destination unavailable")
-        write(path, data)
+    def failing_snapshot(self, data):
+        if data["lifecycle"] == "finished":
+            raise OSError("private storage detail")
+        return snapshot(self, data)
 
-    def failing_report(self):
-        if self.manifest["status"] != "running":
-            raise OSError("report destination unavailable")
-        report(self)
-
-    mocker.patch.object(module, "write_json", failing_write)
-    mocker.patch.object(Audit, "report", failing_report)
+    mocker.patch.object(AuditStore, "snapshot", failing_snapshot)
     monkeypatch.chdir(cli_repo.path)
     assert main(["merge", "main", "--check", sys.executable, "-c", "raise SystemExit(7)"]) == 1
     output = capsys.readouterr()
     assert "Integrated: True" in output.out
     assert "Status: failed" in output.out
+    assert "Publication: not published" in output.out
     assert "Error: Validation failed with code 7" in output.err
-    assert "manifest destination unavailable" in output.err
-    assert "report destination unavailable" in output.err
-    assert "Report unavailable or incomplete" in output.err
+    assert "Terminal audit was not published" in output.err
+    assert "private storage detail" not in output.err
     assert not cli_repo.operation_active()

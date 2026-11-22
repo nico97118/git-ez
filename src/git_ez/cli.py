@@ -177,8 +177,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command == "show":
-            print((args.run_directory / "report.md").read_text(encoding="utf-8"))
-            return 0
+            from .audit_reader import load_audit, minimal_text
+            from .audit_report import render_markdown
+
+            view = load_audit(args.run_directory)
+            if view.exit_code:
+                print("Audit verification: incomplete or unverified; recorded state follows.")
+            for diagnostic in view.diagnostics:
+                print(f"Warning: {diagnostic}", file=sys.stderr)
+            try:
+                print(render_markdown(view.data))
+            except Exception:
+                print(minimal_text(view))
+                print("Warning: Rich audit rendering unavailable", file=sys.stderr)
+            return view.exit_code
         if args.command == "probe":
             from .probe import probe
 
@@ -229,22 +241,31 @@ def main(argv: list[str] | None = None) -> int:
             rerere_autoupdate=args.rerere_autoupdate,
             interactive=args.interactive,
         )
-        print(f"Status: {audit.manifest['status']}")
-        print(f"Report: {audit.directory / 'report.md'}")
-        print(f"Branch: {audit.manifest['branch']}")
-        print(f"Operation: {audit.manifest['operation']}")
-        print(f"Integrated: {audit.manifest['integrated']}")
-        if audit.manifest.get("error"):
-            print(f"Error: {audit.manifest['error']}", file=sys.stderr)
+        print(f"Run: {audit.directory.name}")
+        print(f"Status: {audit.view['status']}")
+        print(f"Publication: {'published' if audit.published else 'not published'}")
+        if audit.owned:
+            print(f"Report: {audit.directory / 'report.md'}")
+        else:
+            print(f"Intended audit directory (not created by this run): {audit.directory}")
+        print(f"Branch: {audit.view['branch']}")
+        print(f"Operation: {audit.view['operation']}")
+        print(f"Integrated: {audit.view['integrated']}")
+        if audit.view.get("error"):
+            print(f"Error: {audit.view['error']}", file=sys.stderr)
         for error in audit.audit_errors:
             print(f"Audit error ({error['phase']}): {error['message']}", file=sys.stderr)
+        for warning in audit.presentation_errors:
+            print(f"Warning: {warning}", file=sys.stderr)
         report_evidence = audit.evidence.get("report.md")
         if report_evidence is not None and report_evidence["status"] != "available":
             print(
                 f"Report unavailable or incomplete; inspect audit directory: {audit.directory}",
                 file=sys.stderr,
             )
-        return 1 if audit.manifest["status"] in ("failed", "interrupted") else 0
+        if not audit.published:
+            print("Terminal audit was not published; saved state may be older", file=sys.stderr)
+        return 0 if audit.view["status"] == "succeeded" and audit.published else 1
     except (EzError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"git-ez: {exc}", file=sys.stderr)
         return 2

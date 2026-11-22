@@ -163,7 +163,8 @@ are not forwarded. See the [manual](docs/man/git-ez.1) and
 
 Runs retain local reports, conflict inputs, decisions, diffs, and agent evidence
 under `ez/runs/<id>` in the repository's common Git directory. Captures can be
-limited or incomplete; these conditions are reported. Audit files may contain
+limited or incomplete; these conditions are reported. `run.json` is authoritative;
+Markdown reports are derived. `git ez show` verifies the saved evidence. Audit files may contain
 sensitive code and output. See the [audit guide](docs/audit.md) for artifacts,
 status fields, capture limits, and failure handling.
 
@@ -175,9 +176,12 @@ commits and validation output. Audit failures can also fail an otherwise complet
 integration. There is no agent session resume or crash recovery: checkpoints are
 in memory, and durable audit files are not a complete graph history.
 
-Exit codes: `0` for successful integration, report display, or compatible probe;
-`1` for a failed or interrupted run/probe; `2` for configuration, CLI, or precondition
-errors.
+For integrations, exit `0` requires published success; `1` means a failed or
+interrupted run or failed terminal publication; `2` means a configuration, CLI or
+precondition error. Probes use `0` for compatibility and `1` for failure.
+For `show`, `0` means a verified terminal audit (including a recorded failed run),
+`1` means unfinished or unverifiable evidence, and `2` means no trusted manifest
+can be read. See the [audit guide](docs/audit.md) for details.
 
 ## Documentation
 

@@ -35,7 +35,10 @@ consequence and clarify the intended change before implementing it.
 - `locking.py`: interprocess execution lock scoped to the current checkout.
 - `conflicts.py`: conflict evidence and resolution decisions.
 - `agent.py`, `agent_runtime.py`, `llm.py`: resolver contract, agent runtime, providers.
-- `audit.py`: persistent evidence and reports.
+- `audit.py`: run ownership, evidence gates and finalization.
+- `audit_state.py`: audit state, schema validation and immutable views.
+- `audit_storage.py`, `audit_capture.py`: safe publication, streams and read-only evidence.
+- `audit_reader.py`, `audit_report.py`: read-time verification and pure derived reports.
 - `probe.py`: provider connectivity diagnostics.
 - `tests/`: pytest tests, temporary repositories, deterministic resolvers, and local
   HTTP/TLS fixtures.

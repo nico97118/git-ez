@@ -48,16 +48,19 @@ def test_sequence_capture_does_not_follow_destination_symlink(tmp_path, artifact
     target.write_bytes(b"original\n")
     destination = tmp_path / "captured"
     (tmp_path / artifact).symlink_to(target)
-    capture_sequence(source, destination, 32)
-    assert destination.read_bytes() == b"noop\n"
-    assert not destination.is_symlink()
+    with pytest.raises(FileExistsError):
+        capture_sequence(source, destination, 32)
     assert target.read_bytes() == b"original\n"
-    assert not (tmp_path / artifact).is_symlink()
+    assert (tmp_path / artifact).is_symlink()
+    if artifact != "captured":
+        assert destination.read_bytes() == b"noop\n"
 
 
 def test_sequence_capture_requires_a_writable_fingerprint(tmp_path):
     source = tmp_path / "todo"
     source.write_bytes(b"noop\n")
-    (tmp_path / "captured.sha256.tmp").write_bytes(b"existing\n")
+    fingerprint = tmp_path / "captured.sha256"
+    fingerprint.write_bytes(b"existing\n")
     with pytest.raises(FileExistsError):
         capture_sequence(source, tmp_path / "captured", 32)
+    assert fingerprint.read_bytes() == b"existing\n"

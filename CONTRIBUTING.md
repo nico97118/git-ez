@@ -159,6 +159,8 @@ and independent linked worktrees, without invoking an external model.
 Critical tests assert committed file contents, reference ancestry, retained local state,
 and recorded audit evidence. Controlled fault injection covers input-reference races,
 audit write failures, and provider errors, including error redaction.
+Audit regressions cover private no-follow storage, atomic replacement, capture identity,
+required/optional evidence, stale reports, and read-only schema-2/legacy display.
 Finalization tests combine primary failures or interruption with secondary errors
 in error callbacks, session messages/events, interactive proposal capture, validation output, and
 final report/manifest writes. They verify error precedence, evidence availability,

@@ -348,53 +348,50 @@ and
 permissions remain unchanged during resolution, including binary and oversized
 resources. Audit file capture limits still apply.
 .PP
-Failure to write a required audit snapshot, including failure of Git commands
-that capture diffs and enumerate files, fails the run. Partial evidence is
-retained
-and the failure appears in each summary that can still be written. A completed
-Git integration remains available locally. Secondary capture errors do not
-replace
-the original failure reason. Final captures and summaries are attempted
-independently.
-If summaries cannot be finalized, the CLI reports the outcome, audit errors,
-and
-audit location; existing summary files can be stale or incomplete.
+New runs use schema 2. The revisioned run.json is authoritative; report.md is a
+reconstructible cache. Git completion, execution outcome, validation, final checks
+and evidence health are separate. A later audit failure cannot erase a known
+completed integration or its result commit. Missing observations are explicit;
+current ancestry alone does not prove a missing native command result.
 .PP
-The manifest records the primary failure phase, type and message separately
-from
-audit_errors. Evidence availability is available, partial, or unavailable for
-the
-tracked final captures and summaries. Partial captures include truncation,
-missing
-file contents, and artifacts that could not be finalized. This is not a
-complete
-inventory of all audit files. Missing ordinary model/tool events stop the agent
-as an audit failure; subsequent writes do not make that journal complete again.
-Handled initialization failures mark the session failed before any model call;
-remaining captures are attempted even if the folder or runtime metadata is
-missing.
-The terminal session event includes the session metadata capture outcome.
-Unexpected exceptions are re-raised unchanged after cleanup; the audit retains
-their type and outcome without arbitrary exception messages.
+Required evidence failures stop further integration mutations or fail overall
+success. Independent final captures are attempted; the original failure remains
+primary. Ordinary model/tool events are required. A failed append seals the stream
+at its acknowledged prefix. Intentional file truncation, I/O loss, missing outputs
+and optional exports have distinct evidence records. A resolved agent session may
+have incomplete evidence and a failed run. Confidence is not independent validation.
 .PP
-Validation status distinguishes not_requested, not_run, running, passed,
-failed,
-timed_out, and interrupted. A passing validation command does not imply overall
-success if its output cannot be captured or a later invariant check fails.
+Compacted conversation and duplicate metadata exports are optional when canonical
+facts/events exist. Markdown/cache failure after core publication is a presentation
+warning and does not rewrite the committed outcome. Failed terminal publication
+produces a nonzero command result and warns that saved state may be older.
 .PP
-Audit files may contain sensitive source code and tool output. Model
-confidence
-and passing tests do not prove semantic correctness.
+show validates the manifest and required evidence read-only, without Git or model
+calls. It never trusts an old success cache over an unfinished/unreadable manifest.
+A nonfinalized snapshot is the last recorded state, not proof of a live process.
+Historical results and current evidence verification are displayed separately.
+Schema-1 audits are retained unchanged and labeled unverified legacy evidence.
+Unknown schemas and missing/malformed manifests produce raw-file guidance.
+.PP
+Audit files may contain sensitive source code and output. Captures use private
+regular files and no-follow reads. Checksums detect inconsistencies, not malicious
+rewriting by a host-privileged process. Atomic manifest replacement does not promise
+power-loss durability, an atomic transaction with Git, or automatic recovery.
+Unexpected execution exceptions propagate after best-effort cleanup; arbitrary
+exception bodies are not archived. Global resource budgets are unchanged.
 .SH EXIT STATUS
 .TP
 .B 0
-Successful integration, displayed report, or compatible probe.
+Published core integration success or a compatible probe. For show: a valid terminal
+audit whose required evidence meets policy, including a correctly recorded failed run.
 .TP
 .B 1
-Failed or interrupted run, or failed probe.
+Failed/interrupted admitted run, failed terminal publication, or failed probe.
+For show: displayable but unfinished, unverifiable, or legacy audit.
 .TP
 .B 2
-Configuration, command-line, or precondition error.
+Configuration, command-line, pre-admission, or delivery error. For show: no trusted
+manifest view is available. Cached Markdown is not treated as an authoritative fallback.
 .SH EXAMPLES
 .nf
 git config --global ez.model exact-model-id

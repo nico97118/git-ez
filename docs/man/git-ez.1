@@ -248,9 +248,25 @@ resources. Audit file capture limits still apply.
 .PP
 Failure to write a required audit snapshot, including failure of Git commands
 that capture diffs and enumerate files, fails the run. Partial evidence is retained
-and the failure appears in the manifest and Markdown report. A completed Git
-integration remains available locally. Secondary capture errors do not replace
-the original failure reason.
+and the failure appears in each summary that can still be written. A completed
+Git integration remains available locally. Secondary capture errors do not replace
+the original failure reason. Final captures and summaries are attempted independently.
+If summaries cannot be finalized, the CLI reports the outcome, audit errors, and
+audit location; existing summary files can be stale or incomplete.
+.PP
+The manifest records the primary failure phase, type and message separately from
+audit_errors. Evidence availability is available, partial, or unavailable for the
+tracked final captures and summaries. Partial captures include truncation, missing
+file contents, and artifacts that could not be finalized. This is not a complete
+inventory of all audit files. Missing ordinary model/tool events stop the agent
+as an audit failure; subsequent writes do not make that journal complete again.
+The terminal session event includes the session metadata capture outcome.
+Unexpected exceptions are re-raised unchanged after cleanup; the audit retains
+their type and outcome without arbitrary exception messages.
+.PP
+Validation status distinguishes not_requested, not_run, running, passed, failed,
+timed_out, and interrupted. A passing validation command does not imply overall
+success if its output cannot be captured or a later invariant check fails.
 .PP
 Audit files may contain sensitive source code and tool output. Model
 confidence

@@ -179,6 +179,7 @@ def test_failed_validation_keeps_local_result_and_traces(repo, operation):
     assert audit.manifest["status"] == "failed", audit.manifest
     assert audit.manifest["integrated"]
     assert audit.manifest["validation"]["returncode"] == 7
+    assert audit.manifest["validation"]["status"] == "failed"
     assert repo.git.branch_oid("feature") == audit.manifest["result_oid"]
     assert (audit.directory / "result.diff").is_file()
 
@@ -187,6 +188,7 @@ def test_successful_validation(repo):
     audit = integrate(repo, validation=(sys.executable, "-c", "print('ok')"))
     assert audit.manifest["status"] == "succeeded", audit.manifest
     assert (audit.directory / "validation.stdout").read_text() == "ok\n"
+    assert audit.manifest["validation"]["status"] == "passed"
 
 
 @pytest.mark.parametrize(
@@ -495,6 +497,7 @@ def test_validation_timeout_retains_output_and_the_integrated_commit(repo, mocke
     assert audit.manifest["status"] == "failed"
     assert audit.manifest["integrated"]
     assert "Validation command timed out" in audit.manifest["error"]
+    assert audit.manifest["validation"]["status"] == "timed_out"
     assert "validation started" in (audit.directory / "validation.stdout").read_text()
     assert "validation progress" in (audit.directory / "validation.stderr").read_text()
     assert repo.git.branch_oid("feature") == audit.manifest["result_oid"]
@@ -754,6 +757,7 @@ def test_final_capture_command_errors_are_reported(repo, mocker, failed_commands
     report = (audit.directory / "report.md").read_text()
     assert f"Final capture failed: {saved['capture_error']}" in report
     assert "[Final file state](exit/files.json)" in report
+    assert saved["evidence"]["exit/files.json"]["status"] == "partial"
 
 
 @pytest.mark.parametrize("change", ["branch", "commit"])
@@ -2541,3 +2545,280 @@ def test_interactive_rerere_autoupdate_never_prompts(repo, mocker, operation):
     )
     assert second.manifest["status"] == "succeeded", second.manifest
     assert not repo.resolver.calls
+
+
+@pytest.mark.parametrize("error_type", [OSError, TypeError, KeyError])
+@pytest.mark.parametrize("destination", ["manifest", "report", "both"])
+@pytest.mark.parametrize("primary", [False, True])
+def test_final_summaries_fail_independently_without_hiding_execution_result(
+    repo, mocker, destination, primary, error_type
+):
+    import git_ez.audit as module
+
+    if primary:
+        repo.resolver = FakeResolver(error="original resolver failure")
+    write, report = module.write_json, Audit.report
+
+    def failing_write(path, data):
+        if (
+            path.name == "run.json"
+            and data["status"] != "running"
+            and destination in ("manifest", "both")
+        ):
+            raise error_type("manifest destination unavailable")
+        write(path, data)
+
+    def failing_report(self):
+        if self.manifest["status"] != "running" and destination in ("report", "both"):
+            raise error_type("report destination unavailable")
+        report(self)
+
+    mocker.patch.object(module, "write_json", failing_write)
+    mocker.patch.object(Audit, "report", failing_report)
+    audit = integrate(repo)
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["integrated"] is not primary
+    assert audit.manifest["audit_errors"]
+    if primary:
+        assert audit.manifest["error"] == "original resolver failure"
+        assert audit.manifest["failure"]["phase"] == "integration"
+        assert repo.git.branch_oid("feature") == repo.source_oid
+        assert repo.git.operation_active()
+    else:
+        assert "Audit finalization failed" in audit.manifest["error"]
+        assert audit.manifest["failure"]["phase"] == "audit"
+        assert not repo.git.operation_active()
+    if destination == "manifest":
+        text = (audit.directory / "report.md").read_text()
+        assert "manifest destination unavailable" in text
+        assert "**failed**" in text
+    elif destination == "report":
+        saved = json.loads((audit.directory / "run.json").read_text())
+        assert saved["status"] == "failed"
+        assert saved["evidence"]["report.md"]["status"] == "partial"
+        assert any(error["phase"] == "report" for error in saved["audit_errors"])
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_validation_result_is_retained_when_output_capture_fails(repo, mocker, exit_code):
+    write = Path.write_bytes
+
+    def failing_write(path, data):
+        if path.name == "validation.stdout":
+            raise OSError("stdout destination unavailable")
+        return write(path, data)
+
+    mocker.patch.object(Path, "write_bytes", failing_write)
+    audit = integrate(
+        repo,
+        validation=(
+            sys.executable,
+            "-c",
+            f"import sys; print('validation'); sys.exit({exit_code})",
+        ),
+    )
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["integrated"]
+    assert audit.manifest["validation"]["returncode"] == exit_code
+    assert audit.manifest["validation"]["status"] == ("passed" if exit_code == 0 else "failed")
+    assert (audit.directory / "validation.stderr").is_file()
+    assert audit.manifest["evidence"]["validation.stdout"]["status"] == "unavailable"
+    if exit_code:
+        assert audit.manifest["error"] == "Validation failed with code 7"
+    else:
+        assert "Validation audit capture failed" in audit.manifest["error"]
+    assert repo.git.branch_oid("feature") == audit.manifest["result_oid"]
+
+
+def test_review_cleanup_failure_does_not_hide_resolver_error(repo, mocker):
+    capture = Audit.capture_worktree
+
+    def failing_capture(self, git, directory, *args, **kwargs):
+        if directory.parent.name == "proposals":
+            raise OSError("proposal destination unavailable")
+        capture(self, git, directory, *args, **kwargs)
+
+    mocker.patch.object(Audit, "capture_worktree", failing_capture)
+    repo.resolver = FakeResolver(error="original resolver failure")
+    audit = integrate(repo, interactive=True)
+    assert audit.manifest["error"] == "original resolver failure"
+    assert any(error["phase"] == "review worktree" for error in audit.manifest["audit_errors"])
+    assert audit.manifest["evidence"]["proposals/0001/files.json"]["status"] == "unavailable"
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_validation_failure_and_interruption_keep_explicit_status_with_capture_failure(
+    repo, mocker, interrupted
+):
+    run, write = subprocess.run, Path.write_bytes
+    validation = ("project-validation",)
+
+    def failing_run(command, **kwargs):
+        if tuple(command) == validation:
+            if interrupted:
+                raise KeyboardInterrupt
+            raise subprocess.TimeoutExpired(
+                command, timeout=1, output=b"started", stderr=b"progress"
+            )
+        return run(command, **kwargs)
+
+    def failing_write(path, data):
+        if path.name == "validation.stdout":
+            raise OSError("stdout destination unavailable")
+        return write(path, data)
+
+    mocker.patch.object(subprocess, "run", failing_run)
+    mocker.patch.object(Path, "write_bytes", failing_write)
+    audit = integrate(repo, validation=validation)
+    assert audit.manifest["integrated"]
+    assert audit.manifest["status"] == ("interrupted" if interrupted else "failed")
+    assert audit.manifest["validation"]["status"] == ("interrupted" if interrupted else "timed_out")
+    assert audit.manifest["failure"]["phase"] == "validation"
+    assert audit.manifest["error"] == (
+        "Interrupted by user" if interrupted else "Validation command timed out"
+    )
+    assert audit.manifest["evidence"]["validation.stdout"]["status"] == "unavailable"
+    if not interrupted:
+        assert (audit.directory / "validation.stderr").read_bytes() == b"progress"
+    assert not repo.git.operation_active()
+
+
+def test_requested_validation_remains_not_run_when_resolution_fails(repo):
+    repo.resolver = FakeResolver(error="original resolver failure")
+    audit = integrate(repo, validation=("unused-validation",))
+    assert audit.manifest["error"] == "original resolver failure"
+    assert audit.manifest["validation"] == {"command": ["unused-validation"], "status": "not_run"}
+    assert repo.git.operation_active()
+
+
+@pytest.mark.parametrize("primary", [False, True])
+def test_report_update_failure_does_not_hide_manifest_or_primary_error(repo, mocker, primary):
+    import git_ez.audit as module
+
+    write, report = module.write_json, Audit.report
+    if primary:
+        repo.resolver = FakeResolver(error="original resolver failure")
+
+    def failing_write(path, data):
+        if path.name == "run.json" and data["status"] != "running":
+            raise OSError("manifest destination unavailable")
+        write(path, data)
+
+    def failing_report(self):
+        if any(error["phase"] == "manifest" for error in self.audit_errors):
+            raise OSError("report update unavailable")
+        report(self)
+
+    mocker.patch.object(module, "write_json", failing_write)
+    mocker.patch.object(Audit, "report", failing_report)
+    audit = integrate(repo)
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["integrated"] is not primary
+    if primary:
+        assert audit.manifest["error"] == "original resolver failure"
+    assert [error["phase"] for error in audit.audit_errors][-2:] == ["manifest", "report"]
+    assert audit.evidence["report.md"]["status"] == "partial"
+    assert audit.evidence["run.json"]["status"] == "partial"
+    # An older intermediate manifest remains; no final successful outcome was published.
+    assert json.loads((audit.directory / "run.json").read_text())["status"] == "running"
+
+
+def test_missing_validation_executable_records_failed_validation_and_unavailable_output(repo):
+    audit = integrate(repo, validation=("git-ez-nonexistent-test-validator",))
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["integrated"]
+    assert audit.manifest["validation"]["status"] == "failed"
+    assert "returncode" not in audit.manifest["validation"]
+    assert audit.manifest["failure"]["type"] == "FileNotFoundError"
+    for name in ("validation.stdout", "validation.stderr"):
+        assert audit.evidence[name]["status"] == "unavailable"
+    assert not repo.git.operation_active()
+
+
+def test_validation_not_started_if_its_initial_audit_save_fails(repo, mocker):
+    save = Audit.save
+
+    def failing_save(self):
+        if self.manifest.get("validation", {}).get("status") == "running":
+            raise OSError("validation metadata unavailable")
+        save(self)
+
+    mocker.patch.object(Audit, "save", failing_save)
+    marker = repo.root / "validation-started"
+    audit = integrate(
+        repo,
+        validation=(
+            sys.executable,
+            "-c",
+            "from pathlib import Path; Path('validation-started').touch()",
+        ),
+    )
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["error"] == "validation metadata unavailable"
+    assert audit.manifest["validation"]["status"] == "not_run"
+    assert not marker.exists()
+    assert audit.manifest["integrated"]
+    assert (
+        json.loads((audit.directory / "run.json").read_text())["validation"]["status"] == "not_run"
+    )
+
+
+def test_uninspectable_artifacts_do_not_mask_the_original_failure(repo, mocker):
+    repo.resolver = FakeResolver(error="original resolver failure")
+    is_file = Path.is_file
+
+    def failing_inspection(path):
+        if path.name in ("files.json", "run.json", "report.md"):
+            raise PermissionError("artifact metadata unavailable")
+        return is_file(path)
+
+    mocker.patch.object(Path, "is_file", failing_inspection)
+    mocker.patch.object(
+        Audit, "capture_worktree", side_effect=PermissionError("capture unavailable")
+    )
+    audit = integrate(repo)
+    assert audit.manifest["status"] == "failed"
+    assert audit.manifest["error"] == "original resolver failure"
+    assert audit.evidence["exit/files.json"]["status"] == "unavailable"
+    assert "exit_state" not in audit.manifest
+    assert any(error["phase"] == "exit worktree" for error in audit.audit_errors)
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+
+
+@pytest.mark.parametrize(
+    "primary",
+    [
+        RuntimeError("private-primary-detail"),
+        TypeError("private-primary-detail"),
+        KeyError("private-primary-detail"),
+        SystemExit(23),
+    ],
+)
+def test_unexpected_review_failure_survives_secondary_capture_failure(repo, mocker, primary):
+    capture = Audit.capture_worktree
+
+    def failing_capture(self, git, directory, *args, **kwargs):
+        if directory.parent.name == "proposals":
+            raise OSError("secondary proposal destination failure")
+        capture(self, git, directory, *args, **kwargs)
+
+    mocker.patch.object(Audit, "capture_worktree", failing_capture)
+    mocker.patch.object(repo.resolver, "run", side_effect=primary)
+    with pytest.raises(type(primary)) as raised:
+        integrate(repo, interactive=True)
+    assert raised.value is primary
+    directory = next((repo.root / ".git/ez/runs").iterdir())
+    saved = json.loads((directory / "run.json").read_text())
+    assert saved["status"] == ("interrupted" if isinstance(primary, SystemExit) else "failed")
+    assert saved["failure"]["type"] == type(primary).__name__
+    assert saved["reviews"][0]["status"] == saved["status"]
+    assert any(item["phase"] == "review worktree" for item in saved["audit_errors"])
+    assert saved["evidence"]["proposals/0001/files.json"]["status"] == "unavailable"
+    for path in directory.rglob("*"):
+        if path.is_file():
+            assert b"private-primary-detail" not in path.read_bytes()
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source_oid

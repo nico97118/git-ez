@@ -404,6 +404,7 @@ def test_failed_session_snapshot_explicitly_marks_truncated_files(repo):
     assert repo.git.operation_active()
     assert repo.git.branch_oid("feature") == repo.source
     assert new_file["truncated"]
+    assert audit.manifest["evidence"]["sessions/0001/files.json"]["status"] == "partial"
     assert new_file["size"] == 64
     assert new_file["recorded_bytes"] == 16
     assert (session / new_file["artifact"]).read_bytes() == b"x" * 16
@@ -701,3 +702,223 @@ def test_large_tool_output_is_offloaded_to_persistent_audit_files(repo):
     assert any(path.is_file() and "0123456789" * 15000 in path.read_text() for path in files)
     assert "/.ez-agent/" in str(model.seen[1])
     assert not (repo.root / ".ez-agent").exists()
+
+
+@pytest.mark.parametrize("artifact", ["messages", "events", "metadata"])
+@pytest.mark.parametrize("primary", ["none", "model", "low_confidence", "interrupted"])
+def test_finalization_errors_preserve_primary_failure_and_capture_other_evidence(
+    repo, artifact, primary
+):
+    import git_ez.agent_runtime as runtime
+    from git_ez.agent_runtime import SessionLog
+    from git_ez.audit import Audit
+
+    if artifact == "messages":
+        write = runtime.write_json
+
+        def failing_write(path, data):
+            if path.name == "messages.json":
+                raise OSError("messages destination unavailable")
+            write(path, data)
+
+        repo.mocker.patch.object(runtime, "write_json", failing_write)
+    elif artifact == "events":
+        event = SessionLog.event
+
+        def failing_event(self, event_name, **data):
+            if event_name == "session_finished":
+                raise OSError("events destination unavailable")
+            event(self, event_name, **data)
+
+        repo.mocker.patch.object(SessionLog, "event", failing_event)
+    else:
+        save = Audit.save
+
+        def failing_save(self):
+            sessions = self.manifest.get("sessions", [])
+            if sessions and sessions[-1]["status"] != "running":
+                raise OSError("metadata destination unavailable")
+            save(self)
+
+        repo.mocker.patch.object(Audit, "save", failing_save)
+    if primary in ("model", "interrupted"):
+        repo.mocker.patch.object(
+            ScriptedModel,
+            "_generate",
+            side_effect=RuntimeError("private-provider-token")
+            if primary == "model"
+            else KeyboardInterrupt(),
+        )
+    audit, _ = run_agent(
+        repo,
+        [
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [
+                tool(
+                    "finish",
+                    rationale="Uncertain intent" if primary == "low_confidence" else "Resolved",
+                    confidence=0.1 if primary == "low_confidence" else 0.95,
+                )
+            ],
+        ],
+    )
+    assert audit.manifest["status"] == ("interrupted" if primary == "interrupted" else "failed")
+    error = audit.manifest["error"]
+    if primary == "model":
+        assert "Model request failed" in error
+        for path in audit.directory.rglob("*"):
+            if path.is_file():
+                assert b"private-provider-token" not in path.read_bytes()
+    elif primary == "low_confidence":
+        assert "confidence below threshold" in error
+        assert audit.manifest["sessions"][0]["status"] == "low_confidence"
+    elif primary == "interrupted":
+        assert error == "Interrupted by user"
+    else:
+        assert "Agent session audit capture failed" in error
+        assert audit.manifest["sessions"][0]["status"] == "failed"
+    assert any(item["phase"] == f"session {artifact}" for item in audit.manifest["audit_errors"])
+    saved = json.loads((audit.directory / "run.json").read_text())
+    assert saved["error"] == error
+    assert saved["audit_errors"]
+    assert saved["validation"]["status"] == "not_requested"
+    assert (audit.directory / "exit/files.json").is_file()
+    if artifact != "messages":
+        assert (audit.directory / "sessions/0001/messages.json").is_file()
+    else:
+        assert saved["evidence"]["sessions/0001/messages.json"]["status"] == "unavailable"
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source
+    assert not audit.manifest["integrated"]
+
+
+@pytest.mark.parametrize(
+    "primary,event_name",
+    [
+        ("model", "model_error"),
+        ("model", "model_request_failed"),
+        ("low_confidence", "tool_error"),
+        ("agent", "agent_error"),
+    ],
+)
+def test_error_event_failure_keeps_primary_error_and_partial_log(repo, primary, event_name):
+    from git_ez.agent_runtime import SessionLog
+
+    event = SessionLog.event
+
+    def failing_event(self, logged_event, **data):
+        if logged_event == event_name:
+            raise OSError("error event unavailable")
+        event(self, logged_event, **data)
+
+    repo.mocker.patch.object(SessionLog, "event", failing_event)
+    if primary == "model":
+        repo.mocker.patch.object(
+            ScriptedModel, "_generate", side_effect=RuntimeError("private-provider-token")
+        )
+    elif primary == "agent":
+        repo.mocker.patch(
+            "git_ez.agent_runtime.create_deep_agent",
+            side_effect=RuntimeError("private-provider-token"),
+        )
+    audit, _ = run_agent(
+        repo,
+        [
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [tool("finish", rationale="Uncertain intent", confidence=0.1)],
+        ],
+    )
+    assert audit.manifest["status"] == "failed"
+    if primary == "model":
+        assert "Model request failed (RuntimeError)" in audit.manifest["error"]
+    elif primary == "agent":
+        assert "Deep Agents failed (RuntimeError)" in audit.manifest["error"]
+    else:
+        assert "confidence below threshold" in audit.manifest["error"]
+    assert any(item["phase"] == f"session {event_name}" for item in audit.audit_errors)
+    assert audit.evidence["sessions/0001/events.jsonl"]["status"] == "partial"
+    events = (audit.directory / "sessions/0001/events.jsonl").read_text()
+    assert "session_finished" in events
+    for path in audit.directory.rglob("*"):
+        if path.is_file():
+            assert b"private-provider-token" not in path.read_bytes()
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source
+
+
+@pytest.mark.parametrize(
+    "event_name", ["model_requested", "model_result", "tool_requested", "tool_result"]
+)
+def test_normal_event_write_failure_stops_git_and_keeps_log_partial(repo, event_name):
+    from git_ez.agent_runtime import SessionLog
+
+    event = SessionLog.event
+    failed = False
+
+    def fail_once(self, logged_event, **data):
+        nonlocal failed
+        if logged_event == event_name and not failed:
+            failed = True
+            raise OSError("transient event destination failure")
+        event(self, logged_event, **data)
+
+    repo.mocker.patch.object(SessionLog, "event", fail_once)
+    audit, _ = run_agent(
+        repo,
+        [
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [tool("finish", rationale="Resolved", confidence=0.95)],
+        ],
+    )
+    assert failed
+    assert audit.manifest["status"] == "failed"
+    assert "event capture failed" in audit.manifest["error"]
+    if event_name == "tool_result":
+        assert (repo.root / "file.txt").read_text() == "combined\n"
+    assert any(item["phase"] == f"session {event_name}" for item in audit.audit_errors)
+    assert audit.evidence["sessions/0001/events.jsonl"]["status"] == "partial"
+    events = [
+        json.loads(line)
+        for line in (audit.directory / "sessions/0001/events.jsonl").read_text().splitlines()
+    ]
+    terminal = [item for item in events if item["event"] == "session_finished"]
+    assert terminal[-1]["status"] == audit.manifest["sessions"][0]["status"] == "failed"
+    assert not audit.manifest["integrated"]
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source
+
+
+def test_terminal_event_reflects_late_metadata_failure(repo):
+    from git_ez.audit import Audit
+
+    save = Audit.save
+    failed = False
+
+    def fail_once(self):
+        nonlocal failed
+        sessions = self.manifest.get("sessions", [])
+        if sessions and sessions[-1]["status"] == "resolved" and not failed:
+            failed = True
+            raise OSError("late metadata destination failure")
+        save(self)
+
+    repo.mocker.patch.object(Audit, "save", fail_once)
+    audit, _ = run_agent(
+        repo,
+        [
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [tool("finish", rationale="Resolved", confidence=0.95)],
+        ],
+    )
+    assert failed
+    session = audit.directory / "sessions/0001"
+    events = [json.loads(line) for line in (session / "events.jsonl").read_text().splitlines()]
+    terminal = [item for item in events if item["event"] == "session_finished"]
+    assert len(terminal) == 1
+    assert terminal[0]["status"] == audit.manifest["sessions"][0]["status"] == "failed"
+    saved = json.loads((audit.directory / "run.json").read_text())
+    assert saved["sessions"][0]["status"] == "failed"
+    assert saved["status"] == "failed"
+    assert any(item["phase"] == "session metadata" for item in saved["audit_errors"])
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source

@@ -236,6 +236,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Integrated: {audit.manifest['integrated']}")
         if audit.manifest.get("error"):
             print(f"Error: {audit.manifest['error']}", file=sys.stderr)
+        for error in audit.audit_errors:
+            print(f"Audit error ({error['phase']}): {error['message']}", file=sys.stderr)
+        report_evidence = audit.evidence.get("report.md")
+        if report_evidence is not None and report_evidence["status"] != "available":
+            print(
+                f"Report unavailable or incomplete; inspect audit directory: {audit.directory}",
+                file=sys.stderr,
+            )
         return 1 if audit.manifest["status"] in ("failed", "interrupted") else 0
     except (EzError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"git-ez: {exc}", file=sys.stderr)

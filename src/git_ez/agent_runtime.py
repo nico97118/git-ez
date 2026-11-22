@@ -69,14 +69,19 @@ def error_info(error: BaseException) -> dict[str, Any]:
     return {"type": type(error).__name__, "status_code": getattr(error, "status_code", None)}
 
 
+class EventCaptureError(EzError):
+    """A required audit event could not be retained."""
+
+
 class SessionLog(BaseCallbackHandler):
     """Local SDK callbacks; no remote tracing service is required."""
 
     raise_error = True
     run_inline = True
 
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, audit: Audit):
         self.directory = directory
+        self.audit = audit
         self.lock = RLock()
         self.conflicts = 0
         self.tools = 0
@@ -86,11 +91,26 @@ class SessionLog(BaseCallbackHandler):
         with self.lock, (self.directory / "events.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"at": now(), "event": event, **data}, default=str) + "\n")
 
+    def capture_event(self, event: str, **data: Any) -> Exception | None:
+        return self.audit.attempt(
+            f"session {event}",
+            lambda: self.event(event, **data),
+            (self.directory / "events.jsonl").relative_to(self.audit.directory).as_posix(),
+            append=True,
+        )
+
+    def required_event(self, event: str, **data: Any) -> None:
+        failure = self.capture_event(event, **data)
+        if failure is not None:
+            raise EventCaptureError(
+                f"Agent event capture failed ({event}); inspect audit errors"
+            ) from failure
+
     def on_chat_model_start(self, serialized: dict[str, Any], messages: Any, **kwargs: Any) -> None:
         self.conflicts += 1
         self.messages = list(messages[-1]) if messages else []
         parameters = kwargs.get("invocation_params", {})
-        self.event(
+        self.required_event(
             "model_requested",
             run_id=kwargs.get("run_id"),
             messages=[messages_to_dict(batch) for batch in messages],
@@ -101,16 +121,16 @@ class SessionLog(BaseCallbackHandler):
         for batch in response.generations:
             if batch and hasattr(batch[0], "message"):
                 self.messages.append(batch[0].message)
-        self.event(
+        self.required_event(
             "model_result", run_id=kwargs.get("run_id"), response=response.model_dump(mode="json")
         )
 
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
-        self.event("model_error", **error_info(error))
+        self.capture_event("model_error", **error_info(error))
 
     def on_tool_start(self, serialized: dict[str, Any], input_str: str, **kwargs: Any) -> None:
         self.tools += 1
-        self.event(
+        self.required_event(
             "tool_requested",
             name=serialized.get("name"),
             input=input_str,
@@ -119,10 +139,10 @@ class SessionLog(BaseCallbackHandler):
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> None:
         result = output.model_dump(mode="json") if hasattr(output, "model_dump") else str(output)
-        self.event("tool_result", result=result, run_id=kwargs.get("run_id"))
+        self.required_event("tool_result", result=result, run_id=kwargs.get("run_id"))
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
-        self.event("tool_error", **error_info(error))
+        self.capture_event("tool_error", **error_info(error))
 
 
 class IntegrationMiddleware(AgentMiddleware[Any, Any, Any]):
@@ -154,9 +174,11 @@ class IntegrationMiddleware(AgentMiddleware[Any, Any, Any]):
             raise EzError("Agent context byte budget exceeded")
         try:
             return handler(request)
+        except EventCaptureError:
+            raise
         except Exception as exc:
             # LangGraph checkpoints persist task exceptions; sanitize before that boundary.
-            self.log.event("model_request_failed", **error_info(exc))
+            self.log.capture_event("model_request_failed", **error_info(exc))
             raise EzError(
                 f"Model request failed ({type(exc).__name__}); inspect local events"
             ) from None
@@ -190,7 +212,7 @@ class IntegrationMiddleware(AgentMiddleware[Any, Any, Any]):
                 )
             try:
                 result = handler(request)
-            except (LowConfidence, GitStateChanged):
+            except (LowConfidence, GitStateChanged, EventCaptureError):
                 raise
             except (EzError, OSError, UnicodeError) as exc:
                 result = ToolMessage(content=str(exc), status="error", tool_call_id=call["id"])
@@ -208,7 +230,7 @@ def run_agent(
 ) -> dict[str, Any]:
     directory = audit.directory / "sessions" / f"{round_number:04d}"
     directory.mkdir(parents=True)
-    log = SessionLog(directory)
+    log = SessionLog(directory, audit)
     session: dict[str, Any] = {
         "round": round_number,
         "status": "running",
@@ -262,6 +284,8 @@ def run_agent(
     }
     write_json(directory / "runtime.json", metadata)
     result: dict[str, Any] = {}
+    primary_error = False
+    count = len(audit.audit_errors)
     try:
         baseline = checks.baseline(git)
         model = create_chat_model(config)
@@ -346,29 +370,49 @@ def run_agent(
         session.update(status="resolved", **decision)
         return decision
     except BaseException as exc:
+        primary_error = True
         if session["status"] == "running":
             session["status"] = "failed"
         if isinstance(exc, (EzError, OSError, KeyboardInterrupt, SystemExit)):
             raise
-        log.event("agent_error", **error_info(exc))
+        log.capture_event("agent_error", **error_info(exc))
         raise EzError(f"Deep Agents failed ({type(exc).__name__}); inspect local events") from exc
     finally:
         session.update(tool_calls=log.tools, model_calls=log.conflicts)
-        capture_failure: Exception | None = None
-        try:
-            audit.capture_worktree(git, directory, config.max_file_bytes, paths, reference=head)
-        except (EzError, OSError, ValueError) as exc:
-            session["capture_error"] = str(exc)
+        folder = directory.relative_to(audit.directory).as_posix()
+        capture_failure = audit.attempt(
+            "session worktree",
+            lambda: audit.capture_worktree(
+                git, directory, config.max_file_bytes, paths, reference=head
+            ),
+            f"{folder}/files.json",
+        )
+        if capture_failure is not None:
+            session["capture_error"] = str(capture_failure)
+        messages_failure = audit.attempt(
+            "session messages",
+            lambda: write_json(
+                directory / "messages.json", messages_to_dict(result.get("messages", log.messages))
+            ),
+            f"{folder}/messages.json",
+        )
+        if len(audit.audit_errors) > count and session["status"] == "resolved":
+            session["status"] = "failed"
+        metadata_failure = audit.attempt("session metadata", audit.save)
+        if len(audit.audit_errors) > count and session["status"] == "resolved":
+            session["status"] = "failed"
+        # The terminal event includes the outcome of the session metadata attempt.
+        # The engine still publishes the final run summaries after this returns.
+        events_failure = audit.attempt(
+            "session events",
+            lambda: log.event("session_finished", status=session["status"]),
+            f"{folder}/events.jsonl",
+            append=True,
+        )
+        if len(audit.audit_errors) > count:
             if session["status"] == "resolved":
                 session["status"] = "failed"
-                capture_failure = exc
-        write_json(
-            directory / "messages.json", messages_to_dict(result.get("messages", log.messages))
-        )
-        # Events and offloaded files persist independently of in-memory graph state.
-        log.event("session_finished", status=session["status"])
-        audit.save()
-        if capture_failure is not None:
-            raise EzError(
-                "Agent session audit capture failed; inspect the report"
-            ) from capture_failure
+            if not primary_error:
+                raise EzError("Agent session audit capture failed; inspect audit errors") from (
+                    capture_failure or messages_failure or events_failure or metadata_failure
+                )

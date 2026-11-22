@@ -220,6 +220,19 @@ such as `HEAD~2`. It is resolved and pinned at startup. The current repository i
 default, including when invoked from a subdirectory. A checked-out branch and a clean
 checkout are required.
 
+Only one `git ez rebase` or `git ez merge` can run per checkout at a time. A second
+invocation fails immediately, before repository checks, audit creation, or model calls.
+The lock covers the entire run, including interactive review, validation, and final audit
+capture. Linked worktrees have separate locks.
+
+The operating system releases the lock when the process exits, including abrupt
+termination. The empty `ez-execution.lock` file remains in the checkout's Git directory;
+its presence does not mean a run is active, and it must not be deleted while a run is
+active. Existing Git operations and local changes remain available for inspection and
+native Git recovery. This advisory lock coordinates git-ez invocations only; native Git,
+editors, and other tools can still change the repository, so git-ez's state checks remain
+necessary.
+
 Merge lets Git fast-forward or create a commit according to its configuration.
 Rebase replays the current branch onto the target. This interface supports simple
 integration, without the full set of Git options (interactive rebase, squash, octopus

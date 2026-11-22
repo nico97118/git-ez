@@ -32,6 +32,7 @@ consequence and clarify the intended change before implementing it.
 - `options.py`: explicitly supported native Git options and argument conversion.
 - `sequence_editor.py`: bounded capture of native autosquash instructions without editing them.
 - `git.py`, `engine.py`, `checks.py`: Git execution, integration lifecycle, and guards.
+- `locking.py`: interprocess execution lock scoped to the current checkout.
 - `conflicts.py`: conflict evidence and resolution decisions.
 - `agent.py`, `agent_runtime.py`, `llm.py`: resolver contract, agent runtime, providers.
 - `audit.py`: persistent evidence and reports.

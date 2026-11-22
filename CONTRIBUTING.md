@@ -62,14 +62,32 @@ Installed-command tests use a deterministic local OpenAI-compatible HTTP server.
 No automated test calls a remote model. CI covers Python 3.11 through 3.14 on
 Linux and macOS. The workflow runs three independent job families: `quality`
 (Ruff lint, formatting, and mypy on Ubuntu with Python 3.11), `tests`, and `packages`.
-Both `tests` and `packages` cover the full OS/Python matrix. Each packaging job builds
+The matrix depends on the triggering event:
+
+| Event | Test environments | Packaging environments |
+| --- | --- | --- |
+| Pull request or push to `main` | Linux/Python 3.11 and 3.14; macOS/Python 3.14 | Linux/Python 3.11; macOS/Python 3.14 |
+| Weekly, version tag, or manual run | Linux and macOS, each with Python 3.11–3.14 | The same full matrix |
+
+Every selected test environment runs the complete unit and integration suites with
+coverage; only the environment combinations are reduced. Intermediate Python versions
+and macOS/Python 3.11 are checked by full runs, so incompatibilities specific to those
+combinations can be discovered after a PR is merged.
+
+Each packaging job builds
 the distributions and installs the wheel into a fresh environment outside the checkout
 to verify Git discovery, command help, manual lookup, audit display, and conflict-free
 merge/rebase without a model server.
 
-Only pushes to `main` trigger branch CI; pushes to other branches and tags do not.
+Only pushes to `main` trigger branch CI; pushes to other branches do not.
 Pull requests targeting any branch trigger CI when opened, reopened, or updated.
 Branches other than `main` therefore receive automatic checks through pull requests.
+Full runs execute every Monday at 04:17 UTC on the default branch, on pushes of tags
+matching `v*`, and through **Run workflow** (`workflow_dispatch`) on a selected ref.
+Use a manual full run before merging changes that need broader compatibility checks.
+Version tags trigger validation but do not publish a package; check the tag's full
+run before publishing its release. Publishing a GitHub release does not trigger a
+duplicate run.
 A newer run cancels an older run for the same workflow, event type, and pull request
 or Git reference; push and pull-request runs do not cancel each other.
 

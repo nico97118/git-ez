@@ -2,7 +2,11 @@ name: checks
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -30,9 +34,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        python: ['3.11', '3.12', '3.13', '3.14']
+      # Exercise Python bounds and both operating systems on every PR/main push.
+      matrix: ${{ fromJSON(
+        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+          || startsWith(github.ref, 'refs/tags/'))
+        && '{"os":["ubuntu-latest","macos-latest"],"python":["3.11","3.12","3.13","3.14"]}'
+        || '{"include":[{"os":"ubuntu-latest","python":"3.11"},{"os":"ubuntu-latest","python":"3.14"},{"os":"macos-latest","python":"3.14"}]}'
+        ) }}
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -69,9 +77,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        python: ['3.11', '3.12', '3.13', '3.14']
+      matrix: ${{ fromJSON(
+        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+          || startsWith(github.ref, 'refs/tags/'))
+        && '{"os":["ubuntu-latest","macos-latest"],"python":["3.11","3.12","3.13","3.14"]}'
+        || '{"include":[{"os":"ubuntu-latest","python":"3.11"},{"os":"macos-latest","python":"3.14"}]}'
+        ) }}
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7

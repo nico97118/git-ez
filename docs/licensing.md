@@ -8,10 +8,26 @@ with those copies.
 ## Dependency review
 
 The direct dependencies pinned in pyproject.toml (deepagents, langchain-openai,
-langchain-ollama, and langgraph-checkpoint-sqlite) declare MIT licensing in their
+langchain-ollama, and langgraph-checkpoint) declare MIT licensing in their
 installed distribution metadata. The installed transitive dependencies were also
 reviewed through their metadata and selected license files. This is not a complete
 review of every bundled native component or redistribution obligation.
+
+## Vendored SQLite checkpoint adapter
+
+`src/git_ez/_vendor/langgraph_sqlite/` contains the synchronous checkpoint saver
+and its two helpers from `langgraph-checkpoint-sqlite` 3.1.3. This third-party
+code remains MIT licensed, copyright LangChain, Inc.; the complete upstream
+LICENSE is shipped alongside the code in wheels and source distributions.
+`UPSTREAM.json` records the source distribution version, original wheel URL and
+hash, original file hashes, and local changes (SPDX notices and internal import
+relocation). No vector store or asynchronous saver is included.
+
+This bounded copy preserves checkpoint format and behavior without imposing the
+upstream package's mandatory sqlite-vec and aiosqlite dependencies. Updating it
+requires reviewing upstream changes, refreshing provenance, and checking persisted
+state, pending writes, failure recovery, and the real agent integrations. It is
+not covered by the GPL SPDX notices on project-owned files.
 
 ### Open item: regex
 

@@ -449,6 +449,9 @@ Git settings are respected. If rerere reuses and stages a resolution, that decis
 recorded without an AI call. Hook and signing failures are not bypassed.
 
 The Deep Agents runtime provides local tools, context management, and SQLite checkpoints.
+Session `runtime.json` records the installed dependency versions and the bundled
+checkpoint adapter's upstream version. Its provenance and MIT license are included
+in the installed package; see [licensing](docs/licensing.md).
 Delegation is disabled. Offloaded history is stored separately from the repository.
 The model receives explicit base/ours/theirs semantics for the Git strategy in use.
 Tools execute on the host; their output is sent to the configured model.

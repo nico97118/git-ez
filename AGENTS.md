@@ -34,6 +34,7 @@ consequence and clarify the intended change before implementing it.
 - `git.py`, `engine.py`, `checks.py`: Git execution, integration lifecycle, and guards.
 - `conflicts.py`: conflict evidence and resolution decisions.
 - `agent.py`, `agent_runtime.py`, `llm.py`: resolver contract, agent runtime, providers.
+- `_vendor/langgraph_sqlite/`: synchronous upstream SQLite checkpoint adapter (MIT).
 - `audit.py`: persistent evidence and reports.
 - `probe.py`: provider connectivity diagnostics.
 - `tests/`: pytest tests, temporary repositories, deterministic resolvers, and local
@@ -114,6 +115,12 @@ and run `uv run --locked python scripts/check_install.py dist/git_ez_ai-*.whl` t
 the installed command and manual outside the source checkout. A `man` viewer is
 required. CI covers Python 3.11 through 3.14 on Linux and macOS; consider that range
 when changing compatibility.
+
+The synchronous SQLite checkpoint adapter is vendored under
+`src/git_ez/_vendor/langgraph_sqlite/` with upstream MIT licensing and provenance.
+Keep upstream changes bounded and documented in `UPSTREAM.json`; do not apply
+project GPL notices or unrelated formatting to third-party files. See
+`docs/licensing.md` for the update and validation requirements.
 
 - Mark every test with exactly one of `unit` or `integration`; use the existing
   module markers where applicable. Unit tests do not start Git, model runtimes, or

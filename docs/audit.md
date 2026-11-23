@@ -111,6 +111,9 @@ an obligation. The same policy gates execution, validates snapshots and verifies
 offline reads. Inventories identify their captured children; model events carry
 ordered sequence numbers and an acknowledged record count. Native rerere reuse
 retains its staged diff before continuation, just like resolver proposals.
+Applied conflicts reference the proposal's canonical rationale and confidence;
+interactive application also requires a recorded acceptance. A resolved session
+cannot omit its finish decision, even when duplicate exports are unavailable.
 Structured credential filtering preserves JSON keys and schema labels; the final
 filtered manifest is validated before it can replace the previous revision.
 

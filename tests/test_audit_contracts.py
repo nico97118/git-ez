@@ -54,6 +54,26 @@ def test_reader_rejects_contradictory_validation_result(repo):
     assert main(["show", str(audit.directory)]) != 0
 
 
+@pytest.mark.parametrize("interactive", [False, True])
+def test_applied_proposal_requires_its_canonical_decision(repo, monkeypatch, interactive):
+    monkeypatch.setattr("builtins.input", lambda _: "a")
+    audit = success(repo, interactive=interactive)
+    payload = json.loads((audit.directory / "run.json").read_bytes())
+    for record in [*payload["proposals"], *payload["conflicts"]]:
+        record.pop("resolution", None)
+    replace_manifest(audit, payload)
+    assert main(["show", str(audit.directory)]) == 2
+
+
+def test_interactive_application_requires_recorded_acceptance(repo, monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "a")
+    audit = success(repo, interactive=True)
+    payload = json.loads((audit.directory / "run.json").read_bytes())
+    del payload["proposals"][0]["decision"]
+    replace_manifest(audit, payload)
+    assert main(["show", str(audit.directory)]) == 2
+
+
 def test_reader_requires_actual_request_and_pinned_inputs(repo):
     audit = success(repo)
     payload = json.loads((audit.directory / "run.json").read_bytes())

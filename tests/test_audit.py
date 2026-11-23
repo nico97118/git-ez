@@ -160,6 +160,18 @@ def test_invalid_scope_update_cannot_poison_finalization(audit):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("group, status", [("reviews", "proposed"), ("sessions", "resolved")])
+def test_scope_cannot_claim_a_decision_without_its_required_facts(audit, group, status):
+    record = audit.add_record(group, {"round": 1, "status": "running", "artifacts": f"{group}/1"})
+    with pytest.raises(ValueError, match="canonical decision"):
+        record.update(status=status)
+    assert record["status"] == "running"
+    audit.set_status("failed", EzError("Stopped before a decision"))
+    audit.finalize()
+    assert audit.published
+
+
+@pytest.mark.unit
 def test_failure_precedence_and_terminal_publication(audit):
     audit.set_status("failed", EzError("initial failure"), phase="integration")
     audit.attempt("secondary", lambda: (_ for _ in ()).throw(OSError("private detail")))

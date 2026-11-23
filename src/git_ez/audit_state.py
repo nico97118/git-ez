@@ -323,6 +323,17 @@ def _oid(value: object) -> None:
         raise ValueError("Invalid full native object identity")
 
 
+def _decision(value: object) -> None:
+    if (
+        not isinstance(value, dict)
+        or not isinstance(value.get("rationale"), str)
+        or not value["rationale"].strip()
+        or type(value.get("confidence")) not in (int, float)
+        or not 0 <= value["confidence"] <= 1
+    ):
+        raise ValueError("Missing or invalid canonical decision")
+
+
 def validate_scope(group: str, record: dict[str, Any]) -> None:
     """Reject malformed layouts before they can enter the owned aggregate."""
     _strings(record, "id")
@@ -338,6 +349,14 @@ def validate_scope(group: str, record: dict[str, Any]) -> None:
             raise ValueError("Invalid conflict evidence references")
     elif group == "native_resolutions":
         _strings(record, "staged_artifact")
+    if "resolution" in record:
+        _decision(record["resolution"])
+    if group in ("reviews", "proposals") and (
+        record.get("status") in ("proposed", "applied") or record.get("application") == "staged"
+    ):
+        _decision(record.get("resolution"))
+    if group == "sessions" and record.get("status") in ("resolved", "low_confidence"):
+        _decision(record)
 
 
 def validate_records(payload: dict[str, Any]) -> None:
@@ -432,14 +451,6 @@ def validate_records(payload: dict[str, Any]) -> None:
                     )
                 ):
                     raise ValueError("Missing model invocation provenance")
-                resolution = record.get("resolution")
-                if resolution is not None and (
-                    not isinstance(resolution, dict)
-                    or not isinstance(resolution.get("rationale"), str)
-                    or type(resolution.get("confidence")) not in (int, float)
-                    or not 0 <= resolution["confidence"] <= 1
-                ):
-                    raise ValueError("Invalid proposal decision")
             if group != "issues" and record.get("status") not in (
                 "created",
                 "pending",
@@ -503,6 +514,19 @@ def validate_records(payload: dict[str, Any]) -> None:
             step = steps_by_id.get(record.get("stage_step_id"))
             if step is None or step.get("purpose") != "stage" or step.get("returncode") != 0:
                 raise ValueError("Staged application lacks its successful stage step")
+    for conflict in payload["conflicts"]:
+        if conflict.get("application") == "staged" and not any(
+            conflict["id"] in proposal.get("conflict_ids", [])
+            and proposal.get("application") == "staged"
+            and proposal.get("stage_step_id") == conflict.get("stage_step_id")
+            for proposal in payload["proposals"]
+        ):
+            raise ValueError("Applied conflict lacks its canonical proposal decision")
+    if payload["request"].get("interactive") and any(
+        record.get("application") == "staged" and record.get("decision") != "accept"
+        for record in payload["proposals"]
+    ):
+        raise ValueError("Interactive application lacks its acceptance decision")
 
 
 def validate_snapshot(payload: dict[str, Any]) -> None:

@@ -13,7 +13,7 @@ from .errors import EzError
 from .llm import base_url, create_chat_model
 
 
-def probe(config: Config, output: Path) -> dict[str, Any]:
+def probe(config: Config, output: Path | None = None) -> dict[str, Any]:
     from langchain_core.messages import HumanMessage, ToolMessage, messages_to_dict
     from langsmith import tracing_context
 
@@ -40,8 +40,9 @@ def probe(config: Config, output: Path) -> dict[str, Any]:
         "checks": [],
         "note": "Only protocol compatibility is tested; no Git or filesystem tools are exposed.",
     }
-    output = output.resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
+    if output is not None:
+        output = output.resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
     try:
         model = create_chat_model(config)
         with tracing_context(enabled=False):
@@ -53,7 +54,8 @@ def probe(config: Config, output: Path) -> dict[str, Any]:
                     "response": messages_to_dict([message]),
                 }
             )
-            write_json(output, report)
+            if output is not None:
+                write_json(output, report)
             if not report["checks"][-1]["ok"]:
                 raise EzError("Model did not return the requested chat marker")
             bound = model.bind_tools([schema])
@@ -72,7 +74,8 @@ def probe(config: Config, output: Path) -> dict[str, Any]:
             report["checks"].append(
                 {"name": "tool_call", "ok": ok, "response": messages_to_dict([call])}
             )
-            write_json(output, report)
+            if output is not None:
+                write_json(output, report)
             if not ok:
                 raise EzError("Server/model did not produce the expected native tool call")
             final = bound.invoke(
@@ -100,5 +103,6 @@ def probe(config: Config, output: Path) -> dict[str, Any]:
         if isinstance(exc, EzError):
             report["error"]["message"] = str(exc)
     finally:
-        write_json(output, report)
+        if output is not None:
+            write_json(output, report)
     return report

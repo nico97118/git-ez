@@ -169,7 +169,7 @@ def parser() -> argparse.ArgumentParser:
     show = commands.add_parser("show", help="Display a saved integration report")
     show.add_argument("run_directory", type=Path, help="Audit directory printed after execution")
     probe = commands.add_parser("probe", help="Test model/tool compatibility without touching Git")
-    probe.add_argument("--output", type=Path, required=True, help="Local JSON diagnostic report")
+    probe.add_argument("--output", type=Path, help="Write JSON report to a file (default: stdout)")
     return root
 
 
@@ -183,8 +183,11 @@ def main(argv: list[str] | None = None) -> int:
             from .probe import probe
 
             report = probe(Config.from_git(Path.cwd()), args.output)
-            print(f"Compatibility: {report['status']}")
-            print(f"Report: {args.output.resolve()}")
+            if args.output is None:
+                print(json.dumps(report, indent=2, ensure_ascii=True))
+            print(f"Compatibility: {report['status']}", file=sys.stderr)
+            if args.output is not None:
+                print(f"Report: {args.output.resolve()}", file=sys.stderr)
             return 0 if report["status"] == "compatible" else 1
         if args.check == []:
             raise EzError("--check requires an executable")

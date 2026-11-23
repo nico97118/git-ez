@@ -14,13 +14,17 @@ git-ez \- local rebase and merge with AI-assisted conflict resolution
 .RI [ --repo " directory"]
 .RI [ --check " executable arguments..."]
 .br
-.B git ez probe --output
-.I report.json
+.B git ez probe
+.RI [ --output " report.json"]
 .br
 .B git ez show
 .I run-directory
 .br
 .B git ez --version
+.SH PROBE OUTPUT
+The probe writes its JSON report to standard output by default.
+Use --output report.json to save it to a file instead.
+Diagnostics are written to standard error in both modes.
 .SH DESCRIPTION
 Integrate a revision into the current branch using Git, calling a configured
 LLM

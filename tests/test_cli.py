@@ -638,3 +638,74 @@ def test_cli_prints_primary_failure_and_audit_errors_when_summaries_cannot_be_sa
     assert "report destination unavailable" in output.err
     assert "Report unavailable or incomplete" in output.err
     assert not cli_repo.operation_active()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("to_file", [False, True])
+@pytest.mark.parametrize("compatible", [False, True])
+def test_probe_json_destination(tmp_path, monkeypatch, mocker, capsys, to_file, compatible):
+    import json
+
+    from git_ez.config import Config
+    from git_ez.errors import EzError
+
+    monkeypatch.chdir(tmp_path)
+    mocker.patch("git_ez.cli.Config.from_git", return_value=Config(model="test"))
+    if compatible:
+        from langchain_core.messages import AIMessage
+
+        def respond(messages):
+            import re
+
+            marker = re.search(r"ez-[0-9a-f]{32}", str(messages)).group()
+            if len(messages) == 1 and "Call compatibility_echo" in messages[0].content:
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "compatibility_echo", "args": {"value": marker}, "id": "call"}
+                    ],
+                )
+            return AIMessage(content=marker)
+
+        model = mocker.Mock()
+        model.invoke.side_effect = respond
+        model.bind_tools.return_value = model
+        mocker.patch("git_ez.probe.create_chat_model", return_value=model)
+    else:
+        mocker.patch("git_ez.probe.create_chat_model", side_effect=EzError("Invalid provider"))
+    output = tmp_path / "nested" / "probe.json"
+    args = ["probe", "--output", str(output)] if to_file else ["probe"]
+    assert main(args) == (0 if compatible else 1)
+    captured = capsys.readouterr()
+    report = json.loads(output.read_text() if to_file else captured.out)
+    assert report["status"] == ("compatible" if compatible else "failed")
+    assert f"Compatibility: {report['status']}" in captured.err
+    if to_file:
+        assert captured.out == ""
+        assert str(output) in captured.err
+    else:
+        assert list(tmp_path.iterdir()) == []
+    if not compatible:
+        assert report["error"]["message"] == "Invalid provider"
+
+
+@pytest.mark.unit
+def test_probe_output_requires_a_filename(capsys):
+    with pytest.raises(SystemExit, match="2"):
+        parser().parse_args(["probe", "--output"])
+    assert "expected one argument" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_probe_unwritable_output_is_a_stderr_error(tmp_path, mocker, capsys):
+    from git_ez.config import Config
+
+    mocker.patch("git_ez.cli.Config.from_git", return_value=Config(model="test"))
+    model = mocker.patch("git_ez.probe.create_chat_model")
+    parent_file = tmp_path / "file"
+    parent_file.write_text("occupied")
+    assert main(["probe", "--output", str(parent_file / "probe.json")]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "git-ez:" in captured.err
+    model.assert_not_called()

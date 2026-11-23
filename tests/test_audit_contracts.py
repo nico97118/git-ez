@@ -209,9 +209,10 @@ def test_git_failure_remains_primary_when_output_capture_also_fails(repo):
     assert audit.view["failure"]["domain"] == "execution"
 
 
-def test_serialization_rechecks_invariants_after_redaction(repo):
+@pytest.mark.parametrize("token", ["core_fact", "HEAD", "files", "stage", "integration", "applied"])
+def test_serialization_rechecks_invariants_after_redaction(repo, token):
     # A weak configured token must not corrupt policy facts through redaction.
-    repo.config = Config(model="test", api_key="core_fact")
+    repo.config = Config(model="test", api_key=token)
     audit = success(repo)
     assert load_audit(audit.directory).exit_code == 0
 

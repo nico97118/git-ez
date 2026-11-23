@@ -190,6 +190,33 @@ def test_known_credentials_are_redacted_before_json_encoding(audit):
 
 
 @pytest.mark.unit
+def test_json_redaction_preserves_keys_and_schema_values(audit):
+    audit.protect("files", "file")
+    audit.write_json(
+        "inventory.json", {"files": [{"state": "file", "path": "files/private"}]}, schema=True
+    )
+    data = json.loads((audit.directory / "inventory.json").read_bytes())
+    assert data == {"files": [{"state": "file", "path": "<redacted>/private"}]}
+    assert audit.evidence["inventory.json"]["redacted"]
+
+
+@pytest.mark.unit
+def test_transformed_manifest_is_validated_before_replacing_checkpoint(audit):
+    previous = (audit.directory / "run.json").read_bytes()
+    redact = audit._redact_schema
+
+    def invalidate(data):
+        result = redact(data)
+        if isinstance(result, dict) and "schema_version" in result:
+            result["outcome"] = "invalid"
+        return result
+
+    with patch.object(audit, "_redact_schema", side_effect=invalidate), pytest.raises(EzError):
+        audit.save()
+    assert (audit.directory / "run.json").read_bytes() == previous
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("split", range(1, 12))
 def test_redaction_preserves_credentials_across_chunk_boundaries(split):
     content = b"before configured-token after configured-token"

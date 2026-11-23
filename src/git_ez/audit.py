@@ -28,6 +28,7 @@ from .audit_state import (
     now,
     safe_error,
     validate_scope,
+    validate_snapshot,
 )
 from .audit_storage import AuditStore, directory_fd, encode_json, fingerprint, regular_fd
 from .errors import AuditError, EzError
@@ -190,6 +191,10 @@ class Audit:
             "sha256",
             "retained_sha256",
             "operation",
+            "purpose",
+            "application",
+            "input_status",
+            "state",
             "event",
             "primary_failure_id",
             "artifact",
@@ -212,6 +217,9 @@ class Audit:
             for key, value in data.items():
                 if key == "configuration":
                     result[key] = self._redact(value)
+                elif key == "name" and "expected" in data and "observed" in data:
+                    # Invariant names are schema labels, not model/tool names.
+                    result[key] = value
                 elif isinstance(value, str) and (key in protected or key.endswith("_artifact")):
                     result[key] = value
                 elif (
@@ -320,6 +328,7 @@ class Audit:
             self._store.begin_publication()
             try:
                 payload = self._redact_schema(self._state.snapshot())
+                validate_snapshot(payload)
                 content = self._store.snapshot(payload)
             except Exception as exc:
                 raise AuditError("Cannot publish audit checkpoint") from exc
@@ -669,6 +678,33 @@ class Audit:
     ) -> None:
         with self._lock:
             self._ensure_open()
+            filtered = redact_bytes(content, self._secrets)
+            self._publish_capture(
+                artifact,
+                filtered,
+                source_bytes=len(content),
+                redacted=filtered != content,
+                optional=optional,
+                capture_id=capture_id,
+                role=role,
+                retained_limit=retained_limit,
+            )
+
+    def _publish_capture(
+        self,
+        artifact: str,
+        content: bytes,
+        *,
+        source_bytes: int,
+        redacted: bool,
+        optional: bool = False,
+        capture_id: str | None = None,
+        role: str = "proof",
+        retained_limit: int | None = None,
+    ) -> None:
+        """Publish already filtered bytes; structured JSON must not be filtered twice."""
+        with self._lock:
+            self._ensure_open()
             existing = self._state.evidence.get(artifact)
             if optional and (
                 artifact in required_artifacts(self._state.policy_data())
@@ -676,16 +712,13 @@ class Audit:
                 and existing.get("requirement") == "blocking"
             ):
                 raise ValueError("An expected proof cannot be written as an optional export")
-            original = content
-            content = redact_bytes(content, self._secrets)
-            redacted = original != content
             truncated = retained_limit is not None and len(content) > retained_limit
             if retained_limit is not None:
                 content = content[:retained_limit]
             try:
                 self._store.write(artifact, content)
                 self._registered(artifact, optional=optional, capture_id=capture_id, role=role)
-                self._state.evidence[artifact]["source_bytes"] = len(original)
+                self._state.evidence[artifact]["source_bytes"] = source_bytes
             except (OSError, ValueError) as exc:
                 self._state.evidence[artifact] = {
                     "status": "unavailable",
@@ -721,15 +754,18 @@ class Audit:
         capture_id: str | None = None,
         role: str = "proof",
     ) -> None:
-        normalized = self._redact(data, enabled=False)
-        transformed = self._redact_schema(normalized) if schema else self._redact(normalized)
-        self.write(
-            artifact, encode_json(transformed), optional=optional, capture_id=capture_id, role=role
-        )
-        self.source_size(artifact, len(encode_json(normalized)))
-        if transformed != normalized:
-            self.limit_evidence(
-                artifact, "redacted", "Known credentials removed from JSON evidence"
+        with self._lock:
+            self._ensure_open()
+            normalized = self._redact(data, enabled=False)
+            transformed = self._redact_schema(normalized) if schema else self._redact(normalized)
+            self._publish_capture(
+                artifact,
+                encode_json(transformed),
+                source_bytes=len(encode_json(normalized)),
+                redacted=transformed != normalized,
+                optional=optional,
+                capture_id=capture_id,
+                role=role,
             )
 
     def append_event(self, artifact: str, data: object) -> None:

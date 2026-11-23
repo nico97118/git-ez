@@ -69,6 +69,38 @@ changing a behavior. Keep this map accurate when moving responsibilities.
 - Update user documentation and examples when CLI behavior, configuration, or audit
   output changes. Do not promise capabilities that the implementation lacks.
 
+## README scope and maintenance
+
+Treat `README.md` as a concise entry point for users evaluating and starting with
+git-ez. Keep it current without turning it into an exhaustive reference. It should
+cover:
+
+- A brief description of the tool, its purpose, and when to use it.
+- Installation and the prerequisites needed to get started.
+- Minimal configuration and representative usage examples for supported commands.
+- Key limitations and execution policies that affect a user's decision or safe use.
+- The project license and links to supporting documentation.
+
+When behavior changes, correct or replace the affected README text and examples.
+Do not append a section for every feature, fix, or implementation iteration. Add
+content only when it is needed to understand, install, or start using the tool;
+prefer updating an existing section and linking to details. Keep examples short
+and representative rather than enumerating every option or combination.
+
+Put exhaustive command and configuration details in `docs/man/git-ez.1`, development
+and validation instructions in `CONTRIBUTING.md`, and third-party licensing details
+in `docs/licensing.md`. Use `examples/` for longer demonstrations. Place other
+substantial explanations in an appropriate document under `docs/` when no existing
+document fits. Link these resources from the README where relevant, and keep the
+links and overlapping claims consistent. Do not move essential limitations out of
+the README merely to shorten it.
+
+Before committing a README change, review the resulting document as a whole:
+confirm its purpose and quick-start path remain clear, remove repetition introduced
+by the change, verify affected examples and links, and ensure it does not duplicate
+reference material or narrate development history. Do not expand the README merely
+because code changed; leave it unchanged when its existing guidance remains accurate.
+
 ## Audit and credentials
 
 Traceability is part of the feature, including unsuccessful runs.

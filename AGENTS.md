@@ -90,24 +90,43 @@ Set up the environment with:
 uv sync --locked
 ```
 
-Run focused tests while working, for example:
+Start with the smallest relevant test selection for the changed behavior, for example:
 
 ```sh
 uv run --locked pytest tests/test_engine.py -k merge
 ```
 
-Before every code-changing commit, run all of:
+Select tests from the affected behavior and its callers, not only the edited file.
+Cover relevant success and failure paths. Include integration tests when Git,
+the CLI, an SDK, or the agent runtime is involved; unit tests alone do not validate
+those interactions. Expand the selection when failures or shared dependencies
+suggest a wider impact.
+
+For a localized change, focused tests are sufficient before committing. Do not run
+the full suite after every edit or minor behavior change. Before every code-changing
+commit, also run the static checks:
 
 ```sh
-uv run --locked pytest -v --cov --cov-report=term-missing
 uv run --locked ruff check .
 uv run --locked ruff format --check .
 uv run --locked mypy src
 ```
 
+Run the full test suite before opening a PR or marking it ready for review when
+executable behavior changes, when explicitly requested, or when broad changes make
+a focused selection insufficient (for example, shared fixtures, test configuration,
+cross-cutting Git lifecycle or audit changes, or runtime dependency updates):
+
+```sh
+uv run --locked pytest -v --cov --cov-report=term-missing
+```
+
 Fix failures before committing. Reuse successful results while their relevant
-inputs remain unchanged. For documentation-only commits, check the documentation
-and its examples; Python checks are not required unless executable behavior changes.
+inputs remain unchanged, including full-suite results for PR preparation. State
+which checks ran, why the selection covers the change, and whether the full suite
+was run; do not imply full validation from a focused selection. For documentation-only
+commits, check the documentation and its examples; Python checks are not required
+unless executable behavior changes.
 If a required check cannot run, report the blocker and do not silently bypass it.
 
 For packaging, dependency, or executable-entry-point changes, also run `uv build`

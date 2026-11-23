@@ -10,6 +10,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, NotRequired, TypedDict
 
+from .audit_policy import (
+    ROLES,
+    artifact_owner,
+    missing_requirements,
+    required_artifacts,
+    requirement_records,
+)
+
 RunStatus = Literal["running", "succeeded", "failed", "interrupted"]
 IntegrationStatus = Literal["not_started", "in_progress", "completed", "not_completed", "unknown"]
 ValidationStatus = Literal[
@@ -41,6 +49,11 @@ class Evidence(TypedDict):
     source_bytes: NotRequired[int]
     redacted: NotRequired[bool]
     truncated: NotRequired[bool]
+    id: NotRequired[str]
+    owner: NotRequired[str]
+    captured_at: NotRequired[str]
+    source_observation: NotRequired[str]
+    records: NotRequired[int]
 
 
 class Validation(TypedDict):
@@ -140,7 +153,18 @@ class RunState:
     steps: list[dict[str, Any]] = field(default_factory=list)
     observations: list[dict[str, Any]] = field(default_factory=list)
 
+    def policy_data(self) -> dict[str, Any]:
+        return {
+            **self.details,
+            "id": self.run_id,
+            "steps": self.steps,
+            "lifecycle": self.lifecycle,
+            "integrated": self.integration == "completed",
+        }
+
     def health(self) -> str:
+        if missing_requirements(self.policy_data(), self.evidence):
+            return "incomplete"
         return evidence_health(self.evidence, self.audit_errors, self.observations)
 
     def view(self) -> dict[str, Any]:
@@ -220,7 +244,13 @@ class RunState:
                 "steps": copy.deepcopy(self.steps),
                 "observations": copy.deepcopy(self.observations),
             },
-            "checks": {"validation": validation, "final": {"status": self.final_checks}},
+            "checks": {
+                "validation": validation,
+                "final": {
+                    "status": self.final_checks,
+                    "records": data.pop("final_check_records", []),
+                },
+            },
             "conflicts": data.pop("conflicts", []),
             "sessions": data.pop("sessions", []),
             "proposals": data.pop("reviews", []),
@@ -246,28 +276,7 @@ class RunState:
             "result_oid",
         ):
             data.pop(key, None)
-        payload["requirements"] = [
-            {
-                "id": name,
-                "role": "core_fact",
-                "requirement": "blocking",
-                "applicability": "required",
-                "fact": name,
-            }
-            for name in ("repository", "request", "inputs", "git", "checks")
-        ] + [
-            {
-                "id": path,
-                "role": entry.get("role", "proof"),
-                "requirement": entry.get("requirement", "blocking"),
-                "applicability": "not_applicable"
-                if entry.get("result") == "not_attempted" and entry.get("requirement") == "optional"
-                else "required",
-                "artifact": path,
-                "reason": entry.get("reason"),
-            }
-            for path, entry in self.evidence.items()
-        ]
+        payload["requirements"] = requirement_records(data=self.view() | {"steps": self.steps})
         payload["primary_failure_id"] = self.failure.get("id") if self.failure else None
         payload["details"] = data
         validate_snapshot(payload)
@@ -292,10 +301,12 @@ def snapshot_view(payload: dict[str, Any]) -> dict[str, Any]:
         integration=payload["git"]["integration"],
         validation=payload["checks"]["validation"],
         final_checks=payload["checks"]["final"]["status"],
+        final_check_records=payload["checks"]["final"].get("records", []),
         conflicts=payload["conflicts"],
         sessions=payload["sessions"],
         reviews=payload["proposals"],
         evidence=payload["artifacts"],
+        steps=payload["git"]["steps"],
         audit_errors=[issue for issue in payload["issues"] if issue.get("domain") != "execution"],
         audit_health=payload["audit_health"],
     )
@@ -306,8 +317,204 @@ def snapshot_view(payload: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def _strings(record: dict[str, Any], *fields: str) -> None:
+    if any(not isinstance(record.get(field), str) or not record[field] for field in fields):
+        raise ValueError("Missing required audit facts")
+
+
+def _oid(value: object) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) not in (40, 64)
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError("Invalid full native object identity")
+
+
+def validate_scope(group: str, record: dict[str, Any]) -> None:
+    """Reject malformed layouts before they can enter the owned aggregate."""
+    _strings(record, "id")
+    if group in ("sessions", "reviews", "proposals"):
+        _strings(record, "status", "artifacts")
+        if type(record.get("round")) is not int:
+            raise ValueError("Invalid scope relationship")
+    elif group == "conflicts":
+        _strings(record, "path", "status")
+        if type(record.get("number")) is not int or not isinstance(record.get("stages"), dict):
+            raise ValueError("Invalid conflict provenance")
+        if not isinstance(record.get("artifacts"), dict):
+            raise ValueError("Invalid conflict evidence references")
+    elif group == "native_resolutions":
+        _strings(record, "staged_artifact")
+
+
+def validate_records(payload: dict[str, Any]) -> None:
+    """Validate child shapes before projecting or evaluating their policy."""
+    _strings(payload["repository"], "worktree")
+    _strings(payload["request"], "operation", "target", "provider", "model", "prompt")
+    if payload["request"]["operation"] not in ("merge", "rebase") or not isinstance(
+        payload["request"].get("configuration"), dict
+    ):
+        raise ValueError("Invalid admitted request")
+    _strings(payload["inputs"], "branch", "before_oid", "target_oid")
+    for name in ("before_oid", "target_oid", "onto_oid"):
+        if name in payload["inputs"]:
+            _oid(payload["inputs"][name])
+    if payload["git"].get("integration") == "completed":
+        _oid(payload["git"].get("result_oid"))
+    for group in ("steps", "observations"):
+        records = payload["git"].get(group)
+        if not isinstance(records, list):
+            raise ValueError("Invalid native record inventory")
+        identifiers: set[str] = set()
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("Invalid native record")
+            _strings(record, "id")
+            if record["id"] in identifiers:
+                raise ValueError("Duplicate native record identity")
+            identifiers.add(record["id"])
+            if group == "steps":
+                if (
+                    record.get("purpose") not in ("stage", "integration")
+                    or record.get("result")
+                    not in (
+                        "pending",
+                        "returned",
+                        "unknown",
+                        "not_launched",
+                    )
+                    or not isinstance(record.get("argv"), list)
+                ):
+                    raise ValueError("Invalid native command facts")
+                if record["result"] == "returned" and type(record.get("returncode")) is not int:
+                    raise ValueError("Missing native return code")
+            elif not isinstance(record.get("errors"), list) or any(
+                not isinstance(error, dict) or not isinstance(error.get("field"), str)
+                for error in record["errors"]
+            ):
+                raise ValueError("Invalid native observation errors")
+    for group in ("native_resolutions", "empty_commits"):
+        records = payload["details"].get(group, [])
+        if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+            raise ValueError("Invalid native scope facts")
+        for record in records:
+            validate_scope(group, record)
+    sequence = payload["details"].get("rebase_sequence")
+    if sequence is not None:
+        if not isinstance(sequence, dict):
+            raise ValueError("Invalid sequence capture facts")
+        _strings(sequence, "artifact", "digest_artifact", "metadata_artifact", "status")
+    for group in ("conflicts", "sessions", "proposals", "issues"):
+        scope_identifiers: set[str] = set()
+        for record in payload[group]:
+            if not isinstance(record, dict):
+                raise ValueError("Invalid scoped audit record")
+            _strings(record, "id")
+            validate_scope(group, record)
+            if record["id"] in scope_identifiers:
+                raise ValueError("Duplicate scoped audit identity")
+            scope_identifiers.add(record["id"])
+            if group == "issues":
+                _strings(record, "domain", "owner", "phase", "type", "message")
+                if record["domain"] not in ("audit", "execution", "observation"):
+                    raise ValueError("Invalid failure domain")
+            elif group == "conflicts":
+                _strings(record, "path", "status")
+                if type(record.get("number")) is not int or not isinstance(
+                    record.get("stages"), dict
+                ):
+                    raise ValueError("Invalid conflict provenance")
+                if not isinstance(record.get("artifacts"), dict):
+                    raise ValueError("Invalid conflict evidence references")
+            else:
+                _strings(record, "status", "artifacts")
+                if type(record.get("round")) is not int:
+                    raise ValueError("Invalid scope relationship")
+                if (
+                    group == "sessions"
+                    and record.get("invocation_started")
+                    and (
+                        not isinstance(record.get("runtime_metadata"), dict)
+                        or not isinstance(record.get("mission"), dict)
+                    )
+                ):
+                    raise ValueError("Missing model invocation provenance")
+                resolution = record.get("resolution")
+                if resolution is not None and (
+                    not isinstance(resolution, dict)
+                    or not isinstance(resolution.get("rationale"), str)
+                    or type(resolution.get("confidence")) not in (int, float)
+                    or not 0 <= resolution["confidence"] <= 1
+                ):
+                    raise ValueError("Invalid proposal decision")
+            if group != "issues" and record.get("status") not in (
+                "created",
+                "pending",
+                "running",
+                "resolved",
+                "proposed",
+                "applied",
+                "failed",
+                "interrupted",
+                "low_confidence",
+                "unknown",
+            ):
+                raise ValueError("Invalid scope outcome")
+            if payload["lifecycle"] == "finished" and record.get("status") in (
+                "created",
+                "pending",
+                "running",
+            ):
+                raise ValueError("A finished run cannot retain an open scope")
+    failure = payload.get("primary_failure")
+    if failure is not None:
+        if not isinstance(failure, dict) or failure not in payload["issues"]:
+            raise ValueError("Primary failure is not in the issue ledger")
+        if payload.get("primary_failure_id") != failure["id"]:
+            raise ValueError("Invalid primary failure reference")
+    elif payload.get("primary_failure_id") is not None:
+        raise ValueError("Primary failure reference has no fact")
+    checks = payload["checks"]
+    if (
+        not isinstance(checks.get("final"), dict)
+        or checks["final"].get("status") not in ("not_run", "passed", "failed", "unknown")
+        or not isinstance(checks.get("validation"), dict)
+    ):
+        raise ValueError("Invalid check facts")
+    validation = checks["validation"]
+    command = validation.get("command")
+    if not isinstance(command, list) or any(not isinstance(arg, str) for arg in command):
+        raise ValueError("Invalid validation invocation")
+    code = validation.get("returncode")
+    if code is not None and type(code) is not int:
+        raise ValueError("Invalid validation return code")
+    if validation.get("status") == "passed" and (code != 0 or not command):
+        raise ValueError("Validation success contradicts its native return")
+    if validation.get("status") == "not_requested" and command:
+        raise ValueError("Requested validation cannot be marked not requested")
+    if validation.get("status") == "not_requested" and code is not None:
+        raise ValueError("Unrequested validation cannot have a native return")
+    if code == 0 and validation.get("status") == "failed":
+        raise ValueError("Validation failure contradicts its native return")
+    conflict_ids = {record["id"] for record in payload["conflicts"]}
+    proposal_ids = {record["id"] for record in payload["proposals"]}
+    steps_by_id = {step["id"]: step for step in payload["git"]["steps"]}
+    for record in [*payload["proposals"], *payload["sessions"]]:
+        references = record.get("conflict_ids", [])
+        if not isinstance(references, list) or any(ref not in conflict_ids for ref in references):
+            raise ValueError("Unknown conflict scope reference")
+        if record.get("invocation_started") and record.get("proposal_id") not in proposal_ids:
+            raise ValueError("Unknown parent proposal for model invocation")
+    for record in [*payload["conflicts"], *payload["proposals"]]:
+        if record.get("application") == "staged":
+            step = steps_by_id.get(record.get("stage_step_id"))
+            if step is None or step.get("purpose") != "stage" or step.get("returncode") != 0:
+                raise ValueError("Staged application lacks its successful stage step")
+
+
 def validate_snapshot(payload: dict[str, Any]) -> None:
-    if payload.get("schema_version") != 2:
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 2:
         raise ValueError("Unsupported audit schema")
     if not isinstance(payload.get("run_id"), str) or not payload["run_id"]:
         raise ValueError("Missing audit identity")
@@ -325,6 +532,7 @@ def validate_snapshot(payload: dict[str, Any]) -> None:
     for key in ("conflicts", "sessions", "proposals", "issues"):
         if not isinstance(payload.get(key), list):
             raise ValueError(f"Invalid audit {key}")
+    validate_records(payload)
     integration = payload["git"]["integration"]
     if integration not in ("not_started", "in_progress", "completed", "not_completed", "unknown"):
         raise ValueError("Invalid Git integration outcome")
@@ -361,6 +569,18 @@ def validate_snapshot(payload: dict[str, Any]) -> None:
             raise ValueError("Invalid evidence status")
         if entry.get("requirement", "blocking") not in ("blocking", "optional"):
             raise ValueError("Invalid evidence requirement")
+        if entry.get("role", "proof") not in ROLES or entry.get("result") not in (
+            "not_attempted",
+            "ok",
+            "truncated",
+            "redacted",
+            "unsupported",
+            "io_error",
+            "observation_error",
+            "invalid",
+            "interrupted",
+        ):
+            raise ValueError("Unknown evidence policy or capture result")
     for entry in payload["artifacts"].values():
         if (
             entry.get("requirement") == "optional"
@@ -369,6 +589,7 @@ def validate_snapshot(payload: dict[str, Any]) -> None:
         ):
             raise ValueError("A mandatory evidence role cannot be made optional")
         if "sha256" in entry:
+            _strings(entry, "id", "owner", "captured_at", "capture_id")
             digest = entry["sha256"]
             if (
                 not isinstance(digest, str)
@@ -378,30 +599,41 @@ def validate_snapshot(payload: dict[str, Any]) -> None:
                 raise ValueError("Invalid artifact hash")
             if type(entry.get("retained_bytes")) is not int or entry["retained_bytes"] < 0:
                 raise ValueError("Invalid retained evidence size")
+            if "source_bytes" in entry and (
+                type(entry["source_bytes"]) is not int or entry["source_bytes"] < 0
+            ):
+                raise ValueError("Invalid observed source size")
+            if "prefix" in entry and type(entry["prefix"]) is not bool:
+                raise ValueError("Invalid stream prefix policy")
+            if entry.get("role") == "event_stream" and (
+                entry.get("prefix") is not True
+                or type(entry.get("records")) is not int
+                or entry["records"] < 1
+            ):
+                raise ValueError("Invalid acknowledged event records")
         elif entry["status"] != "unavailable":
             raise ValueError("Retained evidence lacks its fingerprint")
-    if payload.get("audit_health") != evidence_health(
-        payload["artifacts"], payload["issues"], payload["git"]["observations"]
+    view = snapshot_view(payload)
+    if any(
+        "sha256" in entry and entry.get("owner") != artifact_owner(path, view)
+        for path, entry in payload["artifacts"].items()
     ):
+        raise ValueError("Capture ownership contradicts its admitted scope")
+    expected_health = (
+        "incomplete"
+        if missing_requirements(view, payload["artifacts"])
+        else evidence_health(
+            payload["artifacts"], payload["issues"], payload["git"]["observations"]
+        )
+    )
+    if payload.get("audit_health") != expected_health:
         raise ValueError("Evidence health disagrees with its recorded facts")
-    if not isinstance(payload.get("requirements"), list):
-        raise ValueError("Missing evidence requirements")
-    represented = {
-        requirement.get("artifact")
-        for requirement in payload["requirements"]
-        if isinstance(requirement, dict)
-    }
-    if represented - {None} != set(payload["artifacts"]):
-        raise ValueError("Evidence registry and requirements disagree")
-    for requirement in payload["requirements"]:
-        if not isinstance(requirement, dict):
-            raise ValueError("Invalid evidence requirement record")
-        if "artifact" in requirement:
-            entry = payload["artifacts"][requirement["artifact"]]
-            if requirement.get("role") != entry.get("role", "proof") or requirement.get(
-                "requirement"
-            ) != entry.get("requirement", "blocking"):
-                raise ValueError("Evidence policy disagrees with its requirement")
+    if payload.get("requirements") != requirement_records(view):
+        raise ValueError("Evidence registry and expected requirements disagree")
+    for path, role in required_artifacts(view).items():
+        entry = payload["artifacts"].get(path)
+        if entry and (entry.get("requirement") != "blocking" or entry.get("role") != role):
+            raise ValueError("An expected proof cannot weaken its policy role")
     if payload["outcome"] == "succeeded":
         required_roles = {"result_diff", "final_inventory", "git_step_stdout", "git_step_stderr"}
         if payload["request"]["operation"] == "rebase":
@@ -427,6 +659,52 @@ def validate_snapshot(payload: dict[str, Any]) -> None:
             for step in steps
         ):
             raise ValueError("Audit success lacks its native command facts")
+        positions = {
+            record["id"]: index for index, record in enumerate(payload["git"]["observations"])
+        }
+        if any(
+            step["stdout_artifact"] != f"git-steps/{index:04d}.stdout"
+            or step["stderr_artifact"] != f"git-steps/{index:04d}.stderr"
+            or positions[step["before"]] >= positions[step["after"]]
+            for index, step in enumerate(steps, 1)
+        ):
+            raise ValueError("Native evidence references are inconsistent")
+        integrations = [step for step in steps if step.get("purpose") == "integration"]
+        if not integrations or integrations[-1]["returncode"] != 0:
+            raise ValueError("Audit success lacks a successful final integration step")
+        completion = next(
+            item
+            for item in payload["git"]["observations"]
+            if item["id"] == integrations[-1]["after"]
+        )
+        if (
+            completion.get("head") != payload["git"]["result_oid"]
+            or completion.get("operation_active") is not False
+        ):
+            raise ValueError("Completion contradicts its native observation")
+        facts = payload["details"].get("final_check_facts", {})
+        if (
+            facts.get("result_oid") != payload["git"]["result_oid"]
+            or facts.get("branch") != payload["inputs"]["branch"]
+        ):
+            raise ValueError("Final checks do not identify the verified result")
+        checks = payload["checks"]["final"].get("records", [])
+        names = {record["name"] for record in checks if isinstance(record, dict)}
+        if not {
+            "HEAD",
+            "clean_checkout",
+            "unmerged_index",
+            "operation_active",
+            "branch_identity",
+            "branch_tip",
+            "target_ancestry",
+        } <= names or any(
+            not isinstance(record, dict)
+            or record.get("status") != "passed"
+            or record.get("observed") != record.get("expected")
+            for record in checks
+        ):
+            raise ValueError("Final verification lacks its individual observations")
     # JSON validation also rejects non-finite numbers and accidental SDK objects.
     json.dumps(payload, allow_nan=False)
 
@@ -441,3 +719,18 @@ class AuditView:
     def data(self) -> dict[str, Any]:
         decoded = json.loads(self.payload)
         return snapshot_view(decoded)
+
+
+@dataclass(frozen=True)
+class AuditResult:
+    """Frozen live result; publication acknowledgement is separate from core facts."""
+
+    payload: bytes
+    publication: Literal["published", "failed", "unknown"]
+    attempted_revision: int
+    published_revision: int | None
+
+    @property
+    def view(self) -> dict[str, Any]:
+        data: dict[str, Any] = json.loads(self.payload)
+        return data

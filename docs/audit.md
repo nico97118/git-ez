@@ -105,6 +105,13 @@ New runs use audit schema 2. `run.json` is the authoritative, revisioned snapsho
   that its required evidence was retained or that Git continued. Proposed,
   accepted and actually staged changes remain distinct.
 
+Proof obligations come from admitted scopes and execution facts, independently of
+the files that were successfully written. Removing a registry entry cannot remove
+an obligation. The same policy gates execution, validates snapshots and verifies
+offline reads. Inventories identify their captured children; model events carry
+ordered sequence numbers and an acknowledged record count. Native rerere reuse
+retains its staged diff before continuation, just like resolver proposals.
+
 A missing required proposal or native-step capture prevents the next Git mutation.
 A final evidence failure preserves any completed integration but fails the run.
 An intentionally bounded file prefix is distinguished from an unexpected read/write
@@ -118,6 +125,9 @@ Independent final captures are attempted even after a primary error. A failed te
 publication produces a nonzero command result and a warning that saved state may be
 older. Git is never rolled back. If initialization cannot create an owned directory,
 the CLI identifies the intended location without overwriting another run.
+When replacement may have occurred without acknowledgement, publication is shown
+as `unknown`, with the attempted and last acknowledged revisions retained in the
+live result. Finalization freezes that result and refuses later fact changes.
 
 Compacted `messages.json` and duplicate runtime/decision exports are optional when
 canonical events and facts exist. Their loss is a visible warning. Markdown rendering
@@ -131,6 +141,9 @@ A stale Markdown cache cannot override an incomplete or unreadable manifest. Mis
 changed or unsafe mandatory evidence produces an unverified view that separates the
 recorded historical result from current evidence availability. Reading an audit does
 not recapture the repository, repair it, or establish process liveness.
+Missing optional exports and unindexed raw files/tails produce warnings without
+invalidating otherwise verified mandatory evidence. Unindexed files are not read
+or promoted into the historical record.
 
 For integration commands, exit 0 requires published core success; exit 1 means an
 admitted run failed, was interrupted, or could not publish its terminal state. Exit 2

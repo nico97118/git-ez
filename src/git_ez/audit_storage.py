@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 import stat
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from uuid import uuid4
@@ -75,7 +75,37 @@ def fingerprint(path: Path, prefix: int | None = None) -> tuple[int, str]:
         return size, digest.hexdigest()
 
 
-def publish(path: Path, content: bytes | Iterable[bytes], *, replace: bool = False) -> None:
+def inventory_paths(directory: Path) -> Iterator[str]:
+    """List raw entries without following links or opening their contents."""
+
+    def walk(descriptor: int, prefix: str) -> Iterator[str]:
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                relative = prefix + entry.name
+                if entry.is_dir(follow_symlinks=False):
+                    child = os.open(
+                        entry.name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=descriptor,
+                    )
+                    try:
+                        yield from walk(child, relative + "/")
+                    finally:
+                        os.close(child)
+                else:
+                    yield relative
+
+    with directory_fd(directory) as descriptor:
+        yield from walk(descriptor, "")
+
+
+def publish(
+    path: Path,
+    content: bytes | Iterable[bytes],
+    *,
+    replace: bool = False,
+    before_replace: Callable[[], None] | None = None,
+) -> None:
     """Publish a regular file; snapshots replace atomically, captures never overwrite."""
     with directory_fd(path.parent, create=True) as parent:
         temporary = f".tmp-{uuid4().hex}"
@@ -101,6 +131,8 @@ def publish(path: Path, content: bytes | Iterable[bytes], *, replace: bool = Fal
                 else:
                     if not stat.S_ISREG(info.st_mode):
                         raise ValueError("Audit destination must be a regular file")
+                if before_replace is not None:
+                    before_replace()
                 os.replace(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent)
             else:
                 os.link(
@@ -126,6 +158,13 @@ class AuditStore:
         self.directory = directory
         self.owned = False
         self._streams: dict[str, int] = {}
+        self.replacement_started = False
+
+    def begin_publication(self) -> None:
+        self.replacement_started = False
+
+    def _replacing(self) -> None:
+        self.replacement_started = True
 
     def initialize(self) -> None:
         with directory_fd(self.directory.parent, create=True) as parent:
@@ -143,7 +182,12 @@ class AuditStore:
     ) -> None:
         if not self.owned:
             raise OSError("Audit directory is not owned by this run")
-        publish(self.path(relative), content, replace=replace)
+        publish(
+            self.path(relative),
+            content,
+            replace=replace,
+            before_replace=self._replacing if relative == "run.json" else None,
+        )
 
     def snapshot(self, value: object) -> bytes:
         content = encode_json(value)

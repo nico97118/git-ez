@@ -248,7 +248,14 @@ def run_agent(
     # Initialization may fail before HEAD is pinned; capture the current Git state then.
     head = "HEAD"
     primary_error = False
+    agent_files_created = False
     try:
+        proposal = audit.record("reviews")
+        session.update(
+            proposal_id=proposal["id"],
+            conflict_ids=proposal.get("conflict_ids", []),
+            stop_id=proposal.get("stop_id"),
+        )
         audit.create_directory(directory)
         audit.save()
         checks = WorktreeChecks(config)
@@ -311,6 +318,7 @@ def run_agent(
 
         # Deep Agents offloads history/large results without polluting the project or git add -A.
         audit.create_directory(directory / "agent-files")
+        agent_files_created = True
         backend = CompositeBackend(
             default=shell,
             routes={
@@ -344,7 +352,7 @@ def run_agent(
         if "rebase_plan" in audit.view:
             mission["rebase_base_sha"] = audit.view["rebase_plan"]["base_oid"]
             mission["replay_boundary_sha"] = audit.view["rebase_plan"]["selection_oid"]
-        session.update(mission=mission)
+        session.update(mission=mission, invocation_started=True)
         audit.export_json(directory / "mission.json", mission)
         audit.save()
         agent = create_deep_agent(
@@ -411,7 +419,7 @@ def run_agent(
             f"{folder}/messages.json",
             optional=True,
         )
-        metadata_failure = audit.attempt("session metadata", audit.save)
+        metadata_failure = audit.attempt("session metadata", audit.save, owner=session["id"])
         # This event records session execution, not the outcome of its own capture.
         # The engine publishes evidence health independently in the final manifest.
         events_failure = audit.attempt(
@@ -420,10 +428,20 @@ def run_agent(
             f"{folder}/events.jsonl",
             append=True,
         )
-        agent_files_failure = audit.attempt(
-            "agent files", lambda: audit.seal_directory(directory / "agent-files")
-        )
-        session.update(evidence_health=audit.evidence_health)
+        agent_files_failure = None
+        if agent_files_created:
+            agent_files_failure = audit.attempt(
+                "agent files",
+                lambda: audit.seal_directory(directory / "agent-files"),
+                owner=session["id"],
+            )
+        else:
+            audit.unavailable(
+                f"{folder}/agent-files",
+                "Runtime stopped before agent file storage was created",
+                optional=True,
+            )
+        session.update(evidence_health=audit.session_health(session["id"]))
         if not audit.evidence_ready and not primary_error:
             raise AuditError("Agent session audit capture failed; inspect audit errors") from (
                 capture_failure or events_failure or metadata_failure or agent_files_failure

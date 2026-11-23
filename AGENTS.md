@@ -37,6 +37,7 @@ consequence and clarify the intended change before implementing it.
 - `agent.py`, `agent_runtime.py`, `llm.py`: resolver contract, agent runtime, providers.
 - `audit.py`: run ownership, evidence gates and finalization.
 - `audit_state.py`: audit state, schema validation and immutable views.
+- `audit_policy.py`, `audit_safety.py`: expected-proof policy and shared credential filtering.
 - `audit_storage.py`, `audit_capture.py`: safe publication, streams and read-only evidence.
 - `audit_reader.py`, `audit_report.py`: read-time verification and pure derived reports.
 - `probe.py`: provider connectivity diagnostics.

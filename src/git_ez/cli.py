@@ -241,30 +241,38 @@ def main(argv: list[str] | None = None) -> int:
             rerere_autoupdate=args.rerere_autoupdate,
             interactive=args.interactive,
         )
-        print(f"Run: {audit.directory.name}")
+        from .audit_report import safe_text
+
+        print(f"Run: {safe_text(audit.directory.name)}")
         print(f"Status: {audit.view['status']}")
-        print(f"Publication: {'published' if audit.published else 'not published'}")
+        publication = audit.terminal_result.publication if audit.terminal_result else "failed"
+        print(f"Publication: {'not published' if publication == 'failed' else publication}")
         if audit.owned:
-            print(f"Report: {audit.directory / 'report.md'}")
+            print(f"Report: {safe_text(str(audit.directory / 'report.md'))}")
         else:
-            print(f"Intended audit directory (not created by this run): {audit.directory}")
-        print(f"Branch: {audit.view['branch']}")
+            print(
+                "Intended audit directory (not created by this run): "
+                f"{safe_text(str(audit.directory))}"
+            )
+        print(f"Branch: {safe_text(audit.view['branch'])}")
         print(f"Operation: {audit.view['operation']}")
         print(f"Integrated: {audit.view['integrated']}")
+        print(f"Git integration: {audit.view['integration']}")
+        print(f"Final checks: {audit.view['final_checks']}")
+        print(f"Audit evidence: {audit.view['audit_health']}")
         if audit.view.get("error"):
-            print(f"Error: {audit.view['error']}", file=sys.stderr)
+            print(f"Error: {safe_text(audit.view['error'])}", file=sys.stderr)
         for error in audit.audit_errors:
-            print(f"Audit error ({error['phase']}): {error['message']}", file=sys.stderr)
+            print(safe_text(f"Audit error ({error['phase']}): {error['message']}"), file=sys.stderr)
         for warning in audit.presentation_errors:
-            print(f"Warning: {warning}", file=sys.stderr)
-        report_evidence = audit.evidence.get("report.md")
-        if report_evidence is not None and report_evidence["status"] != "available":
-            print(
-                f"Report unavailable or incomplete; inspect audit directory: {audit.directory}",
-                file=sys.stderr,
-            )
+            print(f"Warning: {safe_text(warning)}", file=sys.stderr)
         if not audit.published:
-            print("Terminal audit was not published; saved state may be older", file=sys.stderr)
+            message = (
+                "Terminal audit publication is unconfirmed; inspect the saved revision"
+                if publication == "unknown"
+                else "Terminal audit was not published; saved state may be older"
+            )
+            print(message, file=sys.stderr)
         return 0 if audit.view["status"] == "succeeded" and audit.published else 1
     except (EzError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"git-ez: {exc}", file=sys.stderr)

@@ -41,7 +41,11 @@ class Git:
         self.path = path
 
     def run(
-        self, *args: str, check: bool = True, sequence_editor: str | None = None
+        self,
+        *args: str,
+        check: bool = True,
+        sequence_editor: str | None = None,
+        inherited_fds: tuple[int, ...] = (),
     ) -> subprocess.CompletedProcess[bytes]:
         environment = git_environment()
         if sequence_editor is not None:
@@ -58,6 +62,7 @@ class Git:
             env=environment,
             capture_output=True,
             check=False,
+            pass_fds=inherited_fds,
         )
         if check and result.returncode:
             message = result.stderr.decode("utf-8", errors="replace").strip()
@@ -107,18 +112,23 @@ class Git:
             raise EzError("Conflict file exceeds configured size limit")
         return self.run("cat-file", "blob", stage.oid).stdout
 
+    def _has_marker(self, name: str) -> bool:
+        path = Path(self.text("rev-parse", "--path-format=absolute", "--git-path", name))
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+        return True
+
     def rebase_active(self) -> bool:
-        return any(
-            Path(self.text("rev-parse", "--path-format=absolute", "--git-path", name)).exists()
-            for name in ("rebase-merge", "rebase-apply")
-        )
+        return any(self._has_marker(name) for name in ("rebase-merge", "rebase-apply"))
 
     def commit_oid(self, revision: str) -> str:
         return self.text("rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}")
 
     def operation_active(self) -> bool:
         return any(
-            Path(self.text("rev-parse", "--path-format=absolute", "--git-path", name)).exists()
+            self._has_marker(name)
             for name in (
                 "rebase-merge",
                 "rebase-apply",

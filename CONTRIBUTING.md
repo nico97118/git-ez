@@ -161,6 +161,9 @@ and recorded audit evidence. Controlled fault injection covers input-reference r
 audit write failures, and provider errors, including error redaction.
 Audit regressions cover private no-follow storage, atomic replacement, capture identity,
 required/optional evidence, stale reports, and read-only schema-2 verification.
+Contract tests also cover expected proofs omitted from the registry, contradictory
+facts, immutable terminal results, lost publication acknowledgements, independent
+rebase captures, rerere staging evidence, and native-sequence credential filtering.
 Finalization tests combine primary failures or interruption with secondary errors
 in error callbacks, session messages/events, interactive proposal capture, validation output, and
 final report/manifest writes. They verify error precedence, evidence availability,

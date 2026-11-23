@@ -16,9 +16,10 @@ from unittest.mock import patch
 
 import pytest
 
-from git_ez.audit import Audit, redact_chunks
+from git_ez.audit import Audit
 from git_ez.audit_reader import load_audit
 from git_ez.audit_report import render_markdown
+from git_ez.audit_safety import redact_chunks
 from git_ez.audit_state import now, validate_snapshot
 from git_ez.audit_storage import AuditStore, publish, read_regular
 from git_ez.cli import main
@@ -82,6 +83,80 @@ def test_final_checks_distinguish_rejected_invariant_from_unavailable_observatio
     audit.checked(error)
     assert audit.view["final_checks"] == expected
     assert audit.view["final_check_facts"]["status"] == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "action",
+    [
+        "checked",
+        "completed",
+        "result",
+        "expect",
+        "unavailable",
+        "protect",
+        "write",
+        "append_event",
+        "create_directory",
+        "register_external",
+        "capture_error",
+    ],
+)
+def test_terminal_result_rejects_new_facts_and_remains_frozen(audit, action):
+    audit.set_status("failed", EzError("Stopped fixture"))
+    audit.finalize()
+    result = audit.terminal_result
+    assert result is not None
+    before = audit.view
+    operations = {
+        "checked": lambda: audit.checked(EzError("Late failure")),
+        "completed": lambda: audit.completed("new result"),
+        "result": lambda: audit.result("new result"),
+        "expect": lambda: audit.expect("late", "proof"),
+        "unavailable": lambda: audit.unavailable("late", "late"),
+        "protect": lambda: audit.protect("late"),
+        "write": lambda: audit.write("late", b"late"),
+        "append_event": lambda: audit.append_event("late", {"event": "late"}),
+        "create_directory": lambda: audit.create_directory(audit.directory / "late"),
+        "register_external": lambda: audit.register_external("late"),
+        "capture_error": lambda: audit.capture_error("late", OSError(), None),
+    }
+    with pytest.raises(ValueError):
+        operations[action]()
+    assert audit.view == before
+    assert audit.terminal_result is result
+    result.view["status"] = "succeeded"
+    assert audit.view == before
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "secrets, content, expected",
+    [
+        ((b"",), b"ordinary", b"ordinary"),
+        ((b"redacted",), b"<redacted> redacted", b"<redacted> <redacted>"),
+    ],
+)
+def test_stream_filter_handles_empty_secrets_and_existing_placeholders(secrets, content, expected):
+    assert b"".join(redact_chunks((bytes([value]) for value in content), secrets)) == expected
+
+
+@pytest.mark.unit
+def test_invalid_scope_update_cannot_poison_finalization(audit):
+    record = audit.add_record(
+        "sessions",
+        {
+            "round": 1,
+            "status": "running",
+            "artifacts": "sessions/1",
+        },
+    )
+    with pytest.raises(ValueError):
+        record.update(artifacts=[])
+    assert record["artifacts"] == "sessions/1"
+    audit.set_status("failed", EzError("Stopped before invocation"))
+    audit.finalize()
+    assert audit.published
 
 
 @pytest.mark.unit
@@ -185,6 +260,8 @@ def test_concurrent_callback_records_are_complete_and_keep_distinct_identities(a
     assert len(records) == 40
     assert {record["run_id"] for record in records} == {audit.directory.name}
     assert {record["callback_run_id"] for record in records} == {f"sdk-{i}" for i in range(40)}
+    assert [record["sequence"] for record in records] == list(range(1, 41))
+    assert audit.evidence[artifact]["records"] == 40
     assert audit.has_artifact(artifact)
 
 
@@ -297,7 +374,7 @@ def test_truncated_conflict_proposal_cannot_satisfy_evidence_gate(audit):
 @pytest.mark.unit
 def test_successful_staging_cannot_establish_native_integration_completion(audit):
     observation = {"id": "observation", "head": "result", "errors": [], "operation_active": False}
-    with patch("git_ez.audit.observe", return_value=observation):
+    with patch("git_ez.audit.observe", side_effect=[observation, dict(observation, id="after")]):
         index = audit.begin_step(SimpleNamespace(), ("add", "-A", "--", "."))
         assert audit.returned(SimpleNamespace(), index, 0)
     assert not audit.view["integrated"]
@@ -441,7 +518,10 @@ def test_reader_rejects_success_without_consistent_facts(repo, damage):
     if damage == "native_facts":
         payload["git"]["steps"] = []
     else:
-        payload["requirements"][-1]["requirement"] = "optional"
+        requirement = next(
+            item for item in payload["requirements"] if item.get("artifact") == "result.diff"
+        )
+        requirement["requirement"] = "optional"
     (audit.directory / "run.json").write_text(json.dumps(payload))
     with pytest.raises(EzError, match="Cannot verify audit manifest"):
         load_audit(audit.directory)

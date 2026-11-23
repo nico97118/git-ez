@@ -684,6 +684,8 @@ def test_audit_distinguishes_deleted_and_unavailable_paths_without_following_lin
             "worktree": str(repo.root),
             "provider": "test",
             "model": "test",
+            "configuration": {},
+            "prompt": "Inspect captured files",
         },
     )
     inspection.initialize()
@@ -971,7 +973,7 @@ def test_concurrent_control_change_after_resolution_blocks_git_continuation(repo
 
 def test_branch_ref_change_during_final_verification_is_not_reported_as_success(repo, mocker):
     engine = Engine(repo.root, repo.config, repo.resolver)
-    check = engine._check_repository
+    branch_oid = engine.git.branch_oid
     record = engine._record_result
     recorded = []
 
@@ -979,14 +981,13 @@ def test_branch_ref_change_during_final_verification_is_not_reported_as_success(
         record(audit)
         recorded.append(audit.view["result_oid"])
 
-    def concurrent_update():
-        branch = check()
+    def concurrent_update(branch):
         if recorded:
             repo.git.run("update-ref", "refs/heads/feature", repo.source_oid)
-        return branch
+        return branch_oid(branch)
 
     mocker.patch.object(engine, "_record_result", side_effect=record_result)
-    mocker.patch.object(engine, "_check_repository", side_effect=concurrent_update)
+    mocker.patch.object(engine.git, "branch_oid", side_effect=concurrent_update)
     audit = engine.run("main")
     assert audit.view["status"] == "failed"
     assert audit.view["integrated"]
@@ -1003,14 +1004,14 @@ def test_unreadable_worktree_conflict_is_refused_before_sending_it_to_the_resolv
     engine = Engine(repo.root, repo.config, repo.resolver)
     snapshot = engine.snapshot
 
-    def external_edit(git, audit, name, versions):
+    def external_edit(git, audit, name, versions, stop_id=None):
         path = git.path / name
         if damage == "oversized":
             with path.open("wb") as stream:
                 stream.truncate(10_000_001)
         else:
             path.write_bytes(b"invalid \xff\n")
-        return snapshot(git, audit, name, versions)
+        return snapshot(git, audit, name, versions, stop_id)
 
     mocker.patch.object(engine, "snapshot", side_effect=external_edit)
     audit = engine.run("main")
@@ -2510,8 +2511,6 @@ def test_interactive_failed_revision_links_latest_session(
         review = audit.view["reviews"][-1]
         directory = audit.directory / "sessions" / f"{number:04d}"
         audit.create_directory(directory)
-        audit.write_json(f"sessions/{number:04d}/messages.json", [f"attempt {number}"])
-        audit.write_json(f"sessions/{number:04d}/files.json", {"attempt": number})
         audit.add_record(
             "sessions",
             {
@@ -2524,6 +2523,8 @@ def test_interactive_failed_revision_links_latest_session(
                 "confidence": 0.95,
             },
         )
+        audit.write_json(f"sessions/{number:04d}/messages.json", [f"attempt {number}"])
+        audit.capture_worktree(git, directory, repo.config.max_file_bytes, paths)
         if review["round"] == failing_round:
             indices.append(git.run("ls-files", "--stage", "-z").stdout)
             heads.append(git.text("rev-parse", "HEAD"))

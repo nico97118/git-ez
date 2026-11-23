@@ -7,7 +7,9 @@ import difflib
 import hashlib
 import json
 import subprocess
+import tempfile
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
@@ -157,9 +159,12 @@ class Engine:
                 )
                 raise
             finally:
+                audit.begin_finalization()
                 result_artifacts = ["result.diff"]
                 if operation == "rebase":
                     result_artifacts.append("range-diff.txt")
+                    if "rebase_sequence" in audit.view:
+                        result_artifacts.append("rebase-commits.log")
                 if audit.view["integrated"] and any(
                     not audit.has_artifact(path) for path in result_artifacts
                 ):
@@ -408,16 +413,34 @@ class Engine:
         *,
         sequence_editor: str | None = None,
         on_success: Callable[[str], None] | None = None,
+        expected_stop: Callable[[], bool] | None = None,
+        inherited_fds: tuple[int, ...] = (),
     ) -> subprocess.CompletedProcess[bytes]:
         index = audit.begin_step(git, command)
         try:
-            result = git.run(*command, check=False, sequence_editor=sequence_editor)
+            result = git.run(
+                *command, check=False, sequence_editor=sequence_editor, inherited_fds=inherited_fds
+            )
         except BaseException as exc:
             audit.step_unknown(index, exc)
             raise
         observation_ok = audit.returned(git, index, result.returncode)
         if result.returncode == 0 and on_success is not None:
             on_success(audit.step_id(index))
+        native_failure = None
+        stop_observation_error = None
+        if result.returncode and observation_ok:
+            try:
+                stopped_for_conflict = expected_stop is not None and expected_stop()
+            except Exception as exc:
+                audit.capture_error("native stop observation", exc, None)
+                stop_observation_error = exc
+            else:
+                if not stopped_for_conflict:
+                    native_failure = EzError(
+                        f"Native Git command failed with code {result.returncode}; "
+                        "inspect step output"
+                    )
         errors = []
         for channel, content in (("stdout", result.stdout), ("stderr", result.stderr)):
             artifact = f"git-steps/{index + 1:04d}.{channel}"
@@ -429,12 +452,19 @@ class Engine:
                 )
             )
         audit.trace(command, result.stdout + result.stderr)
-        audit.save()
+        checkpoint_error = audit.attempt("Git step checkpoint", audit.save)
+        if native_failure is not None and (
+            checkpoint_error is not None or any(error is not None for error in errors)
+        ):
+            audit.set_status("failed", native_failure, phase="integration")
+            raise native_failure
+        if checkpoint_error is not None:
+            raise checkpoint_error
         if not observation_ok:
             raise AuditError(
                 "Cannot observe Git state after native command; completion is uncertain"
             )
-        if any(error is not None for error in errors):
+        if any(error is not None for error in errors) or stop_observation_error is not None:
             raise AuditError("Native Git output evidence could not be retained")
         return result
 
@@ -460,21 +490,48 @@ class Engine:
         auto_resolved = False
 
         def step(
-            *args: str, sequence_editor: str | None = None
+            *args: str, sequence_editor: str | None = None, inherited_fds: tuple[int, ...] = ()
         ) -> subprocess.CompletedProcess[bytes]:
             nonlocal auto_resolved
             previous_tree = git.run(
                 "rev-parse", "--verify", "AUTO_MERGE^{tree}", check=False
             ).stdout
+            auto_resolved = False
             command = (*rerere_config, *args)
-            result = self._step(git, audit, command, sequence_editor=sequence_editor)
-            conflict_tree = git.run(
-                "rev-parse", "--verify", "AUTO_MERGE^{tree}", check=False
-            ).stdout
-            # A new conflict tree distinguishes rerere from a failing hook/commit on
-            # an already resolved stop. Never retry a rejected hook implicitly.
-            auto_resolved = rerere and bool(conflict_tree) and conflict_tree != previous_tree
-            return result
+
+            def expected_stop() -> bool:
+                nonlocal auto_resolved
+                if (
+                    operation == "rebase"
+                    and sequence_mode
+                    and redactions is not None
+                    and not redactions.closed
+                ):
+                    redactions.seek(0)
+                    try:
+                        helper_result = json.load(redactions)
+                    except (OSError, ValueError):
+                        helper_result = None
+                    if isinstance(helper_result, dict) and helper_result.get("phase") == "failed":
+                        audit.set_status(
+                            "failed",
+                            AuditError("Native sequence evidence capture failed"),
+                            phase="sequence_capture",
+                        )
+                conflict_tree = git.run(
+                    "rev-parse", "--verify", "AUTO_MERGE^{tree}", check=False
+                ).stdout
+                auto_resolved = rerere and bool(conflict_tree) and conflict_tree != previous_tree
+                return bool(git.conflicts()) or (auto_resolved and git.operation_active())
+
+            return self._step(
+                git,
+                audit,
+                command,
+                sequence_editor=sequence_editor,
+                expected_stop=expected_stop if args[0] in ("rebase", "merge", "-c") else None,
+                inherited_fds=inherited_fds,
+            )
 
         if (
             self._check_repository() != audit.view["branch"]
@@ -502,29 +559,41 @@ class Engine:
                 sequence_evidence = {
                     "artifact": sequence.name,
                     "digest_artifact": sequence.name + ".sha256",
+                    "metadata_artifact": sequence.name + ".capture.json",
                     "status": "pending",
                     "limit_bytes": self.config.max_file_bytes,
                 }
                 audit.annotate(rebase_sequence=sequence_evidence)
                 audit.save()
-                sequence_editor = editor_command(sequence, self.config.max_file_bytes)
                 # Prevent a configured multiline instruction format from adding
                 # instructions to the internally generated interactive sequence.
                 prefix = ("-c", "rebase.instructionFormat=%s")
             try:
-                result = step(
-                    *prefix,
-                    "rebase",
-                    "--merge",
-                    "--no-autostash",
-                    "--no-update-refs",
-                    "--no-rebase-merges",
-                    *flags,
-                    *rebase_options.flags(),
-                    *commit_options.flags(),
-                    plan["selection_oid"],
-                    sequence_editor=sequence_editor,
-                )
+                # Secrets travel only in an inherited, unlinked descriptor. They are
+                # never command arguments, environment values, or audit artifacts.
+                with tempfile.TemporaryFile() if sequence_mode else nullcontext(None) as redactions:
+                    if redactions is not None:
+                        redactions.write(json.dumps([self.config.resolved_api_key()]).encode())
+                        redactions.seek(0)
+                        sequence_editor = editor_command(
+                            audit.directory / "rebase-todo.txt",
+                            self.config.max_file_bytes,
+                            redactions.fileno(),
+                        )
+                    result = step(
+                        *prefix,
+                        "rebase",
+                        "--merge",
+                        "--no-autostash",
+                        "--no-update-refs",
+                        "--no-rebase-merges",
+                        *flags,
+                        *rebase_options.flags(),
+                        *commit_options.flags(),
+                        plan["selection_oid"],
+                        sequence_editor=sequence_editor,
+                        inherited_fds=(redactions.fileno(),) if redactions is not None else (),
+                    )
             finally:
                 if sequence_mode:
                     evidence = audit.view["rebase_sequence"]
@@ -536,19 +605,36 @@ class Engine:
                             audit.directory / evidence["digest_artifact"], 64
                         ).decode("ascii")
                         if hashlib.sha256(content).hexdigest() != digest:
-                            raise ValueError("Captured sequence changed before Git returned")
-                    except (OSError, ValueError) as exc:
-                        evidence.update(status="unavailable", error=str(exc))
+                            raise AuditError("Captured sequence changed before Git returned")
+                    except (EzError, OSError, ValueError) as exc:
+                        evidence.update(status="unavailable", error=safe_error(exc))
                     else:
+                        capture_metadata = json.loads(
+                            read_evidence(audit.directory / evidence["metadata_artifact"])
+                        )
                         evidence.update(
+                            redacted=capture_metadata["redacted"],
+                            source_sha256=capture_metadata["source_sha256"],
                             status="captured",
                             sha256=digest,
                             size_bytes=len(content),
                         )
                     audit.annotate(rebase_sequence=evidence)
-                    for artifact in (evidence["artifact"], evidence["digest_artifact"]):
+                    for artifact in (
+                        evidence["artifact"],
+                        evidence["digest_artifact"],
+                        evidence["metadata_artifact"],
+                    ):
                         if evidence["status"] == "captured":
                             audit.register_external(artifact)
+                    if evidence["status"] == "captured":
+                        audit.source_size(evidence["artifact"], capture_metadata["source_bytes"])
+                        if capture_metadata["redacted"]:
+                            audit.limit_evidence(
+                                evidence["artifact"],
+                                "redacted",
+                                "Known credentials removed from native instructions",
+                            )
                     audit.save()
         else:
             # Let Git fast-forward or create a merge commit, as git merge normally would.
@@ -563,13 +649,26 @@ class Engine:
             if not stages:
                 if not auto_resolved or not git.operation_active():
                     raise EzError("Git stopped without resolvable conflicts; see integration.log")
+                number = len(audit.view.get("native_resolutions", [])) + 1
+                staged_artifact = f"native-resolutions/{number:04d}/staged.diff"
                 audit.add_record(
                     "native_resolutions",
                     {
+                        "staged_artifact": staged_artifact,
+                        "stop_id": uuid4().hex,
+                        "stage_step_id": audit.step_id(-1),
+                        "application": "staged",
                         "mechanism": "rerere",
                         "head": git.text("rev-parse", "HEAD"),
                         "rationale": "Git reused and staged a recorded conflict resolution.",
                     },
+                )
+                audit.expect(staged_artifact, "staged_diff")
+                audit.write(
+                    staged_artifact,
+                    git.run(
+                        "diff", "--cached", "--no-ext-diff", "--no-textconv", "--binary", "HEAD"
+                    ).stdout,
                 )
                 audit.save()
             else:
@@ -712,6 +811,18 @@ class Engine:
             errors.append(
                 audit.attempt("result comparison", partial(self._record_rebase_result, audit))
             )
+        if (
+            audit.operation == "rebase"
+            and "rebase_sequence" in audit.view
+            and not audit.has_artifact("rebase-commits.log")
+        ):
+            errors.append(
+                audit.attempt(
+                    "result commit log",
+                    partial(self._record_commit_log, audit),
+                    "rebase-commits.log",
+                )
+            )
         audit.save()
         if any(error is not None for error in errors):
             raise AuditError("Integration result evidence could not be retained") from next(
@@ -753,55 +864,115 @@ class Engine:
                 "command": ["git", *args],
             }
             audit.annotate(range_diff=comparison)
-            if "rebase_sequence" in audit.view:
-                contents = git.run(
-                    "log",
-                    "--reverse",
-                    "--no-color",
-                    "--no-decorate",
-                    "--no-show-signature",
-                    "--no-notes",
-                    "--format=raw",
-                    f"{base_oid}..{result_oid}",
-                ).stdout
-                artifact = "rebase-commits.log"
-                audit.write(artifact, contents[: self.config.max_file_bytes])
-                result_commits = {
-                    "artifact": artifact,
-                    "truncated": len(contents) > self.config.max_file_bytes,
-                    "limit_bytes": self.config.max_file_bytes,
-                }
-                audit.annotate(result_commits=result_commits)
+        audit.save()
+
+    def _record_commit_log(self, audit: Audit) -> None:
+        plan = audit.view["rebase_plan"]
+        result_oid = audit.view["result_oid"]
+        contents = self.git.run(
+            "log",
+            "--reverse",
+            "--no-color",
+            "--no-decorate",
+            "--no-show-signature",
+            "--no-notes",
+            "--format=raw",
+            f"{plan['base_oid']}..{result_oid}",
+        ).stdout
+        artifact = "rebase-commits.log"
+        audit.write(
+            artifact, contents, role="commit_log", retained_limit=self.config.max_file_bytes
+        )
+        audit.source_size(artifact, len(contents))
+        audit.annotate(
+            result_commits={
+                "artifact": artifact,
+                "truncated": len(contents) > self.config.max_file_bytes,
+                "limit_bytes": self.config.max_file_bytes,
+            }
+        )
         audit.save()
 
     def _verify_result(self, audit: Audit) -> None:
         git = self.git
-        if git.text("rev-parse", "HEAD") != audit.view["result_oid"]:
-            raise EzError("Validation changed HEAD")
-        if self._check_repository() != audit.view["branch"]:
-            raise EzError("Checked-out branch changed during integration")
-        if git.branch_oid(audit.view["branch"]) != audit.view["result_oid"]:
-            raise EzError("Current branch changed during integration")
-        self._verify_target(audit)
-        if git.run(
-            "merge-base",
-            "--is-ancestor",
-            audit.view.get("rebase_plan", {}).get("base_oid", audit.view["target_oid"]),
+        observation = audit.record_observation(git)
+
+        def field(name: str) -> Any:
+            error_name = "operation" if name == "operation_active" else name
+            if any(error["field"] == error_name for error in observation["errors"]):
+                raise AuditError(f"Cannot observe final repository field: {name}")
+            return observation[name]
+
+        def verify(name: str, read: Callable[[], Any], expected: Any, message: str) -> None:
+            try:
+                actual = read()
+            except BaseException as exc:
+                audit.record_final_check(name, expected, None, error=exc)
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                raise AuditError(f"Cannot observe final invariant: {name}") from exc
+            audit.record_final_check(name, expected, actual)
+            if actual != expected:
+                raise EzError(message)
+
+        verify("HEAD", lambda: field("head"), audit.view["result_oid"], "Validation changed HEAD")
+        verify(
+            "clean_checkout", lambda: field("status"), "", "Worktree is not clean after integration"
+        )
+        verify("unmerged_index", lambda: field("unmerged"), "", "Unmerged index entries remain")
+        verify(
+            "operation_active",
+            lambda: field("operation_active"),
+            False,
+            "Git integration did not complete",
+        )
+        verify(
+            "branch_identity",
+            lambda: field("branch"),
+            f"refs/heads/{audit.inputs.branch}",
+            "Checked-out branch changed during integration",
+        )
+        verify(
+            "branch_tip",
+            lambda: git.branch_oid(audit.inputs.branch),
             audit.view["result_oid"],
-            check=False,
-        ).returncode:
-            raise EzError("Integration result does not contain the pinned target or new base")
-        if (
-            audit.view["operation"] == "merge"
-            and git.run(
-                "merge-base",
-                "--is-ancestor",
-                audit.view["before_oid"],
-                audit.view["result_oid"],
-                check=False,
-            ).returncode
-        ):
-            raise EzError("Merge result does not contain the original branch")
+            "Current branch changed during integration",
+        )
+        for name in ("target", "onto"):
+            reference = audit.view.get(f"{name}_ref")
+            if reference:
+                verify(
+                    f"{name}_reference",
+                    partial(git.commit_oid, reference),
+                    audit.view[f"{name}_oid"],
+                    f"{name.capitalize()} reference changed during integration",
+                )
+        base = audit.view.get("rebase_plan", {}).get("base_oid", audit.view["target_oid"])
+        verify(
+            "target_ancestry",
+            lambda: (
+                git.run(
+                    "merge-base", "--is-ancestor", base, audit.view["result_oid"], check=False
+                ).returncode
+            ),
+            0,
+            "Integration result does not contain the pinned target or new base",
+        )
+        if audit.operation == "merge":
+            verify(
+                "original_branch_ancestry",
+                lambda: (
+                    git.run(
+                        "merge-base",
+                        "--is-ancestor",
+                        audit.inputs.before_oid,
+                        audit.view["result_oid"],
+                        check=False,
+                    ).returncode
+                ),
+                0,
+                "Merge result does not contain the original branch",
+            )
 
     def snapshot(
         self,
@@ -809,10 +980,12 @@ class Engine:
         audit: Audit,
         name: str,
         versions: dict[int, Stage],
+        stop_id: str | None = None,
     ) -> tuple[Record, Conflict]:
         number = len(audit.view["conflicts"]) + 1
         record_data: dict[str, Any] = {
             "number": number,
+            "stop_id": stop_id or uuid4().hex,
             "path": name,
             "head": git.text("rev-parse", "HEAD"),
             "replay_commit": git.run("rev-parse", "--verify", "REBASE_HEAD", check=False)
@@ -828,6 +1001,7 @@ class Engine:
         record = record_handle
         modes = {stage.mode for stage in versions.values()}
         if not modes <= {"100644", "100755"} or len(modes) != 1:
+            self._capture_unsupported_inputs(git, audit, record, versions)
             raise EzError(f"Non-regular file or mode conflict requires manual resolution: {name}")
         path = git.safe_path(name)
         contents: dict[str, str | None] = {}
@@ -838,16 +1012,25 @@ class Engine:
                 continue
             raw = git.blob(stage, 10_000_000)
             if b"\x00" in raw:
+                self._capture_unsupported_inputs(git, audit, record, versions)
                 raise EzError(f"Binary file requires manual resolution: {name}")
             try:
                 decoded = raw.decode("utf-8")
                 contents[label] = decoded
             except UnicodeDecodeError as exc:
+                self._capture_unsupported_inputs(git, audit, record, versions)
                 raise EzError(f"Non-UTF-8 file requires manual resolution: {name}") from exc
             record.artifact(label, audit.artifact(number, f"{label}.txt", decoded))
         marked = None
+        record.update(marked_present=path.exists())
         if path.exists():
             if path.stat().st_size > (10_000_000):
+                record.update(input_status="unsupported", marked_capture="size_limit")
+                audit.unavailable(
+                    f"conflicts/{number:04d}/marked.bin",
+                    "Unsupported marked input exceeds the existing capture bound",
+                    optional=True,
+                )
                 raise EzError(f"Marked file too large: {name}")
             try:
                 raw_marked = read_evidence(path, 10_000_001)
@@ -855,6 +1038,10 @@ class Engine:
                     raise EzError(f"Marked file too large: {name}")
                 marked = raw_marked.decode("utf-8")
             except UnicodeDecodeError as exc:
+                record.update(input_status="unsupported")
+                marked_artifact = f"conflicts/{number:04d}/marked.bin"
+                audit.write(marked_artifact, raw_marked, role="conflict_input")
+                record.artifact("marked", marked_artifact)
                 raise EzError(f"Non-UTF-8 working file requires manual resolution: {name}") from exc
             record.artifact("marked", audit.artifact(number, "marked.txt", marked))
         context = git.text("log", "-5", "--format=%h %s", "HEAD")
@@ -869,11 +1056,8 @@ class Engine:
             marked,
             context,
         )
-        request_artifact = audit.artifact(
-            number,
-            "request.json",
-            json.dumps(conflict.payload(), indent=2, ensure_ascii=True),
-        )
+        request_artifact = f"conflicts/{number:04d}/request.json"
+        audit.write_json(request_artifact, conflict.payload())
         record.artifact("request", request_artifact)
         audit.save()
         return record, conflict
@@ -886,7 +1070,10 @@ class Engine:
         round_number: int,
         validation: tuple[str, ...],
     ) -> None:
-        snapshots = [self.snapshot(git, audit, name, versions) for name, versions in stages.items()]
+        stop_id = uuid4().hex
+        snapshots = [
+            self.snapshot(git, audit, name, versions, stop_id) for name, versions in stages.items()
+        ]
         decision: dict[str, Any] = {}
         status = "failed"
         primary_error = False
@@ -908,6 +1095,9 @@ class Engine:
                         "artifacts": f"proposals/auto-{round_number:04d}",
                         "mode": "automatic",
                         "feedback": None,
+                        "stop_id": stop_id,
+                        "conflict_ids": [record["id"] for record, _ in snapshots],
+                        "application": "not_staged",
                     },
                 )
                 audit.save()
@@ -936,8 +1126,9 @@ class Engine:
                 for record, _ in snapshots:
                     record.update(status="applied", application="staged", stage_step_id=step_id)
                     record.artifact("staged", staged_artifact)
-                if audit.view.get("interactive"):
-                    audit.record("reviews").update(status="applied", application="staged")
+                audit.record("reviews").update(
+                    status="applied", application="staged", stage_step_id=step_id
+                )
 
             result = self._step(git, audit, ("add", "-A", "--", "."), on_success=staged)
             if result.returncode:
@@ -1058,6 +1249,9 @@ class Engine:
                 "attempt": number,
                 "feedback": feedback,
                 "status": "running",
+                "application": "not_staged",
+                "stop_id": audit.view["conflicts"][-1]["stop_id"],
+                "conflict_ids": [record["id"] for record in audit.view["conflicts"][-len(paths) :]],
                 "artifacts": f"proposals/{number:04d}",
             }
             proposal = audit.add_record("reviews", proposal_data)
@@ -1105,7 +1299,7 @@ class Engine:
                 proposal.update(
                     status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
                 )
-                proposal.update(error=str(exc) or "Interrupted by user")
+                proposal.update(error=safe_error(exc))
                 raise
             except BaseException as exc:
                 primary_error = True
@@ -1185,3 +1379,29 @@ class Engine:
             raise EzError("Validation audit capture failed; inspect audit errors") from (
                 output_error or error_output_error
             )
+
+    def _capture_unsupported_inputs(
+        self, git: Git, audit: Audit, record: Record, versions: dict[int, Stage]
+    ) -> None:
+        """Retain safe available Git blobs without authorizing their resolution."""
+        record.update(input_status="unsupported")
+        for stage_number, label in ((1, "base"), (2, "ours"), (3, "theirs")):
+            stage = versions.get(stage_number)
+            if stage is None or label in record["artifacts"]:
+                continue
+            artifact = f"conflicts/{record['number']:04d}/{label}.bin"
+
+            def capture(stage: Stage = stage, artifact: str = artifact) -> None:
+                size = int(git.text("cat-file", "-s", stage.oid))
+                if size > 10_000_000:
+                    audit.unavailable(
+                        artifact,
+                        "Unsupported input exceeds the existing capture bound",
+                        optional=True,
+                    )
+                    audit.source_size(artifact, size)
+                    return
+                audit.write(artifact, git.blob(stage, 10_000_000), role="conflict_input")
+
+            if audit.attempt("unsupported conflict input", capture, artifact) is None:
+                record.artifact(label, artifact)

@@ -83,9 +83,16 @@ def capture_worktree(
             errors.append({"command": label, "type": type(exc).__name__})
     diff_error = audit.attempt(
         "worktree diff",
-        lambda: audit.write(f"{namespace}/worktree.diff", outputs["diff"], capture_id=capture_id),
+        lambda: audit.write(
+            f"{namespace}/worktree.diff",
+            outputs["diff"],
+            capture_id=capture_id,
+            role="worktree_diff",
+        ),
         f"{namespace}/worktree.diff",
     )
+    if diff_error is None:
+        audit.source_size(f"{namespace}/worktree.diff", len(outputs["diff"]), before["id"])
     names = set(
         (outputs["changed"] + outputs["untracked"])
         .decode("utf-8", errors="surrogateescape")
@@ -135,6 +142,7 @@ def capture_worktree(
             )
             if len(blocks) > limit:
                 audit.limit_evidence(relative, "truncated", "File exceeds configured capture limit")
+            audit.source_size(relative, initial.st_size, before["id"])
             evidence = audit.evidence[relative]
             record.update(
                 state="file",

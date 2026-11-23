@@ -361,10 +361,20 @@ at its acknowledged prefix. Intentional file truncation, I/O loss, missing outpu
 and optional exports have distinct evidence records. A resolved agent session may
 have incomplete evidence and a failed run. Confidence is not independent validation.
 .PP
+Proof obligations are derived from admitted scopes and returned execution facts,
+independently of the captures present in the registry. The writer and reader use
+the same policy. Native rerere reuse requires its staged diff before continuation.
+File inventories and ordered event prefixes are verified as linked evidence.
+.PP
 Compacted conversation and duplicate metadata exports are optional when canonical
 facts/events exist. Markdown/cache failure after core publication is a presentation
 warning and does not rewrite the committed outcome. Failed terminal publication
 produces a nonzero command result and warns that saved state may be older.
+.PP
+An uncertain replacement acknowledgement is displayed as unknown publication;
+inspect the saved revision. The live terminal result is frozen. Missing optional
+exports and unindexed raw artifacts produce warnings without invalidating verified
+mandatory evidence. Unindexed files are not followed or read as historical proof.
 .PP
 show validates the manifest and required evidence read-only, without Git or model
 calls. It never trusts an old success cache over an unfinished/unreadable manifest.

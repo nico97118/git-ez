@@ -114,8 +114,8 @@ git ez merge feature --interactive
 # Run a final validation command in the target repository:
 git ez rebase main --check python -B -m pytest
 
-# Inspect a saved run:
-git ez show /path/to/project/.git/ez/runs/RUN_ID
+# Inspect the latest run:
+git ez audit show
 ```
 
 `--check` must be last: everything after it is the validation command and its
@@ -165,7 +165,7 @@ are not forwarded. See the [manual](docs/man/git-ez.1) and
 
 For each conflict handled by the LLM, the journal retains the conflict diff,
 resolution, explanation and confidence score under `ez/runs/<id>` in the
-repository's common Git directory. `git ez show` displays the saved journal;
+repository's common Git directory. `git ez audit show` displays the saved journal;
 Git provides commit history and repository diffs. Audit files may contain sensitive
 code and output. See the [audit guide](docs/audit.md) for artifacts and failure handling.
 
@@ -180,7 +180,7 @@ in memory, and durable audit files are not a complete graph history.
 For integrations, exit `0` requires published success; `1` means a failed or
 interrupted run or failed terminal publication; `2` means a configuration, CLI or
 precondition error. Probes use `0` for compatibility and `1` for failure.
-For `show`, `0` means the saved journal was readable and `2` means it could not be
+For `audit show`, `0` means the saved journal was readable and `2` means it could not be
 read. Displaying a journal does not validate a resolution.
 
 ## Documentation

@@ -16,8 +16,12 @@ git-ez \- local rebase and merge with AI-assisted conflict resolution
 .br
 .B git ez probe
 .br
-.B git ez show
-.I run-directory
+.B git ez audit list
+.br
+.B git ez audit show
+.RI [ run-id ]
+.RI [ --path " run-directory"]
+.RB [ --verbose ]
 .br
 .B git ez --version
 .SH DESCRIPTION
@@ -343,7 +347,8 @@ compatibility
 without exposing a repository or shell tools.
 .SH AUDIT AND FAILURE RECOVERY
 Audits are stored under ez/runs/<id> in the repository's common Git directory.
-Each run prints its report directory. Use git ez show with that directory.
+Each run prints its identifier and inspection command. Use git ez audit show
+with the identifier, or --path with a copied run directory.
 .PP
 On failure or interruption, local state is retained without automatic
 rollback.
@@ -365,9 +370,7 @@ New runs use journal schema 4. For every conflict handled by the LLM, the
 journal retains the conflict diff, resolution, explanation and confidence.
 Original inputs are in conflicts/NNNN/request.json; conflict.diff compares
 ours and theirs. resolution.txt and resolution.diff retain the proposal.
-run.json records whether it was applied. Each reprompt keeps a distinct attempt
-with its proposal, explanation, confidence and user feedback. All proposal diffs
-compare to the original ours. Failed attempts retain supporting agent changes. Git remains the source for commit
+run.json records whether it was applied. Git remains the source for commit
 history and repository diffs; native command archives are not retained.
 .PP
 A session can resolve multiple files with the same explanation and confidence.
@@ -378,23 +381,31 @@ before staging. A final journal publication failure returns a nonzero result
 and warns that saved state may be older; Git is never rolled back.
 .PP
 Model/tool events, agent files and optional validation output provide supporting
-diagnostics. Session diagnostic export and Markdown failures are warnings. These files
+diagnostics. Diagnostic export and Markdown failures are warnings; validation output loss
+does not change the validation result. These files
 are not a complete graph history or recovery checkpoint. Missing or unreadable
 conflict captures are reported explicitly. File reads do not follow symlinks.
 .PP
-show renders run.json read-only without Git or model calls, ignoring a stale
-report.md. It displays recorded facts without certifying files or reconstructing
+audit list shows saved runs newest first, including their checkouts. audit show
+selects the latest run or a full/unique abbreviated identifier. --path selects a
+copied run directory and is exclusive of an identifier. --verbose adds saved
+model/tool events and command outputs. Reprompts retain separate proposals,
+explanations, confidence and feedback; all conflict diffs use the original ours.
+Acceptance is distinct from application. Commands requested by the model retain
+execution directory, timing, exit code, streams and truncation when available.
+Native engine commands and repository-wide history are not archived.
+.PP
+Consultation uses the Git pager in a terminal and direct stdout for pipes and
+redirections. GIT_PAGER, core.pager, pager.ez and Git's --no-pager/--paginate
+conventions apply. Quitting the pager is normal; no second pager is opened.
+.PP
+show reads run.json and saved captures without model calls or repository
+recapture, ignoring report.md. Reading does not certify evidence or reconstruct
 history. Only schema 4 is supported; inspect older journals directly.
 .PP
 Known configured credentials are filtered. Audit files may contain sensitive
 source code and output; review before sharing. Unexpected execution exceptions
 propagate after best-effort cleanup. Resource budgets remain in effect.
-.PP
-Model/tool events record requests, responses and tool actions. Shell invocations
-retain command, execution directory, duration, exit code, available stdout/stderr
-and truncation. Scripts are single invocations, not per-subprocess traces.
-Usage metadata is retained when the provider supplies it. The process environment
-and authorization headers are not dumped.
 .SH EXIT STATUS
 .TP
 .B 0

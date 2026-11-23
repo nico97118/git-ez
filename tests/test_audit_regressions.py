@@ -50,6 +50,19 @@ def test_resolution_diff_without_final_newline_is_readable(repo):
     assert "\n+combined" in diff, repr(diff)
 
 
+@pytest.mark.parametrize(
+    "pager", ["/definitely-missing-git-ez-pager --flag", "/definitely-missing-git-ez-pager"]
+)
+def test_missing_pager_with_options_falls_back_to_stdout(monkeypatch, capsys, pager):
+    from git_ez.audit_cli import display
+
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.delenv("GIT_PAGER_IN_USE", raising=False)
+    monkeypatch.setenv("GIT_PAGER", pager)
+    display("REPORT-MUST-REMAIN-VISIBLE\n")
+    assert "REPORT-MUST-REMAIN-VISIBLE" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("exit_code", [0, 7])
 def test_command_output_does_not_fake_timeout(tmp_path, exit_code):
     import json
@@ -118,3 +131,13 @@ def test_no_newline_diffs_can_be_applied_by_git(repo, before, after):
     repo.git.run("apply", "--check", str(patch))
     repo.git.run("apply", str(patch))
     assert repo.file.read_text() == after
+
+
+def test_quitting_the_pager_does_not_replay_the_report(monkeypatch, capsys):
+    from git_ez.audit_cli import display
+
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.delenv("GIT_PAGER_IN_USE", raising=False)
+    monkeypatch.setenv("GIT_PAGER", "sh -c 'exit 0'")
+    display("REPORT-MUST-NOT-BE-REPLAYED\n")
+    assert "REPORT-MUST-NOT-BE-REPLAYED" not in capsys.readouterr().out

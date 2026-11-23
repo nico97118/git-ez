@@ -20,7 +20,7 @@ git ez probe
 git ez probe > /tmp/ai-compatibility.json
 
 # Read an existing report:
-git ez show /path/to/project/.git/ez/runs/RUN_ID
+git ez audit show
 
 git ez --version
 ```

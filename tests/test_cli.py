@@ -45,7 +45,7 @@ def test_show_rejects_report_without_authoritative_manifest(tmp_path, capsys):
     content = "# Integration\nConflict: file.txt\nDecision: combine\nRationale: preserve intent\n"
     report.write_text(content)
     before = report.stat().st_mtime_ns
-    assert main(["show", str(tmp_path)]) == 2
+    assert main(["audit", "show", "--path", str(tmp_path)]) == 2
     output = capsys.readouterr()
     assert not output.out
     assert "Cannot read resolution journal" in output.err
@@ -55,7 +55,7 @@ def test_show_rejects_report_without_authoritative_manifest(tmp_path, capsys):
 
 @pytest.mark.unit
 def test_show_missing_report_returns_error(tmp_path, capsys):
-    assert main(["show", str(tmp_path)]) == 2
+    assert main(["audit", "show", "--path", str(tmp_path)]) == 2
     assert "git-ez:" in capsys.readouterr().err
 
 
@@ -220,7 +220,7 @@ def test_failed_cli_run_returns_one_and_a_readable_audit(cli_repo, monkeypatch, 
     assert cli_repo.branch_oid("feature") != before
     audit = next((cli_repo.path / ".git/ez/runs").iterdir())
     assert "Validation failed with code 7" in (audit / "report.md").read_text()
-    assert main(["show", str(audit)]) == 0
+    assert main(["audit", "show", "--path", str(audit)]) == 0
 
 
 @pytest.mark.unit
@@ -355,7 +355,7 @@ def test_signing_before_attached_check_is_still_an_integration_option():
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["show", "run", "--check", "command"],
+        ["audit", "show", "run", "--check", "command"],
         ["probe", "--check=command"],
     ],
 )

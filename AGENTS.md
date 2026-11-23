@@ -38,6 +38,7 @@ consequence and clarify the intended change before implementing it.
 - `audit.py`: conflict decision journal and finalization.
 - `audit_safety.py`, `audit_storage.py`: credential filtering and private atomic files.
 - `audit_report.py`: readable reports derived from saved decisions.
+- `audit_cli.py`: run discovery and Git-style paged consultation.
 - `probe.py`: provider connectivity diagnostics.
 - `tests/`: pytest tests, temporary repositories, deterministic resolvers, and local
   HTTP/TLS fixtures.

@@ -166,8 +166,13 @@ def parser() -> argparse.ArgumentParser:
             nargs=argparse.REMAINDER,
             help="Final validation executable and arguments; must be the last option",
         )
-    show = commands.add_parser("show", help="Display a saved integration report")
-    show.add_argument("run_directory", type=Path, help="Audit directory printed after execution")
+    audit = commands.add_parser("audit", help="Inspect local resolution journals")
+    audit_commands = audit.add_subparsers(dest="audit_command")
+    audit_commands.add_parser("list", help="List saved runs, newest first")
+    show = audit_commands.add_parser("show", help="Display the latest or selected run")
+    show.add_argument("run_id", nargs="?", help="Run identifier or unique prefix")
+    show.add_argument("--path", type=Path, help="Read a copied run directory")
+    show.add_argument("--verbose", action="store_true", help="Include model/tool events and output")
     commands.add_parser(
         "probe",
         help="Test model/tool compatibility without touching Git",
@@ -182,10 +187,21 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        if args.command == "show":
-            from .audit import load_report
+        if args.command == "audit":
+            from .audit_cli import consult, display
 
-            print(load_report(args.run_directory))
+            if args.audit_command is None:
+                parser().parse_args(["audit", "--help"])
+            if getattr(args, "path", None) is not None and args.run_id is not None:
+                raise EzError("--path and a run identifier are mutually exclusive")
+            display(
+                consult(
+                    args.audit_command,
+                    getattr(args, "run_id", None),
+                    getattr(args, "path", None),
+                    getattr(args, "verbose", False),
+                )
+            )
             return 0
         if args.command == "probe":
             from .probe import probe
@@ -239,7 +255,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         from .audit_report import safe_text
 
-        print(f"Run: {safe_text(audit.directory.name)}")
+        print(f"Audit: {safe_text(audit.directory.name)}")
+        print(f"Inspect: git ez audit show {safe_text(audit.directory.name)}")
         print(f"Status: {audit.view['status']}")
         if audit.owned:
             print(f"Report: {safe_text(str(audit.directory / 'report.md'))}")

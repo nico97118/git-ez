@@ -111,11 +111,11 @@ def main() -> None:
         report = root / "audit"
         report.mkdir()
         (report / "report.md").write_text("# Installed wheel audit\n", encoding="utf-8")
-        error = fails(2, "git", "ez", "show", str(report))
+        error = fails(2, "git", "ez", "audit", "show", "--path", str(report))
         if "Cannot read resolution journal" not in error.stderr:
             raise RuntimeError("Installed extension did not explain the missing manifest")
         (report / "run.json").write_text('{"schema_version":1,"status":"succeeded"}')
-        error = fails(2, "git", "ez", "show", str(report))
+        error = fails(2, "git", "ez", "audit", "show", "--path", str(report))
         if "Cannot read resolution journal" not in error.stderr:
             raise RuntimeError("Installed extension accepted an unsupported audit schema")
         for operation in ("merge", "rebase"):
@@ -150,7 +150,9 @@ def main() -> None:
             if git("status", "--porcelain"):
                 raise RuntimeError(f"Installed {operation} left a dirty checkout")
             audits = list((repository / ".git/ez/runs").iterdir())
-            if len(audits) != 1 or "resolution journal" not in git("ez", "show", str(audits[0])):
+            if len(audits) != 1 or "resolution journal" not in git(
+                "ez", "audit", "show", "--path", str(audits[0])
+            ):
                 raise RuntimeError(f"Installed {operation} did not preserve a readable audit")
             if operation == "rebase":
                 if git("rev-list", "--count", "main..HEAD").strip() != "1":
@@ -168,10 +170,12 @@ def main() -> None:
                 raise RuntimeError("Installed extension did not publish schema 4")
             cache = audits[0] / "report.md"
             cache.write_text("# Stale cached report: failed\n")
-            if "Recorded status: **succeeded**" not in run("git", "ez", "show", str(audits[0])):
+            if "Recorded status: **succeeded**" not in run(
+                "git", "ez", "audit", "show", "--path", str(audits[0])
+            ):
                 raise RuntimeError("Installed reader trusted a stale report")
             cache.unlink()
-            run("git", "ez", "show", str(audits[0]))
+            run("git", "ez", "audit", "show", "--path", str(audits[0]))
             if cache.exists() or manifest_path.read_bytes() != manifest:
                 raise RuntimeError("Installed reader modified its input")
             if (audits[0] / "result.diff").exists():
@@ -192,7 +196,9 @@ def main() -> None:
             failed = next(
                 path for path in (repository / ".git/ez/runs").iterdir() if path != audits[0]
             )
-            if "Recorded status: **failed**" not in run("git", "ez", "show", str(failed)):
+            if "Recorded status: **failed**" not in run(
+                "git", "ez", "audit", "show", "--path", str(failed)
+            ):
                 raise RuntimeError(
                     "Installed reader could not verify a faithfully recorded failure"
                 )
@@ -202,7 +208,7 @@ def main() -> None:
             failed.rename(archived_failure)
             shutil.rmtree(repository)
             for archive in (archived_success, archived_failure):
-                run("git", "ez", "show", str(archive))
+                run("git", "ez", "audit", "show", "--path", str(archive))
             if (archived_success / "run.json").read_bytes() != manifest:
                 raise RuntimeError("Relocated audit reading modified its historical manifest")
         print(

@@ -159,12 +159,10 @@ and independent linked worktrees, without invoking an external model.
 Critical tests assert committed file contents, reference ancestry, retained local state,
 and recorded audit evidence. Controlled fault injection covers input-reference races,
 audit write failures, and provider errors, including error redaction.
-Finalization tests combine primary failures or interruption with secondary errors
-in error callbacks, session messages/events, interactive proposal capture, validation output, and
-final report/manifest writes. They verify error precedence, evidence availability,
-CLI fallback diagnostics, branch identity, and whether Git remains active. Scripted
-model replies validate orchestration and protocol behavior, not the quality of a real
-model's decisions or every possible concurrent filesystem change.
+Audit regressions cover private no-follow storage, atomic replacement,
+per-conflict diffs, resolutions, explanations and confidence, stale reports and
+read-only journal display. Native Git state and behavior are checked directly in
+temporary repositories; the audit does not duplicate Git history.
 
 The pytest suite covers real temporary Git repositories, SDKs, TLS, and the agent graph.
 Installed-command tests use a deterministic local OpenAI-compatible HTTP server.

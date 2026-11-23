@@ -62,10 +62,10 @@ def main() -> None:
             'from greeting import greet; assert greet(" Ada ") == "Bonjour, Ada !"',
         ),
     )
-    print(f"Local {args.operation}: {audit.manifest['status']}")
+    print(f"Local {args.operation}: {audit.view['status']}")
     print(f"Report: {audit.directory / 'report.md'}")
-    if audit.manifest["status"] != "succeeded":
-        raise SystemExit(audit.manifest.get("error", "Demo failed"))
+    if audit.view["status"] != "succeeded" or not audit.published:
+        raise SystemExit(audit.view.get("error", "Demo failed"))
     print(f"Demo repository (kept for inspection): {directory}")
 
 

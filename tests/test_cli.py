@@ -40,20 +40,22 @@ def test_only_supported_git_commands_are_accepted(args):
 
 
 @pytest.mark.unit
-def test_show_displays_report_without_modifying_audit(tmp_path, capsys):
+def test_show_rejects_report_without_authoritative_manifest(tmp_path, capsys):
     report = tmp_path / "report.md"
     content = "# Integration\nConflict: file.txt\nDecision: combine\nRationale: preserve intent\n"
     report.write_text(content)
     before = report.stat().st_mtime_ns
-    assert main(["show", str(tmp_path)]) == 0
-    assert capsys.readouterr().out.strip() == content.strip()
+    assert main(["audit", "show", "--path", str(tmp_path)]) == 2
+    output = capsys.readouterr()
+    assert not output.out
+    assert "Cannot read resolution journal" in output.err
     assert report.stat().st_mtime_ns == before
     assert list(tmp_path.iterdir()) == [report]
 
 
 @pytest.mark.unit
 def test_show_missing_report_returns_error(tmp_path, capsys):
-    assert main(["show", str(tmp_path)]) == 2
+    assert main(["audit", "show", "--path", str(tmp_path)]) == 2
     assert "git-ez:" in capsys.readouterr().err
 
 
@@ -218,7 +220,7 @@ def test_failed_cli_run_returns_one_and_a_readable_audit(cli_repo, monkeypatch, 
     assert cli_repo.branch_oid("feature") != before
     audit = next((cli_repo.path / ".git/ez/runs").iterdir())
     assert "Validation failed with code 7" in (audit / "report.md").read_text()
-    assert main(["show", str(audit)]) == 0
+    assert main(["audit", "show", "--path", str(audit)]) == 0
 
 
 @pytest.mark.unit
@@ -258,7 +260,7 @@ def test_cli_ff_only_refuses_divergence_without_model_call(
     assert not cli_repo.operation_active()
     assert model_server.calls == []
     audit = next((cli_repo.path / ".git/ez/runs").iterdir())
-    assert "--ff-only" in (audit / "report.md").read_text()
+    assert "Not possible to fast-forward" in (audit / "report.md").read_text()
 
 
 @pytest.mark.unit
@@ -353,7 +355,7 @@ def test_signing_before_attached_check_is_still_an_integration_option():
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["show", "run", "--check", "command"],
+        ["audit", "show", "run", "--check", "command"],
         ["probe", "--check=command"],
     ],
 )
@@ -604,39 +606,6 @@ def test_negative_merge_log_is_rejected_before_configuration(mocker, capsys):
     assert main(["merge", "main", "--log=-1"]) == 2
     config.assert_not_called()
     assert "nonnegative" in capsys.readouterr().err
-
-
-@pytest.mark.integration
-def test_cli_prints_primary_failure_and_audit_errors_when_summaries_cannot_be_saved(
-    cli_repo, monkeypatch, mocker, capsys
-):
-    import git_ez.audit as module
-    from git_ez.audit import Audit
-
-    write, report = module.write_json, Audit.report
-
-    def failing_write(path, data):
-        if path.name == "run.json" and data["status"] != "running":
-            raise OSError("manifest destination unavailable")
-        write(path, data)
-
-    def failing_report(self):
-        if self.manifest["status"] != "running":
-            raise OSError("report destination unavailable")
-        report(self)
-
-    mocker.patch.object(module, "write_json", failing_write)
-    mocker.patch.object(Audit, "report", failing_report)
-    monkeypatch.chdir(cli_repo.path)
-    assert main(["merge", "main", "--check", sys.executable, "-c", "raise SystemExit(7)"]) == 1
-    output = capsys.readouterr()
-    assert "Integrated: True" in output.out
-    assert "Status: failed" in output.out
-    assert "Error: Validation failed with code 7" in output.err
-    assert "manifest destination unavailable" in output.err
-    assert "report destination unavailable" in output.err
-    assert "Report unavailable or incomplete" in output.err
-    assert not cli_repo.operation_active()
 
 
 @pytest.mark.integration

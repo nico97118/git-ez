@@ -16,8 +16,12 @@ git-ez \- local rebase and merge with AI-assisted conflict resolution
 .br
 .B git ez probe
 .br
-.B git ez show
-.I run-directory
+.B git ez audit list
+.br
+.B git ez audit show
+.RI [ run-id ]
+.RI [ --path " run-directory"]
+.RB [ --verbose ]
 .br
 .B git ez --version
 .SH DESCRIPTION
@@ -88,7 +92,7 @@ is required. Events and offloaded agent files are retained in the audit
 directory.
 Internal graph states and pending tasks are not persisted for inspection or
 restart.
-Abrupt termination may leave incomplete audit files and skips final capture.
+Abrupt termination may leave incomplete audit files and skip final journal updates.
 See docs/freebsd.md in the project repository for installation commands.
 Development requirements and FreeBSD-specific tool warnings are documented in
 CONTRIBUTING.md. Ruff is not required at runtime.
@@ -119,8 +123,7 @@ an internal merge commit object to preserve native cherry-pick equivalence.
 No branch or reference is created for this object and it is excluded from the
 result. It is unsigned metadata; signing policy still applies to result
 commits.
-The audit records its parents, tree, command and raw capture, with any
-truncation explicit. Native pre-rebase hooks receive this effective pinned
+Native pre-rebase hooks receive this effective pinned
 replay
 boundary rather than the original upstream name. Hook failures are not
 bypassed.
@@ -135,9 +138,8 @@ remains disabled unless explicitly requested; the default empty policy remains
 drop and per-commit reuse is preserved. The instruction-format override and
 bounded sequence capture described below also apply to this case.
 .PP
-Original input references remain monitored. Final ancestry and range-diff use
-the
-computed result base and replay selection. These options combine with
+Original input references remain monitored. Final ancestry uses the
+computed result base. These options combine with
 autosquash
 and signing; --root and rebasing merge commits remain unsupported.
 .TP
@@ -163,15 +165,14 @@ stops Git before replay; missing evidence prevents overall success after
 completion.
 The capture editor records rebase-todo.txt.sha256 before replay. Changes to the
 sequence or fingerprint, including from Git hooks, make the run fail.
-rebase-commits.log records final commits and messages with explicit truncation
-at
-ez.maxFileBytes. Local state and available evidence are preserved on failure.
+Inspect final commits and messages with git log. Local state and available
+evidence are preserved on failure.
 .TP
 .B --rerere-autoupdate, --no-rerere-autoupdate
 Override rerere.autoupdate for the whole run, including continuation, without
 changing stored configuration. Does not enable rerere.enabled. Resolutions
 reused
-and staged by native rerere are audited and continued without a model call for
+and staged by native rerere are continued without a model call for
 that conflict. With --no-rerere-autoupdate, reused file contents still pass
 through
 assisted resolution and validation while the index remains unmerged. The audit
@@ -246,7 +247,7 @@ below.
 Rebase only. Replay the commits selected after target onto newbase. Both
 revisions
 are pinned and their named references are checked throughout the run. The audit
-and range-diff record the upstream boundary and new base separately. Only the
+records the upstream boundary and new base separately. Only the
 current branch is rebased. A second positional branch argument and the A...B
 new-base shorthand are unsupported.
 .TP
@@ -314,7 +315,7 @@ HTTP, agent command, and validation timeout; default: 120 seconds
 Confidence threshold; default: 0.8
 .TP
 .B ez.maxFileBytes
-Maximum proposal size and per-file audit capture; default: 128 KiB
+Maximum proposal size and per-file review capture; default: 128 KiB
 .TP
 .B ez.maxRounds
 Maximum number of conflict stops; default: 100
@@ -346,7 +347,8 @@ compatibility
 without exposing a repository or shell tools.
 .SH AUDIT AND FAILURE RECOVERY
 Audits are stored under ez/runs/<id> in the repository's common Git directory.
-Each run prints the report location. Use git ez show with that run directory.
+Each run prints its identifier and inspection command. Use git ez audit show
+with the identifier, or --path with a copied run directory.
 .PP
 On failure or interruption, local state is retained without automatic
 rollback.
@@ -364,53 +366,58 @@ and
 permissions remain unchanged during resolution, including binary and oversized
 resources. Audit file capture limits still apply.
 .PP
-Failure to write a required audit snapshot, including failure of Git commands
-that capture diffs and enumerate files, fails the run. Partial evidence is
-retained
-and the failure appears in each summary that can still be written. A completed
-Git integration remains available locally. Secondary capture errors do not
-replace
-the original failure reason. Final captures and summaries are attempted
-independently.
-If summaries cannot be finalized, the CLI reports the outcome, audit errors,
-and
-audit location; existing summary files can be stale or incomplete.
+New runs use journal schema 4. For every conflict handled by the LLM, the
+journal retains the conflict diff, resolution, explanation and confidence.
+Original inputs are in conflicts/NNNN/request.json; conflict.diff compares
+ours and theirs. resolution.txt and resolution.diff retain the proposal.
+run.json records whether it was applied. Git remains the source for commit
+history and repository diffs; native command archives are not retained.
 .PP
-The manifest records the primary failure phase, type and message separately
-from
-audit_errors. Evidence availability is available, partial, or unavailable for
-the
-tracked final captures and summaries. Partial captures include truncation,
-missing
-file contents, and artifacts that could not be finalized. This is not a
-complete
-inventory of all audit files. Missing ordinary model/tool events stop the agent
-as an audit failure; subsequent writes do not make that journal complete again.
-Handled initialization failures mark the session failed before any model call;
-remaining captures are attempted even if the folder or runtime metadata is
-missing.
-The terminal session event includes the session metadata capture outcome.
-Unexpected exceptions are re-raised unchanged after cleanup; the audit retains
-their type and outcome without arbitrary exception messages.
+A session can resolve multiple files with the same explanation and confidence.
+Confidence is a model estimate, not independent validation. If a resolver fails
+before returning a decision, available edits are retained when possible without
+inventing an explanation or score. Conflict inputs and proposals must be saved
+before staging. A final journal publication failure returns a nonzero result
+and warns that saved state may be older; Git is never rolled back.
 .PP
-Validation status distinguishes not_requested, not_run, running, passed,
-failed,
-timed_out, and interrupted. A passing validation command does not imply overall
-success if its output cannot be captured or a later invariant check fails.
+Model/tool events, agent files and optional validation output provide supporting
+diagnostics. Diagnostic export and Markdown failures are warnings; validation output loss
+does not change the validation result. These files
+are not a complete graph history or recovery checkpoint. Missing or unreadable
+conflict captures are reported explicitly. File reads do not follow symlinks.
 .PP
-Audit files may contain sensitive source code and tool output. Model
-confidence
-and passing tests do not prove semantic correctness.
+audit list shows saved runs newest first, including their checkouts. audit show
+selects the latest run or a full/unique abbreviated identifier. --path selects a
+copied run directory and is exclusive of an identifier. --verbose adds saved
+model/tool events and command outputs. Reprompts retain separate proposals,
+explanations, confidence and feedback; all conflict diffs use the original ours.
+Acceptance is distinct from application. Commands requested by the model retain
+execution directory, timing, exit code, streams and truncation when available.
+Native engine commands and repository-wide history are not archived.
+.PP
+Consultation uses the Git pager in a terminal and direct stdout for pipes and
+redirections. GIT_PAGER, core.pager, pager.ez and Git's --no-pager/--paginate
+conventions apply. Quitting the pager is normal; no second pager is opened.
+.PP
+show reads run.json and saved captures without model calls or repository
+recapture, ignoring report.md. Reading does not certify evidence or reconstruct
+history. Only schema 4 is supported; inspect older journals directly.
+.PP
+Known configured credentials are filtered. Audit files may contain sensitive
+source code and output; review before sharing. Unexpected execution exceptions
+propagate after best-effort cleanup. Resource budgets remain in effect.
 .SH EXIT STATUS
 .TP
 .B 0
-Successful integration, displayed report, or compatible probe.
+Published integration success or a compatible probe. For show: a readable
+journal, including a recorded failed or unfinished run.
 .TP
 .B 1
-Failed or interrupted run, or failed probe.
+Failed/interrupted admitted run, failed terminal publication, or failed probe.
 .TP
 .B 2
-Configuration, command-line, or precondition error.
+Configuration, command-line, pre-admission, or delivery error. For show: no
+readable journal is available. Cached Markdown is not a fallback.
 .SH EXAMPLES
 .nf
 git config --global ez.model exact-model-id

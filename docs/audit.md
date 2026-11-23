@@ -1,119 +1,94 @@
-# Integration lifecycle and audit
+# Resolution journals
 
 [README](../README.md) · [Workflow policies](workflows.md)
 
-## Integration lifecycle
+## Purpose and storage
 
-1. Check the checkout and pin the branch and target SHAs.
-2. Run Git. If there are no conflicts, do not call the AI.
-3. At each conflict stop, save the Git versions and open one agent session for all
-   conflicts at that stop.
-4. The agent explores, edits, and tests, then calls `finish` with its rationale and confidence.
-5. Check files, Git metadata, and the confidence threshold; stage changes and continue
-   Git. A conflict on a later commit opens a new session.
-6. Record diffs, run optional validation, and check final invariants.
-7. Preserve the audit and display its location.
+Every admitted merge or rebase creates a local journal, including runs without
+conflicts and unsuccessful runs. Argument, configuration and precondition errors
+can occur before a run is admitted. No option is needed to enable recording.
 
-The engine owns staging and Git continuation. It checks `MERGE_HEAD`, result ancestry,
-and input references, among other invariants. Hooks, commit signing, rerere, and caller
-Git settings are respected. If rerere reuses and stages a resolution, that decision is
-recorded without an AI call. Hook and signing failures are not bypassed.
+Journals live under `ez/runs/<id>` in the repository's common Git directory,
+usually `.git/ez/runs/<id>`. They are outside versioned content. Linked worktrees
+share this location; each run identifies its checkout. No automatic cleanup runs.
+The integration prints its identifier and a `git ez audit show <id>` command.
 
-The Deep Agents runtime provides local tools, context management, and in-memory
-graph checkpoints. Session `runtime.json` records dependency versions and the
-checkpoint storage mode. No graph checkpoints are saved for inspection or restart.
-Model/tool events are written progressively to `events.jsonl`; offloaded history
-and agent files are written directly to the session's `agent-files/` directory.
-These artifacts survive independently of graph state. They do not represent every
-internal graph state or pending task. Abrupt process termination can leave an
-incomplete event or file and skips final messages, worktree snapshots, and status
-updates; inspect the artifacts already written and the actual Git state.
-Delegation is disabled. Offloaded history is stored separately from the repository.
-The model receives explicit base/ours/theirs semantics for the Git strategy in use.
-Tools execute on the host; their output is sent to the configured model.
+The journal describes git-ez interventions. Use Git for commit history, native
+integration behavior and repository diffs. Native commands executed by the engine
+are not archived. A Git command requested by the LLM is an agent action and is
+recorded like any other model-requested command.
 
-Low confidence, an error, or an interruption leaves local state available for inspection.
-There is no automatic rollback. `integrated` indicates that Git completed, whereas
-`succeeded` also requires successful checks. Validation failure after integration
-therefore preserves the local result with a failed run status. Failure to write a
-required agent-session or final audit snapshot also fails the run, including failures
-of the Git commands that capture diffs and enumerate files. Partial capture evidence
-is retained and the failure is reported in the manifest and Markdown report.
-A session snapshot failure prevents Git continuation; a final snapshot failure preserves any completed
-integration. A secondary capture error does not replace the original failure reason.
+## Inspecting a run
 
-## Audit
-
-Traces are stored in the target repository's common Git directory:
-
-```text
-.git/ez/runs/<id>/
-  run.json                   # Strategy, before/after SHAs, statuses, reused Git decisions
-  report.md                  # Conflicts, decisions, reasons, and links to evidence
-  config.json                # Effective configuration with redacted token
-  system-prompt.txt
-  integration.log            # Git commands and output
-  result.diff                # Full before/after diff
-  range-diff.txt             # Commit series comparison, rebase only
-  rebase-todo.txt            # Initial native sequence, sequencer-backed rebases
-  rebase-todo.txt.sha256     # Sequence fingerprint written before replay
-  rebase-commits.log         # Result commits/messages, sequencer-backed rebases; truncation is explicit
-  rebase-selection-anchor.txt # Internal exclusion object when needed; truncation is explicit
-  conflicts/0001/
-    base.txt / ours.txt / theirs.txt / marked.txt
-    request.json             # Initial conflict evidence
-    proposed.txt / resolution.diff
-  sessions/0001/
-    runtime.json / mission.json
-    agent-files/             # Agent files and offloaded history, outside the worktree
-    events.jsonl / messages.json / decision.json
-    worktree.diff / staged.diff
-    files.json / files/*.bin
-  validation.stdout / validation.stderr
-  exit/
-    files.json / worktree.diff / files/*.bin
+```sh
+git ez audit list                  # All readable runs, newest first
+git ez audit show                  # Most recently started run
+git ez audit show RUN_ID           # Full identifier or unique prefix
+git ez audit show RUN_ID --verbose # Include model/tool events and outputs
+git ez audit show --path /path/to/copied-run
 ```
 
-Files are created at the corresponding stage; an interrupted operation has no final
-diff. Snapshots retain edits, new non-ignored files, and deletions, including after a
-failure. Copies are limited to `ez.maxFileBytes`; truncation and read errors are reported.
-Symlinks are not followed. The final capture also retains the effects of validation
-that changed files or HEAD.
+`list` includes date, operation, branch, status and checkout. An ambiguous prefix
+is refused. `--path` works outside a repository and cannot be combined with an
+identifier. `git ez audit` displays help. The former `git ez show` command is removed.
 
-The manifest separates the execution outcome from audit capture:
+`show` presents recorded status, integration completion, conflicts, attempts,
+explanations, confidence, decisions, diffs and validation results. Each reprompt
+creates another attempt: earlier proposals and user feedback remain available.
+Every attempt's conflict diff uses the original `ours` as its reference, allowing
+comparison across revisions. During rebase, `ours` is the new base and `theirs`
+is the commit being replayed. An explanation/confidence shared by several files
+is identified as applying to that group. Deletion is distinct from empty content.
 
-- `status` and `integrated` describe the run and whether Git completed the integration.
-- `failure` records the primary error's phase, type, and message. `error` retains
-  the human-readable reason. Secondary capture errors appear in `audit_errors`
-  without replacing that reason.
-- `validation.status` is `not_requested`, `not_run`, `running`, `passed`, `failed`,
-  `timed_out`, or `interrupted`. A successful command can coexist with a failed run
-  if its output could not be saved or a later invariant check failed.
-- `evidence` records availability for worktree captures, final session messages and
-  events, validation output, rebase-sequence verification, and final summaries.
-  `available` means that capture succeeded; `partial` means a capture is truncated,
-  contains unavailable files, or an existing artifact could not be finalized;
-  `unavailable` means no usable artifact could be confirmed for that capture. This is not an
-  exhaustive inventory of every audit file. A journal stays partial after a failed
-  append even when later events can be saved. Failure to retain an ordinary model
-  or tool event stops the agent as an audit failure, rather than reporting a model
-  service failure. Error-event capture does not replace an existing failure.
+Acceptance and application are separate. A stopped or failed revision does not
+apply an earlier proposal automatically. Native rerere reuse needs no LLM call
+and produces no invented explanation or confidence.
 
-Final captures are attempted independently. Losing a conversation file does not
-prevent capturing the worktree or attempting the other summaries. If the report
-or manifest cannot be finalized, the CLI still prints the execution outcome,
-secondary audit errors, and the audit location. Existing files may be older or
-incomplete snapshots; consult the CLI's availability warning before trusting them.
-Handled initialization failures also mark the session as failed, even when its
-folder or runtime metadata could not be prepared and no model was called. The
-remaining captures are still attempted independently.
-The session's terminal event includes the outcome of session metadata capture;
-final run summaries and validation still have their own outcomes. Unexpected
-exceptions are re-raised unchanged after cleanup. The audit records their type
-and failed/interrupted status without copying arbitrary exception messages.
-No write durability across power loss or automatic recovery is promised.
+`--verbose` adds the saved requests, responses, tools and shell invocations in
+recorded order. Shell records include command, execution directory, duration,
+exit code, stdout/stderr when available, timeout and output truncation. A script
+is recorded as one invocation; subprocesses are not individually traced. Model
+responses include usage metadata when supplied by the provider. The environment
+and HTTP authorization headers are not dumped.
 
-The `range-diff` compares pinned SHAs, but commit matching remains heuristic and does
-not prove semantic equivalence. Events and agent files retain execution evidence;
-`messages.json` is a potentially compacted snapshot. Traces remain local, without
-LangSmith tracing, and may contain sensitive code or output.
+In a terminal, consultation uses Git pager conventions (`GIT_PAGER`, `core.pager`,
+`pager.ez`). Pipes and redirections receive plain output without starting a pager.
+Use `git --no-pager ez audit show` for direct display or `git --paginate ez audit
+show` to request Git's pager. Quitting the pager is normal. The display adds no
+arbitrary truncation; any capture limitations are identified separately.
+
+## Files and failure handling
+
+New journals use schema 4. `run.json` contains run metadata, conflict inputs'
+locations, attempts and decisions. Conflict directories retain `request.json`
+(base/ours/theirs/marked) and `conflict.diff`. Each proposal directory retains its
+conflict resolutions, diffs and selected agent-changed files. Session directories
+hold model/tool events, messages and `agent-files/`. Optional `--check` output is
+in `validation.stdout` and `validation.stderr`. `report.md` is a derived convenience
+copy: `show` reads the journal and saved captures, ignoring that cache.
+
+Reads do not recapture repository state or load a model. They do not certify
+files, repair journals or reconstruct history. Unsupported or malformed journals
+receive raw-file guidance; no migration of older schemas is provided.
+
+The engine retains its checks on branch identity, pinned inputs, operation state
+and final ancestry. It owns staging and continuation. Conflict proposals and their
+decisions must be saved before staging; a required write failure stops continuation.
+Supporting event and validation-output export failures produce partial-journal warnings;
+the validation result remains distinct from output availability. Unavailable
+captures and truncations are explicit. Proposals are bounded by `ez.maxFileBytes`;
+initial conflict inputs have a 10 MB safety limit. Content reads do not follow
+symlinks. Known configured credentials are filtered, but source code and output
+can still be sensitive: review traces before sharing.
+
+Failure leaves actual local state available without rollback. If integration
+completed before validation failed, its commits remain. A final journal save
+failure returns nonzero and warns that saved state may be older. Markdown failure
+alone is a presentation warning. After interruption, no missing explanation or
+confidence is invented. A record left running is unfinished, not proof of a live
+process. Events and agent files are not a complete graph history or crash recovery.
+
+For integrations, exit 0 requires successful integration, checks and publication;
+exit 1 means failure/interruption and exit 2 means a usage/configuration/precondition
+error. Consultation returns 0 for a readable journal, including a recorded failed
+run, and 2 for a selection or reading error. An empty list is successful.

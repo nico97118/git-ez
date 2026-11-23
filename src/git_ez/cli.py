@@ -166,8 +166,13 @@ def parser() -> argparse.ArgumentParser:
             nargs=argparse.REMAINDER,
             help="Final validation executable and arguments; must be the last option",
         )
-    show = commands.add_parser("show", help="Display a saved integration report")
-    show.add_argument("run_directory", type=Path, help="Audit directory printed after execution")
+    audit = commands.add_parser("audit", help="Inspect local resolution journals")
+    audit_commands = audit.add_subparsers(dest="audit_command")
+    audit_commands.add_parser("list", help="List saved runs, newest first")
+    show = audit_commands.add_parser("show", help="Display the latest or selected run")
+    show.add_argument("run_id", nargs="?", help="Run identifier or unique prefix")
+    show.add_argument("--path", type=Path, help="Read a copied run directory")
+    show.add_argument("--verbose", action="store_true", help="Include model/tool events and output")
     commands.add_parser(
         "probe",
         help="Test model/tool compatibility without touching Git",
@@ -182,8 +187,21 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        if args.command == "show":
-            print((args.run_directory / "report.md").read_text(encoding="utf-8"))
+        if args.command == "audit":
+            from .audit_cli import consult, display
+
+            if args.audit_command is None:
+                parser().parse_args(["audit", "--help"])
+            if getattr(args, "path", None) is not None and args.run_id is not None:
+                raise EzError("--path and a run identifier are mutually exclusive")
+            display(
+                consult(
+                    args.audit_command,
+                    getattr(args, "run_id", None),
+                    getattr(args, "path", None),
+                    getattr(args, "verbose", False),
+                )
+            )
             return 0
         if args.command == "probe":
             from .probe import probe
@@ -235,22 +253,33 @@ def main(argv: list[str] | None = None) -> int:
             rerere_autoupdate=args.rerere_autoupdate,
             interactive=args.interactive,
         )
-        print(f"Status: {audit.manifest['status']}")
-        print(f"Report: {audit.directory / 'report.md'}")
-        print(f"Branch: {audit.manifest['branch']}")
-        print(f"Operation: {audit.manifest['operation']}")
-        print(f"Integrated: {audit.manifest['integrated']}")
-        if audit.manifest.get("error"):
-            print(f"Error: {audit.manifest['error']}", file=sys.stderr)
-        for error in audit.audit_errors:
-            print(f"Audit error ({error['phase']}): {error['message']}", file=sys.stderr)
-        report_evidence = audit.evidence.get("report.md")
-        if report_evidence is not None and report_evidence["status"] != "available":
+        from .audit_report import safe_text
+
+        print(f"Audit: {safe_text(audit.directory.name)}")
+        print(f"Inspect: git ez audit show {safe_text(audit.directory.name)}")
+        print(f"Status: {audit.view['status']}")
+        if audit.owned:
+            print(f"Report: {safe_text(str(audit.directory / 'report.md'))}")
+        else:
             print(
-                f"Report unavailable or incomplete; inspect audit directory: {audit.directory}",
+                "Intended audit directory (not created by this run): "
+                f"{safe_text(str(audit.directory))}"
+            )
+        print(f"Branch: {safe_text(audit.view['branch'])}")
+        print(f"Operation: {audit.view['operation']}")
+        print(f"Integrated: {audit.view['integrated']}")
+        if audit.view.get("error"):
+            print(f"Error: {safe_text(audit.view['error'])}", file=sys.stderr)
+        for error in audit.audit_errors:
+            print(safe_text(f"Audit error ({error['phase']}): {error['message']}"), file=sys.stderr)
+        for warning in audit.presentation_errors:
+            print(f"Warning: {safe_text(warning)}", file=sys.stderr)
+        if not audit.published:
+            print(
+                "Resolution journal could not be saved; inspect the retained files.",
                 file=sys.stderr,
             )
-        return 1 if audit.manifest["status"] in ("failed", "interrupted") else 0
+        return 0 if audit.view["status"] == "succeeded" and audit.published else 1
     except (EzError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"git-ez: {exc}", file=sys.stderr)
         return 2

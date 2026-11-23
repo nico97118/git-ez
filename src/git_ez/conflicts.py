@@ -3,9 +3,11 @@
 
 """Provider-neutral inputs and strictly validated model decisions."""
 
+import difflib
 import math
 import re
 from dataclasses import asdict, dataclass
+from io import StringIO
 from typing import Any
 
 from .errors import EzError
@@ -51,3 +53,16 @@ class Decision:
 
 class LowConfidence(EzError):
     """Preserve edited files without continuing Git."""
+
+
+def text_diff(before: str | None, after: str | None, fromfile: str, tofile: str) -> str:
+    """Render missing final newlines explicitly, as native Git diffs do."""
+    lines = difflib.unified_diff(
+        StringIO(before or "", newline="\n").readlines(),
+        StringIO(after or "", newline="\n").readlines(),
+        fromfile=fromfile,
+        tofile=tofile,
+    )
+    return "".join(
+        line if line.endswith("\n") else line + "\n\\ No newline at end of file\n" for line in lines
+    )

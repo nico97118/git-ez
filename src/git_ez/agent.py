@@ -35,7 +35,7 @@ class Resolver(Protocol):
     """Propose edits without staging.
 
     In interactive mode round_number identifies a unique attempt. The latest
-    audit.manifest["reviews"] entry supplies the conflict stop and user feedback;
+    audit.view["reviews"] entry supplies the conflict stop and user feedback;
     revisions must start from the current files. Noninteractive calls are unchanged.
     """
 

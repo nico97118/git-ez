@@ -1,6 +1,8 @@
 # Contributing to git-ez
 
-For installation, configuration, and usage, see the [README](README.md).
+For installation and getting started, see the [README](README.md). For detailed
+configuration and command semantics, see the [configuration guide](docs/configuration.md)
+and [manual](docs/man/git-ez.1).
 Read [AGENTS.md](AGENTS.md) for the project contracts and detailed development rules.
 
 ## Development setup
@@ -83,25 +85,42 @@ group again. Packaging commands omit `--group` to select runtime dependencies.
 FreeBSD CI targets 15.1 amd64/Python 3.12 only. ARM64 emulation is excluded from
 the PR, scheduled, and manual jobs after a cold dependency build exceeded the
 90-minute limit before reaching the tests.
-The in-memory checkpoint experiment passed all 554 tests on macOS. Focused
-native validation passed 134 agent/CLI tests and isolated installed-wheel/manual
-checks on FreeBSD 16.0-CURRENT arm64 with Python 3.12.14. This is not a complete
-FreeBSD suite or a validation of the 15.1 amd64 CI target. A separate abrupt
-process-exit probe confirmed that agent files and completed tool events survive
-without final cleanup; final messages and session status are unavailable in that
-case. Models and HTTP/TLS servers used by the tests are deterministic and local;
-no external LLM is called.
+Tests use deterministic models and local HTTP/TLS servers; no external LLM is called.
 
 ## Required checks
 
-Before every code-changing commit, run:
+Start with focused tests for the changed behavior and its affected callers:
 
 ```bash
-uv run --locked pytest -v --cov --cov-report=term-missing
+uv run --locked pytest tests/test_engine.py -k merge
+```
+
+Include relevant success and failure paths, and integration tests for Git, CLI,
+SDK, or runtime behavior. Expand the selection when failures or shared code indicate
+wider impact. Focused tests are sufficient for a localized change; do not run the
+full suite after every edit or minor behavior change.
+
+Before every code-changing commit, also run:
+
+```bash
 uv run --locked ruff check .
 uv run --locked ruff format --check .
 uv run --locked mypy src
 ```
+
+Run the full suite before opening a PR or marking it ready for review when
+executable behavior changes, when explicitly requested, or when a focused selection
+cannot cover the impact (shared fixtures, test configuration, cross-cutting Git
+lifecycle or audit changes, or runtime dependency updates):
+
+```bash
+uv run --locked pytest -v --cov --cov-report=term-missing
+```
+
+Fix failures before committing. Reuse successful checks while their relevant inputs
+remain unchanged, including during PR preparation. Report the checks run, the reason
+for the selection, and whether the full suite ran. Report any required check that
+could not run.
 
 For documentation-only changes, check the documentation and its examples; Python
 checks are only required when executable behavior changes.

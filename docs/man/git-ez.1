@@ -1,4 +1,4 @@
-.TH GIT-EZ 1 "November 21, 2026" "git-ez" "Git Manual"
+.TH GIT-EZ 1 "November 23, 2026" "git-ez" "Git Manual"
 .SH NAME
 git-ez \- local rebase and merge with AI-assisted conflict resolution
 .SH SYNOPSIS
@@ -46,7 +46,8 @@ independent locks. Native Git and other tools do not honor this advisory lock.
 The lock is released when the process exits, even after abrupt termination.
 The empty ez-execution.lock file remains in the checkout's Git directory;
 its presence does not indicate an active run. Do not delete it during a run.
-Git operations and local changes are preserved for inspection and native recovery.
+Git operations and local changes are preserved for inspection and native
+recovery.
 .PP
 Rebase uses the merge backend with autostash, update-refs, and rebase-merges
 disabled. Merge uses --no-edit and respects Git's fast-forward policy. Git
@@ -58,18 +59,21 @@ environment variables.
 Valid model configuration is required even when no conflicts occur; no model
 call is made when Git resolves the operation without assistance.
 .SH INSTALLATION ON FREEBSD
-FreeBSD support is experimental. CI targets FreeBSD 15.1 amd64/Python 3.12 only.
-ARM64 is outside the CI scope. This in-memory checkpoint experiment requires
-its own FreeBSD 15.1 amd64 CI validation.
-Install git, uv, python312, py312-sqlite3, rust, and pkgconf from FreeBSD packages.
+FreeBSD support is experimental. CI targets FreeBSD 15.1 amd64/Python 3.12
+only.
+ARM64 is outside the CI scope.
+Install git, uv, python312, py312-sqlite3, rust, and pkgconf from FreeBSD
+packages.
 Use uv tool install with --python /usr/local/bin/python3.12 and the repository
 URL or local checkout. The environment remains isolated from system Python
 packages. Dependencies without FreeBSD wheels may compile from source.
 Graph checkpoints stay in memory; no SQLite checkpoint adapter or sqlite-vec
-is required. Events and offloaded agent files are retained in the audit directory.
-Internal graph states and pending tasks are not persisted for inspection or restart.
+is required. Events and offloaded agent files are retained in the audit
+directory.
+Internal graph states and pending tasks are not persisted for inspection or
+restart.
 Abrupt termination may leave incomplete audit files and skips final capture.
-See the README for commands and current validation limits.
+See docs/freebsd.md in the project repository for installation commands.
 Development requirements and FreeBSD-specific tool warnings are documented in
 CONTRIBUTING.md. Ruff is not required at runtime.
 .SH OPTIONS
@@ -77,7 +81,8 @@ CONTRIBUTING.md. Ruff is not required at runtime.
 .B --keep-base, --no-keep-base
 Rebase only. Keep the unique common ancestor with the upstream as the result's
 base, or reset this policy. Implies --reapply-cherry-picks unless explicitly
-disabled. Incompatible with --onto. Missing or ambiguous merge bases are rejected.
+disabled. Incompatible with --onto. Missing or ambiguous merge bases are
+rejected.
 The upstream tip need not be an ancestor of a successful result in this mode.
 .TP
 .B --fork-point, --no-fork-point
@@ -86,29 +91,38 @@ selection, or disable this policy. The last explicit CLI value wins. With the
 required explicit upstream, fork-point defaults to disabled, including with
 --keep-base or rebase.forkPoint=true. Like native Git, that configuration does
 not enable fork-point for an explicit upstream. Use --fork-point to opt in.
-Requires a named branch, remote-tracking branch, tag or HEAD. Use --no-fork-point
-for a literal SHA or revision expression. An unavailable reflog point falls back
+Requires a named branch, remote-tracking branch, tag or HEAD. Use
+--no-fork-point
+for a literal SHA or revision expression. An unavailable reflog point falls
+back
 to the otherwise chosen replay boundary, with an explicit audit reason.
 .PP
 The engine pins the base and fork point before integration and passes explicit
 --onto and --no-fork-point arguments. Divergent exclusion histories may require
 an internal merge commit object to preserve native cherry-pick equivalence.
 No branch or reference is created for this object and it is excluded from the
-result. It is unsigned metadata; signing policy still applies to result commits.
+result. It is unsigned metadata; signing policy still applies to result
+commits.
 The audit records its parents, tree, command and raw capture, with any
-truncation explicit. Native pre-rebase hooks receive this effective pinned replay
-boundary rather than the original upstream name. Hook failures are not bypassed.
+truncation explicit. Native pre-rebase hooks receive this effective pinned
+replay
+boundary rather than the original upstream name. Hook failures are not
+bypassed.
 Hooks requiring the original upstream argument should use native Git directly.
 .PP
 When --onto equals the fork point and combining exclusions changes the replay
-boundary, the native interactive sequencer avoids an incorrect up-to-date shortcut.
-A capture-only editor records its instructions without changing them. Autosquash
+boundary, the native interactive sequencer avoids an incorrect up-to-date
+shortcut.
+A capture-only editor records its instructions without changing them.
+Autosquash
 remains disabled unless explicitly requested; the default empty policy remains
 drop and per-commit reuse is preserved. The instruction-format override and
 bounded sequence capture described below also apply to this case.
 .PP
-Original input references remain monitored. Final ancestry and range-diff use the
-computed result base and replay selection. These options combine with autosquash
+Original input references remain monitored. Final ancestry and range-diff use
+the
+computed result base and replay selection. These options combine with
+autosquash
 and signing; --root and rebasing merge commits remain unsupported.
 .TP
 .B --autosquash, --no-autosquash
@@ -117,24 +131,33 @@ or disable it. The last explicit value wins. rebase.autoSquash alone does not
 activate this mode. Git chooses the order and combined messages, with no editor
 or model intervention except for resolving conflicts.
 .PP
-git-ez uses interactive machinery internally with a capture-only sequence editor,
-forces rebase.instructionFormat=%s for this invocation, and preserves the default
---empty=drop. Explicit empty policies apply to replayed commits; Git handles empty
-fixup/squash resolutions within their existing groups. Interactive editing remains
+git-ez uses interactive machinery internally with a capture-only sequence
+editor,
+forces rebase.instructionFormat=%s for this invocation, and preserves the
+default
+--empty=drop. Explicit empty policies apply to replayed commits; Git handles
+empty
+fixup/squash resolutions within their existing groups. Interactive editing
+remains
 unsupported. Hooks and signing are retained.
 .PP
-The audit captures rebase-todo.txt before replay. A failed or over-limit capture
-stops Git before replay; missing evidence prevents overall success after completion.
+The audit captures rebase-todo.txt before replay. A failed or over-limit
+capture
+stops Git before replay; missing evidence prevents overall success after
+completion.
 The capture editor records rebase-todo.txt.sha256 before replay. Changes to the
 sequence or fingerprint, including from Git hooks, make the run fail.
-rebase-commits.log records final commits and messages with explicit truncation at
+rebase-commits.log records final commits and messages with explicit truncation
+at
 ez.maxFileBytes. Local state and available evidence are preserved on failure.
 .TP
 .B --rerere-autoupdate, --no-rerere-autoupdate
 Override rerere.autoupdate for the whole run, including continuation, without
-changing stored configuration. Does not enable rerere.enabled. Resolutions reused
+changing stored configuration. Does not enable rerere.enabled. Resolutions
+reused
 and staged by native rerere are audited and continued without a model call for
-that conflict. With --no-rerere-autoupdate, reused file contents still pass through
+that conflict. With --no-rerere-autoupdate, reused file contents still pass
+through
 assisted resolution and validation while the index remains unmerged. The audit
 records requested and effective autoupdate.
 .TP
@@ -144,7 +167,8 @@ Mutually exclusive with --file. Does not force a commit on fast-forward.
 .TP
 .B -F file, --file file
 Merge only. Read a UTF-8 message file before integration. Paths are relative to
-the invocation directory, including with --repo. Standard input (-F -) is unsupported.
+the invocation directory, including with --repo. Standard input (-F -) is
+unsupported.
 The message is recorded in the audit and retained after conflicts.
 .TP
 .B --log[=n], --no-log
@@ -154,16 +178,19 @@ The last explicit value wins. If omitted, merge.log applies. Git generates the
 summary, including with -m or -F; it survives conflict continuation.
 .TP
 .B --cleanup=strip|whitespace|verbatim|scissors|default
-Merge only. Apply Git's native cleanup mode to the message, also after conflicts.
+Merge only. Apply Git's native cleanup mode to the message, also after
+conflicts.
 The prepared MERGE_MSG is preserved during continuation. No editor is opened;
 scissors retains native noninteractive behavior. Omission uses native defaults
 and configuration. Neither cleanup nor log forces a commit on fast-forward.
 Requested policies are recorded in the audit.
 .TP
 .B -S[key], --gpg-sign[=key], --no-gpg-sign
-Sign newly created commits or explicitly disable signing. Attach an optional key
+Sign newly created commits or explicitly disable signing. Attach an optional
+key
 to the option; without one, Git's configured key is used. The policy remains
-effective after conflicts and when retaining empty resolutions. Signing failures
+effective after conflicts and when retaining empty resolutions. Signing
+failures
 are not bypassed. Existing commits reused by Git are not signed again.
 .TP
 .B --signoff, --no-signoff
@@ -172,12 +199,14 @@ This is distinct from a cryptographic signature. Hooks remain active.
 .TP
 .B --verify-signatures, --no-verify-signatures
 Merge only. Verify the incoming tip commit with native Git trust settings, or
-explicitly disable this verification. This does not verify every incoming commit
+explicitly disable this verification. This does not verify every incoming
+commit
 or an annotated tag's signature. Explicit options override Git configuration.
 .TP
 .B --empty=drop|keep|stop
 Rebase only. Control commits that become empty. Explicit policies also apply
-after assisted conflict resolution: keep creates an empty commit with the original
+after assisted conflict resolution: keep creates an empty commit with the
+original
 author and message, drop lets Git discard it, and stop leaves the active rebase
 for manual handling with a nonzero exit code. This extends native continuation,
 which can drop an empty resolution even with --empty=keep. Hooks and signing
@@ -187,15 +216,19 @@ remain active. Policies and empty resolutions are recorded in the audit.
 Rebase only. Keep or discard commits that were already empty before replay.
 .TP
 .B --reapply-cherry-picks, --no-reapply-cherry-picks
-Rebase only. Control whether Git replays changes equivalent to upstream commits.
+Rebase only. Control whether Git replays changes equivalent to upstream
+commits.
 Reapplied commits that become empty are handled by --empty.
 .TP
 .B --force-rebase, -f, --no-ff, --ff
-For rebase, force replay of unchanged commits; --ff resets this request. The last
-request wins. For merge, --ff and --no-ff instead select the policy described below.
+For rebase, force replay of unchanged commits; --ff resets this request. The
+last
+request wins. For merge, --ff and --no-ff instead select the policy described
+below.
 .TP
 .B --onto newbase
-Rebase only. Replay the commits selected after target onto newbase. Both revisions
+Rebase only. Replay the commits selected after target onto newbase. Both
+revisions
 are pinned and their named references are checked throughout the run. The audit
 and range-diff record the upstream boundary and new base separately. Only the
 current branch is rebased. A second positional branch argument and the A...B
@@ -203,7 +236,8 @@ new-base shorthand are unsupported.
 .TP
 .B --ff, --no-ff, --ff-only
 Merge only. Allow fast-forward with a merge commit otherwise (--ff), create a
-merge commit when integration is needed (--no-ff), or refuse divergent histories
+merge commit when integration is needed (--no-ff), or refuse divergent
+histories
 (--ff-only). An already up-to-date branch stays unchanged. An explicit policy
 overrides Git configuration; the last policy specified wins. Without one, Git
 configuration and defaults apply. A refused --ff-only merge does not call the
@@ -234,9 +268,65 @@ variable,
 and ez.caBundle for an internal PEM CA bundle. Prefer environment variables to
 ez.apiKey, which Git stores in plaintext. HTTPS is required outside loopback
 unless ez.allowInsecureHttp is explicitly enabled.
+.TP
+.B ez.provider
+openai or ollama; default: openai
+.TP
+.B ez.model
+Required model identifier
+.TP
+.B ez.endpoint
+Server URL; defaults to the OpenAI API or local Ollama, depending on the
+provider
+.TP
+.B ez.caBundle
+Optional trusted PEM CA bundle
+.TP
+.B ez.apiKeyEnv
+Token environment variable; default: OPENAI_API_KEY or LOCAL_MODEL_API_KEY
+.TP
+.B ez.apiKey
+Optional direct token, redacted from the audit
+.TP
+.B ez.allowInsecureHttp
+Explicitly allow non-loopback HTTP; default: false
+.TP
+.B ez.timeout
+HTTP, agent command, and validation timeout; default: 120 seconds
+.TP
+.B ez.minConfidence
+Confidence threshold; default: 0.8
+.TP
+.B ez.maxFileBytes
+Maximum proposal size and per-file audit capture; default: 128 KiB
+.TP
+.B ez.maxRounds
+Maximum number of conflict stops; default: 100
+.TP
+.B ez.modelContextTokens
+Server context window; default: 32768
+.TP
+.B ez.modelMaxOutputTokens
+Output token reserve; default: 8192
+.TP
+.B ez.agentMaxTurns
+Model call budget per session; default: 40
+.TP
+.B ez.agentMaxToolCalls
+Tool call budget per session; default: 100
+.TP
+.B ez.agentMaxContextBytes
+Additional context size limit; default: 1000000 bytes
+.TP
+.B ez.toolOutputBytes
+Captured shell output limit; default: 32768 bytes
+.TP
+.B ez.requestOptions
+JSON object containing server options
 .PP
-See README.md and examples/ez.gitconfig in the project repository for the full
-configuration reference. Use probe to check native tool-call compatibility
+See docs/configuration.md and examples/ez.gitconfig in the project repository
+for provider setup and examples. Use probe to check native tool-call
+compatibility
 without exposing a repository or shell tools.
 .SH AUDIT AND FAILURE RECOVERY
 Audits are stored under ez/runs/<id> in the repository's common Git directory.
@@ -251,32 +341,44 @@ active
 operation to continue or abort. There is no agent session resume command.
 .PP
 The agent shell has host-process privileges and is not a system sandbox.
-Content checks apply to conflicted files and supporting files changed by the agent.
-Regular files integrated by Git without conflict are exempt when their contents and
+Content checks apply to conflicted files and supporting files changed by the
+agent.
+Regular files integrated by Git without conflict are exempt when their contents
+and
 permissions remain unchanged during resolution, including binary and oversized
 resources. Audit file capture limits still apply.
 .PP
 Failure to write a required audit snapshot, including failure of Git commands
-that capture diffs and enumerate files, fails the run. Partial evidence is retained
+that capture diffs and enumerate files, fails the run. Partial evidence is
+retained
 and the failure appears in each summary that can still be written. A completed
-Git integration remains available locally. Secondary capture errors do not replace
-the original failure reason. Final captures and summaries are attempted independently.
-If summaries cannot be finalized, the CLI reports the outcome, audit errors, and
+Git integration remains available locally. Secondary capture errors do not
+replace
+the original failure reason. Final captures and summaries are attempted
+independently.
+If summaries cannot be finalized, the CLI reports the outcome, audit errors,
+and
 audit location; existing summary files can be stale or incomplete.
 .PP
-The manifest records the primary failure phase, type and message separately from
-audit_errors. Evidence availability is available, partial, or unavailable for the
-tracked final captures and summaries. Partial captures include truncation, missing
-file contents, and artifacts that could not be finalized. This is not a complete
+The manifest records the primary failure phase, type and message separately
+from
+audit_errors. Evidence availability is available, partial, or unavailable for
+the
+tracked final captures and summaries. Partial captures include truncation,
+missing
+file contents, and artifacts that could not be finalized. This is not a
+complete
 inventory of all audit files. Missing ordinary model/tool events stop the agent
 as an audit failure; subsequent writes do not make that journal complete again.
 Handled initialization failures mark the session failed before any model call;
-remaining captures are attempted even if the folder or runtime metadata is missing.
+remaining captures are attempted even if the folder or runtime metadata is
+missing.
 The terminal session event includes the session metadata capture outcome.
 Unexpected exceptions are re-raised unchanged after cleanup; the audit retains
 their type and outcome without arbitrary exception messages.
 .PP
-Validation status distinguishes not_requested, not_run, running, passed, failed,
+Validation status distinguishes not_requested, not_run, running, passed,
+failed,
 timed_out, and interrupted. A passing validation command does not imply overall
 success if its output cannot be captured or a later invariant check fails.
 .PP
@@ -302,6 +404,25 @@ git ez rebase main
 git ez merge feature
 git ez rebase main --check python -B -m pytest
 .fi
+.SH INTERACTIVE PROPOSAL REVIEW
+.B --interactive
+is supported for merge and rebase. Review each harness proposal before engine
+staging: accept, revise with feedback, or stop. This is not Git's interactive
+rebase sequence editor. Revisions retain current proposed files and require
+fresh
+approval. Invalid input, EOF and interruption never accept.
+.PP
+The display includes diffs, captured contents and capture limits, rationale and
+agent-reported checks and uncertainties. Final validation runs later. Approval
+still requires engine checks; changes during review invalidate approval.
+Each proposal, feedback and decision is retained in the audit separately from
+application. Stop preserves files, the index and the active operation for
+native
+Git inspection, continuation or abort. No rollback is performed.
+.PP
+No conflicts means no prompt or model call. Resolutions already staged by
+rerere
+autoupdate do not pass through harness review.
 .SH SEE ALSO
 .BR git (1),
 .BR git-config (1),
@@ -309,19 +430,3 @@ git ez rebase main --check python -B -m pytest
 .BR git-merge (1)
 .PP
 https://github.com/nico97118/git-ez
-.SH INTERACTIVE PROPOSAL REVIEW
-.B --interactive
-is supported for merge and rebase. Review each harness proposal before engine
-staging: accept, revise with feedback, or stop. This is not Git's interactive
-rebase sequence editor. Revisions retain current proposed files and require fresh
-approval. Invalid input, EOF and interruption never accept.
-.PP
-The display includes diffs, captured contents and capture limits, rationale and
-agent-reported checks and uncertainties. Final validation runs later. Approval
-still requires engine checks; changes during review invalidate approval.
-Each proposal, feedback and decision is retained in the audit separately from
-application. Stop preserves files, the index and the active operation for native
-Git inspection, continuation or abort. No rollback is performed.
-.PP
-No conflicts means no prompt or model call. Resolutions already staged by rerere
-autoupdate do not pass through harness review.

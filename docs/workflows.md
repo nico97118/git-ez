@@ -121,8 +121,8 @@ already started with Git.
 
 Rebase accepts `--onto <newbase> <target>`. Here, target is the upstream boundary
 used to select commits, and newbase is where Git replays them. Both revisions are
-pinned and their named references are checked throughout the run. The audit and
-range-diff distinguish the original series from the series on the new base.
+pinned and their named references are checked throughout the run. The journal
+retains the original boundary and the new base separately.
 Only the current branch is rebased; a second positional branch argument and
 Git's `A...B` shorthand for the new base are not supported.
 
@@ -155,8 +155,7 @@ histories are needed and neither contains the other, an internal merge object re
 combined exclusions so native cherry-pick equivalence remains intact. This
 creates no branch or additional reference, and the object is not part of the
 result history. This object is unsigned metadata; signing options still apply to
-the resulting commits. The audit records its command, parents, tree and bounded raw
-capture, including any truncation. Git's pre-rebase hook receives the effective
+the resulting commits. Git's pre-rebase hook receives the effective
 pinned replay boundary, which may be this internal object, rather than the
 original upstream name. Hooks are still executed and their failures remain terminal.
 Hooks that require the original upstream argument should use native Git directly.
@@ -170,8 +169,7 @@ The instruction-format override and bounded sequence capture described below als
 apply to this case.
 
 The original upstream and any explicit new-base reference remain monitored.
-Final ancestry is checked against the pinned result base; range-diff compares
-the selected candidate series with its replay on that base. These options combine
+Final ancestry is checked against the pinned result base. These options combine
 with autosquash and signing without changing their scope.
 
 ```sh
@@ -222,8 +220,7 @@ cannot be captured within `ez.maxFileBytes`, Git stops before replay. Missing
 sequence evidence prevents overall success, even if integration has completed.
 The capture editor also writes `rebase-todo.txt.sha256` before replay; changes to
 the sequence or its fingerprint, including from Git hooks, make the run fail.
-`rebase-commits.log` records the resulting commits and messages; any truncation
-at `ez.maxFileBytes` is explicit in the manifest and report. Failures preserve the
+Inspect resulting commits and messages with `git log`. Failures preserve the
 actual local state and available evidence for inspection and native recovery.
 
 ```sh
@@ -241,7 +238,7 @@ an already up-to-date branch stays unchanged. `--ff-only` refuses divergent
 histories without calling the model or changing the checkout. `--ff-only` is
 merge-only; in rebase, `--no-ff` forces replay and `--ff` resets that request.
 Put these options before `--check`, which consumes all
-remaining arguments. The requested policy is recorded in the audit and report.
+remaining arguments. The requested policy is recorded in the journal.
 
 ```sh
 git ez merge feature --no-ff
@@ -305,11 +302,11 @@ git ez merge feature --verify-signatures
 Both operations accept `--rerere-autoupdate` / `--no-rerere-autoupdate`, overriding
 `rerere.autoupdate` for the whole run, including continuation, without changing
 stored Git configuration. This does not enable `rerere.enabled`.
-When enabled rerere reuses and stages a recorded resolution, git-ez records the
-native resolution and continues without calling the model for that conflict.
+When enabled rerere reuses and stages a recorded resolution, git-ez continues
+without calling the model for that conflict.
 With `--no-rerere-autoupdate`, Git may reuse file contents but leaves the index
 unmerged: git-ez sends those conflicts through its normal assisted resolution and
-validation before staging. The audit records requested and effective autoupdate.
+validation before staging. The journal records requested and effective autoupdate.
 
 ```sh
 git ez rebase main --rerere-autoupdate

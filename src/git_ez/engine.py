@@ -3,26 +3,29 @@
 
 """Local Git rebase/merge with traceable AI conflict resolution."""
 
-import difflib
 import hashlib
 import json
 import subprocess
+import tempfile
+from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from .agent import AGENT_PROMPT, AgentResolver, Resolver
-from .audit import Audit, Validation, now
+from .agent import AgentResolver, Resolver
+from .audit import Audit, Record, Validation, now, safe_error
+from .audit_storage import read_regular as read_evidence
 from .checks import WorktreeChecks
 from .config import Config
-from .conflicts import Conflict, Decision, LowConfidence
-from .errors import EzError
+from .conflicts import Conflict, Decision, LowConfidence, text_diff
+from .errors import AuditError, EzError
 from .git import Git, Stage, git_environment
 from .locking import checkout_lock
 from .options import CommitOptions, RebaseOptions
-from .review import review_proposal
+from .review import capture_proposal, review_proposal
 from .sequence_editor import editor_command, read_regular
 
 
@@ -91,23 +94,25 @@ class Engine:
                     raise EzError("Rebasing merge commits is outside this POC")
             audit = self._prepare_run(branch, before_oid, target, target_oid, target_ref, operation)
             if onto is not None:
-                audit.manifest.update(onto=onto, onto_oid=onto_oid, onto_ref=onto_ref)
+                audit.annotate(onto=onto, onto_oid=onto_oid, onto_ref=onto_ref)
             if operation == "rebase":
-                audit.manifest["rebase_options"] = asdict(options)
-                audit.manifest["rebase_plan"] = plan
+                audit.annotate(rebase_options=asdict(options))
+                audit.annotate(rebase_plan=plan)
             if operation == "merge":
-                audit.manifest["merge_ff"] = merge_ff
-            audit.manifest["commit_options"] = asdict(commit_options)
-            audit.manifest["rerere_autoupdate"] = rerere_autoupdate
-            audit.manifest["interactive"] = interactive
-            audit.manifest["validation"] = Validation(
-                command=list(validation), status="not_run" if validation else "not_requested"
+                audit.annotate(merge_ff=merge_ff)
+            audit.annotate(commit_options=asdict(commit_options))
+            audit.annotate(rerere_autoupdate=rerere_autoupdate)
+            audit.annotate(interactive=interactive)
+            audit.annotate(
+                validation=Validation(
+                    command=list(validation), status="not_run" if validation else "not_requested"
+                )
             )
-            phase = "integration"
+            phase = "initialization"
             try:
+                audit.initialize()
+                phase = "integration"
                 self._integrate(audit, validation)
-                phase = "result_capture"
-                self._record_result(audit)
                 if validation:
                     phase = "validation"
                     self.validate(git, audit, validation)
@@ -131,31 +136,11 @@ class Engine:
                 )
                 raise
             finally:
-                capture_error = audit.attempt(
-                    "exit worktree",
-                    lambda: audit.capture_worktree(
-                        git,
-                        audit.directory / "exit",
-                        self.config.max_file_bytes,
-                        reference=audit.manifest.get("result_oid", audit.manifest["before_oid"]),
-                    ),
-                    "exit/files.json",
-                )
-                if audit.has_artifact("exit/files.json"):
-                    audit.manifest["exit_state"] = "exit/files.json"
-                if capture_error is not None:
-                    audit.manifest["capture_error"] = str(capture_error)
-                    if audit.manifest["status"] == "succeeded":
-                        audit.set_status(
-                            "failed", EzError("Final audit capture failed; inspect the report")
-                        )
-                if "rebase_sequence" in audit.manifest:
+                if "rebase_sequence" in audit.view:
                     sequence_error = audit.attempt(
-                        "rebase sequence",
-                        lambda: self._verify_sequence_capture(audit),
-                        audit.manifest["rebase_sequence"]["artifact"],
+                        "sequence guard", lambda: self._verify_sequence_capture(audit)
                     )
-                    if sequence_error is not None and audit.manifest["status"] == "succeeded":
+                    if sequence_error is not None and audit.view["status"] == "succeeded":
                         audit.set_status("failed", sequence_error, phase="verification")
                 audit.finalize()
             return audit
@@ -258,7 +243,7 @@ class Engine:
 
     def _pin_rebase_selection(self, audit: Audit) -> None:
         """Represent the union of pinned exclusions without introducing any refs."""
-        plan = audit.manifest["rebase_plan"]
+        plan = audit.view["rebase_plan"]
         upstream = plan["upstream_oid"]
         fork = plan["fork_point"]["oid"]
         selection = upstream
@@ -288,22 +273,11 @@ class Engine:
                     "git-ez pinned rebase selection",
                 )
                 selection = self.git.text(*args)
-                raw = self.git.run("cat-file", "commit", selection).stdout
-                artifact = "rebase-selection-anchor.txt"
-                (audit.directory / artifact).write_bytes(raw[: self.config.max_file_bytes])
-                plan["selection_anchor"] = {
-                    "oid": selection,
-                    "parents": [upstream, fork],
-                    "tree_oid": tree,
-                    "artifact": artifact,
-                    "command": ["git", *args],
-                    "truncated": len(raw) > self.config.max_file_bytes,
-                    "limit_bytes": self.config.max_file_bytes,
-                }
         plan["selection_oid"] = selection
         plan["requires_sequence"] = (
             fork is not None and selection != upstream and plan["base_oid"] == fork
         )
+        audit.annotate(rebase_plan=plan)
         audit.save()
 
     def _check_repository(self) -> str:
@@ -329,10 +303,11 @@ class Engine:
         operation: str,
     ) -> Audit:
         common = Path(self.git.text("rev-parse", "--path-format=absolute", "--git-common-dir"))
+        git_directory = self.git.text("rev-parse", "--absolute-git-dir")
         audit = Audit(
             common / "ez" / "runs" / uuid4().hex,
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "created_at": now(),
                 "status": "running",
                 "operation": operation,
@@ -349,24 +324,43 @@ class Engine:
                 "conflicts": [],
             },
         )
-        (audit.directory / "config.json").write_text(
-            json.dumps(self.config.audit_dict(), indent=2), encoding="utf-8"
+        audit.annotate(
+            git_directory=git_directory,
+            common_git_directory=str(common),
         )
-        (audit.directory / "system-prompt.txt").write_text(AGENT_PROMPT, encoding="utf-8")
+        audit.protect(self.config.resolved_api_key())
         return audit
 
     def _verify_target(self, audit: Audit) -> None:
         for name in ("target", "onto"):
-            ref = audit.manifest.get(f"{name}_ref")
-            if ref and self.git.commit_oid(ref) != audit.manifest[f"{name}_oid"]:
+            ref = audit.view.get(f"{name}_ref")
+            if ref and self.git.commit_oid(ref) != audit.view[f"{name}_oid"]:
                 raise EzError(f"{name.capitalize()} reference changed during integration")
+
+    def _step(
+        self,
+        git: Git,
+        audit: Audit,
+        command: tuple[str, ...],
+        *,
+        sequence_editor: str | None = None,
+        expected_stop: Callable[[], bool] | None = None,
+        inherited_fds: tuple[int, ...] = (),
+    ) -> subprocess.CompletedProcess[bytes]:
+        result = git.run(
+            *command, check=False, sequence_editor=sequence_editor, inherited_fds=inherited_fds
+        )
+        if result.returncode and (expected_stop is None or not expected_stop()):
+            detail = result.stderr.decode("utf-8", errors="replace").strip()
+            raise EzError(f"Native Git command failed ({result.returncode}): {detail}")
+        return result
 
     def _integrate(self, audit: Audit, validation: tuple[str, ...]) -> None:
         git = self.git
-        operation = audit.manifest["operation"]
-        rebase_options = RebaseOptions(**audit.manifest.get("rebase_options", {}))
-        commit_options = CommitOptions(**audit.manifest["commit_options"])
-        requested_rerere = audit.manifest["rerere_autoupdate"]
+        operation = audit.view["operation"]
+        rebase_options = RebaseOptions(**audit.view.get("rebase_options", {}))
+        commit_options = CommitOptions(**audit.view["commit_options"])
+        requested_rerere = audit.view["rerere_autoupdate"]
         rerere = requested_rerere
         rerere_config: tuple[str, ...] = ()
         if requested_rerere is None:
@@ -379,38 +373,62 @@ class Engine:
         else:
             # Scope the CLI override to every Git step, including continuation.
             rerere_config = ("-c", f"rerere.autoupdate={'true' if rerere else 'false'}")
-        audit.manifest["rerere_autoupdate_effective"] = rerere
+        audit.annotate(rerere_autoupdate_effective=rerere)
         auto_resolved = False
 
         def step(
-            *args: str, sequence_editor: str | None = None
+            *args: str, sequence_editor: str | None = None, inherited_fds: tuple[int, ...] = ()
         ) -> subprocess.CompletedProcess[bytes]:
             nonlocal auto_resolved
             previous_tree = git.run(
                 "rev-parse", "--verify", "AUTO_MERGE^{tree}", check=False
             ).stdout
+            auto_resolved = False
             command = (*rerere_config, *args)
-            result = git.run(*command, check=False, sequence_editor=sequence_editor)
-            conflict_tree = git.run(
-                "rev-parse", "--verify", "AUTO_MERGE^{tree}", check=False
-            ).stdout
-            # A new conflict tree distinguishes rerere from a failing hook/commit on
-            # an already resolved stop. Never retry a rejected hook implicitly.
-            auto_resolved = rerere and bool(conflict_tree) and conflict_tree != previous_tree
-            with (audit.directory / "integration.log").open("ab") as stream:
-                stream.write(("git " + " ".join(command) + "\n").encode())
-                stream.write(result.stdout + result.stderr + b"\n")
-            return result
+
+            def expected_stop() -> bool:
+                nonlocal auto_resolved
+                if (
+                    operation == "rebase"
+                    and sequence_mode
+                    and redactions is not None
+                    and not redactions.closed
+                ):
+                    redactions.seek(0)
+                    try:
+                        helper_result = json.load(redactions)
+                    except (OSError, ValueError):
+                        helper_result = None
+                    if isinstance(helper_result, dict) and helper_result.get("phase") == "failed":
+                        audit.set_status(
+                            "failed",
+                            AuditError("Native sequence evidence capture failed"),
+                            phase="sequence_capture",
+                        )
+                conflict_tree = git.run(
+                    "rev-parse", "--verify", "AUTO_MERGE^{tree}", check=False
+                ).stdout
+                auto_resolved = rerere and bool(conflict_tree) and conflict_tree != previous_tree
+                return bool(git.conflicts()) or (auto_resolved and git.operation_active())
+
+            return self._step(
+                git,
+                audit,
+                command,
+                sequence_editor=sequence_editor,
+                expected_stop=expected_stop if args[0] in ("rebase", "merge", "-c") else None,
+                inherited_fds=inherited_fds,
+            )
 
         if (
-            self._check_repository() != audit.manifest["branch"]
-            or git.branch_oid(audit.manifest["branch"]) != audit.manifest["before_oid"]
+            self._check_repository() != audit.view["branch"]
+            or git.branch_oid(audit.view["branch"]) != audit.view["before_oid"]
         ):
             raise EzError("Current branch changed before integration")
         self._verify_target(audit)
         if operation == "rebase":
             self._pin_rebase_selection(audit)
-            plan = audit.manifest["rebase_plan"]
+            plan = audit.view["rebase_plan"]
             flags: tuple[str, ...] = ("--onto", plan["base_oid"], "--no-fork-point")
             if rebase_options.reapply_cherry_picks is None and plan["reapply_cherry_picks"]:
                 flags += ("--reapply-cherry-picks",)
@@ -425,34 +443,47 @@ class Engine:
             prefix: tuple[str, ...] = ()
             if sequence_mode:
                 sequence = audit.directory / "rebase-todo.txt"
-                audit.manifest["rebase_sequence"] = {
+                sequence_evidence = {
                     "artifact": sequence.name,
                     "digest_artifact": sequence.name + ".sha256",
+                    "metadata_artifact": sequence.name + ".capture.json",
                     "status": "pending",
                     "limit_bytes": self.config.max_file_bytes,
                 }
+                audit.annotate(rebase_sequence=sequence_evidence)
                 audit.save()
-                sequence_editor = editor_command(sequence, self.config.max_file_bytes)
                 # Prevent a configured multiline instruction format from adding
                 # instructions to the internally generated interactive sequence.
                 prefix = ("-c", "rebase.instructionFormat=%s")
             try:
-                result = step(
-                    *prefix,
-                    "rebase",
-                    "--merge",
-                    "--no-autostash",
-                    "--no-update-refs",
-                    "--no-rebase-merges",
-                    *flags,
-                    *rebase_options.flags(),
-                    *commit_options.flags(),
-                    plan["selection_oid"],
-                    sequence_editor=sequence_editor,
-                )
+                # Secrets travel only in an inherited, unlinked descriptor. They are
+                # never command arguments, environment values, or audit artifacts.
+                with tempfile.TemporaryFile() if sequence_mode else nullcontext(None) as redactions:
+                    if redactions is not None:
+                        redactions.write(json.dumps([self.config.resolved_api_key()]).encode())
+                        redactions.seek(0)
+                        sequence_editor = editor_command(
+                            audit.directory / "rebase-todo.txt",
+                            self.config.max_file_bytes,
+                            redactions.fileno(),
+                        )
+                    result = step(
+                        *prefix,
+                        "rebase",
+                        "--merge",
+                        "--no-autostash",
+                        "--no-update-refs",
+                        "--no-rebase-merges",
+                        *flags,
+                        *rebase_options.flags(),
+                        *commit_options.flags(),
+                        plan["selection_oid"],
+                        sequence_editor=sequence_editor,
+                        inherited_fds=(redactions.fileno(),) if redactions is not None else (),
+                    )
             finally:
                 if sequence_mode:
-                    evidence = audit.manifest["rebase_sequence"]
+                    evidence = audit.view["rebase_sequence"]
                     try:
                         content = read_regular(
                             audit.directory / evidence["artifact"], self.config.max_file_bytes
@@ -461,37 +492,35 @@ class Engine:
                             audit.directory / evidence["digest_artifact"], 64
                         ).decode("ascii")
                         if hashlib.sha256(content).hexdigest() != digest:
-                            raise ValueError("Captured sequence changed before Git returned")
-                    except (OSError, ValueError) as exc:
-                        evidence.update(status="unavailable", error=str(exc))
+                            raise AuditError("Captured sequence changed before Git returned")
+                    except (EzError, OSError, ValueError) as exc:
+                        evidence.update(status="unavailable", error=safe_error(exc))
                     else:
+                        capture_metadata = json.loads(
+                            read_evidence(audit.directory / evidence["metadata_artifact"])
+                        )
                         evidence.update(
+                            redacted=capture_metadata["redacted"],
+                            source_sha256=capture_metadata["source_sha256"],
                             status="captured",
                             sha256=digest,
                             size_bytes=len(content),
                         )
+                    audit.annotate(rebase_sequence=evidence)
                     audit.save()
         else:
             # Let Git fast-forward or create a merge commit, as git merge normally would.
-            merge_ff = audit.manifest["merge_ff"]
+            merge_ff = audit.view["merge_ff"]
             flags = (f"--{merge_ff}",) if merge_ff is not None else ()
             result = step(
-                "merge", "--no-edit", *flags, *commit_options.flags(), audit.manifest["target_oid"]
+                "merge", "--no-edit", *flags, *commit_options.flags(), audit.view["target_oid"]
             )
         rounds = 0
         while result.returncode:
             stages = git.conflicts()
             if not stages:
                 if not auto_resolved or not git.operation_active():
-                    raise EzError("Git stopped without resolvable conflicts; see integration.log")
-                audit.manifest.setdefault("native_resolutions", []).append(
-                    {
-                        "mechanism": "rerere",
-                        "head": git.text("rev-parse", "HEAD"),
-                        "rationale": "Git reused and staged a recorded conflict resolution.",
-                    }
-                )
-                audit.save()
+                    raise EzError("Git stopped without resolvable conflicts; inspect Git state")
             else:
                 rounds += 1
                 if rounds > self.config.max_rounds:
@@ -509,12 +538,13 @@ class Engine:
                 )
             ):
                 replay_oid = git.text("rev-parse", "REBASE_HEAD")
-                audit.manifest.setdefault("empty_commits", []).append(
+                audit.add_record(
+                    "empty_commits",
                     {
                         "commit": replay_oid,
                         "policy": rebase_options.empty,
                         "reason": "Resolution left no staged changes relative to HEAD.",
-                    }
+                    },
                 )
                 audit.save()
                 if rebase_options.empty == "stop":
@@ -534,10 +564,10 @@ class Engine:
                         *commit_options.flags(),
                     )
                     if committed.returncode:
-                        raise EzError("Cannot retain empty commit; see integration.log")
+                        raise EzError("Cannot retain empty commit; inspect Git state")
             if (
                 operation == "merge"
-                and git.text("rev-parse", "MERGE_HEAD") != audit.manifest["target_oid"]
+                and git.text("rev-parse", "MERGE_HEAD") != audit.view["target_oid"]
             ):
                 raise EzError("Merge target changed before Git continuation")
             if operation == "merge" and commit_options.flags(verify=False):
@@ -560,10 +590,10 @@ class Engine:
                 result = step(operation, "--continue")
         if git.operation_active() or git.conflicts():
             raise EzError("Git integration did not complete")
-        audit.manifest["integrated"] = True
+        audit.completed(git.text("rev-parse", "HEAD"))
 
     def _verify_sequence_capture(self, audit: Audit) -> None:
-        evidence = audit.manifest["rebase_sequence"]
+        evidence = audit.view["rebase_sequence"]
         try:
             if evidence["status"] != "captured":
                 raise EzError(evidence.get("error", "Initial sequence capture was unavailable"))
@@ -576,7 +606,8 @@ class Engine:
             if digest != evidence["sha256"]:
                 raise EzError("Captured sequence fingerprint changed during rebase continuation")
         except (EzError, OSError, ValueError) as exc:
-            evidence.update(status="unavailable", error=str(exc))
+            evidence.update(status="unavailable", error=safe_error(exc))
+            audit.annotate(rebase_sequence=evidence)
             raise EzError(
                 "Required rebase sequence capture is unavailable; inspect the audit"
             ) from exc
@@ -602,90 +633,30 @@ class Engine:
                 break
         raise EzError("Cannot determine the current autosquash action; inspect the rebase state")
 
-    def _record_result(self, audit: Audit) -> None:
-        git = self.git
-        before_oid = audit.manifest["before_oid"]
-        result_oid = git.text("rev-parse", "HEAD")
-        audit.manifest["result_oid"] = result_oid
-        (audit.directory / "result.diff").write_bytes(
-            git.run(
-                "diff", "--no-ext-diff", "--no-textconv", "--binary", before_oid, result_oid
-            ).stdout
-        )
-        if audit.manifest["operation"] == "rebase":
-            plan = audit.manifest["rebase_plan"]
-            selection_oid = plan["selection_oid"]
-            base_oid = plan["base_oid"]
-            ranges = (
-                (f"{selection_oid}..{before_oid}", f"{base_oid}..{result_oid}")
-                if selection_oid != base_oid
-                else (selection_oid, before_oid, result_oid)
-            )
-            # Git rejects empty ranges in its two-range syntax. Represent an empty
-            # side at the other base using the three-revision syntax instead.
-            if selection_oid != base_oid:
-                if not git.text("rev-list", f"{selection_oid}..{before_oid}"):
-                    ranges = (base_oid, base_oid, result_oid)
-                elif not git.text("rev-list", f"{base_oid}..{result_oid}"):
-                    ranges = (selection_oid, before_oid, selection_oid)
-            args = (
-                "range-diff",
-                "--no-color",
-                "--no-ext-diff",
-                "--no-textconv",
-                *ranges,
-            )
-            (audit.directory / "range-diff.txt").write_bytes(git.run(*args).stdout)
-            audit.manifest["range_diff"] = {
-                "artifact": "range-diff.txt",
-                "before": f"{selection_oid}..{before_oid}",
-                "after": f"{base_oid}..{result_oid}",
-                "command": ["git", *args],
-            }
-            if "rebase_sequence" in audit.manifest:
-                contents = git.run(
-                    "log",
-                    "--reverse",
-                    "--no-color",
-                    "--no-decorate",
-                    "--no-show-signature",
-                    "--no-notes",
-                    "--format=raw",
-                    f"{base_oid}..{result_oid}",
-                ).stdout
-                artifact = "rebase-commits.log"
-                (audit.directory / artifact).write_bytes(contents[: self.config.max_file_bytes])
-                audit.manifest["result_commits"] = {
-                    "artifact": artifact,
-                    "truncated": len(contents) > self.config.max_file_bytes,
-                    "limit_bytes": self.config.max_file_bytes,
-                }
-        audit.save()
-
     def _verify_result(self, audit: Audit) -> None:
         git = self.git
-        if git.text("rev-parse", "HEAD") != audit.manifest["result_oid"]:
+        if git.text("rev-parse", "HEAD") != audit.view["result_oid"]:
             raise EzError("Validation changed HEAD")
-        if self._check_repository() != audit.manifest["branch"]:
+        if self._check_repository() != audit.view["branch"]:
             raise EzError("Checked-out branch changed during integration")
-        if git.branch_oid(audit.manifest["branch"]) != audit.manifest["result_oid"]:
+        if git.branch_oid(audit.view["branch"]) != audit.view["result_oid"]:
             raise EzError("Current branch changed during integration")
         self._verify_target(audit)
         if git.run(
             "merge-base",
             "--is-ancestor",
-            audit.manifest.get("rebase_plan", {}).get("base_oid", audit.manifest["target_oid"]),
-            audit.manifest["result_oid"],
+            audit.view.get("rebase_plan", {}).get("base_oid", audit.view["target_oid"]),
+            audit.view["result_oid"],
             check=False,
         ).returncode:
             raise EzError("Integration result does not contain the pinned target or new base")
         if (
-            audit.manifest["operation"] == "merge"
+            audit.view["operation"] == "merge"
             and git.run(
                 "merge-base",
                 "--is-ancestor",
-                audit.manifest["before_oid"],
-                audit.manifest["result_oid"],
+                audit.view["before_oid"],
+                audit.view["result_oid"],
                 check=False,
             ).returncode
         ):
@@ -697,70 +668,87 @@ class Engine:
         audit: Audit,
         name: str,
         versions: dict[int, Stage],
-    ) -> tuple[dict[str, Any], Conflict]:
-        number = len(audit.manifest["conflicts"]) + 1
-        record: dict[str, Any] = {
-            "number": number,
-            "path": name,
-            "head": git.text("rev-parse", "HEAD"),
-            "replay_commit": git.run("rev-parse", "--verify", "REBASE_HEAD", check=False)
-            .stdout.decode()
-            .strip()
-            or None,
-            "stages": {str(k): asdict(v) for k, v in versions.items()},
-            "status": "pending",
-            "artifacts": {},
-        }
-        audit.manifest["conflicts"].append(record)
-        audit.save()
+        stop_id: str | None = None,
+    ) -> tuple[Record, Conflict]:
+        number = len(audit.view["conflicts"]) + 1
+        record = audit.add_record(
+            "conflicts",
+            {
+                "number": number,
+                "path": name,
+                "head": git.text("rev-parse", "HEAD"),
+                "status": "pending",
+                "artifacts": {},
+                "stop_id": stop_id or uuid4().hex,
+            },
+        )
         modes = {stage.mode for stage in versions.values()}
         if not modes <= {"100644", "100755"} or len(modes) != 1:
             raise EzError(f"Non-regular file or mode conflict requires manual resolution: {name}")
-        path = git.safe_path(name)
         contents: dict[str, str | None] = {}
         for stage_number, label in ((1, "base"), (2, "ours"), (3, "theirs")):
-            stage = versions.get(stage_number)
-            if stage is None:
-                contents[label] = None
-                continue
-            raw = git.blob(stage, 10_000_000)
-            if b"\x00" in raw:
+            raw = git.blob(versions[stage_number], 10_000_000) if stage_number in versions else None
+            if raw is not None and b"\x00" in raw:
                 raise EzError(f"Binary file requires manual resolution: {name}")
             try:
-                decoded = raw.decode("utf-8")
-                contents[label] = decoded
+                contents[label] = raw.decode("utf-8") if raw is not None else None
             except UnicodeDecodeError as exc:
                 raise EzError(f"Non-UTF-8 file requires manual resolution: {name}") from exc
-            record["artifacts"][label] = audit.artifact(number, f"{label}.txt", decoded)
-        marked = None
-        if path.exists():
-            if path.stat().st_size > (10_000_000):
+        path = git.safe_path(name)
+        try:
+            raw_marked = read_regular(path, 10_000_001) if path.exists() else None
+            if raw_marked is not None and len(raw_marked) > 10_000_000:
                 raise EzError(f"Marked file too large: {name}")
-            try:
-                with path.open(encoding="utf-8", newline="") as stream:
-                    marked = stream.read()
-            except UnicodeDecodeError as exc:
-                raise EzError(f"Non-UTF-8 working file requires manual resolution: {name}") from exc
-            record["artifacts"]["marked"] = audit.artifact(number, "marked.txt", marked)
-        context = git.text("log", "-5", "--format=%h %s", "HEAD")
-        if record["replay_commit"]:
-            context += "\nReplaying: " + git.text("show", "-s", "--format=%h %s", "REBASE_HEAD")
+            marked = raw_marked.decode("utf-8") if raw_marked is not None else None
+        except UnicodeDecodeError as exc:
+            raise EzError(f"Non-UTF-8 working file: {name}") from exc
         conflict = Conflict(
             name,
-            audit.manifest["operation"],
+            audit.operation,
             contents["base"],
             contents["ours"],
             contents["theirs"],
             marked,
-            context,
+            "",
         )
-        record["artifacts"]["request"] = audit.artifact(
-            number,
-            "request.json",
-            json.dumps(conflict.payload(), indent=2, ensure_ascii=True),
-        )
+        request = f"conflicts/{number:04d}/request.json"
+        audit.write_json(request, conflict.payload())
+        record.artifact("request", request)
+        diff = text_diff(conflict.ours, conflict.theirs, f"ours/{name}", f"theirs/{name}")
+        record.artifact("conflict_diff", audit.artifact(number, "conflict.diff", diff))
         audit.save()
         return record, conflict
+
+    def _save_resolution(
+        self, git: Git, audit: Audit, record: Record, conflict: Conflict, decision: Decision | None
+    ) -> None:
+        record.update(
+            resolution={
+                "action": "unavailable",
+                "content": None,
+                **(asdict(decision) if decision is not None else {}),
+            }
+        )
+        path = git.safe_path(conflict.path)
+        content = (
+            read_evidence(path, self.config.max_file_bytes + 1).decode("utf-8")
+            if path.exists()
+            else None
+        )
+        if content is not None and len(content.encode()) > self.config.max_file_bytes:
+            raise EzError("Proposal exceeds size limit")
+        record.update(
+            resolution={
+                "action": "write" if content is not None else "delete",
+                "content": content,
+                **(asdict(decision) if decision is not None else {}),
+            }
+        )
+        record.artifact(
+            "proposed", audit.artifact(record["number"], "resolution.txt", content or "")
+        )
+        diff = text_diff(conflict.ours, content, "ours", "resolution")
+        record.artifact("diff", audit.artifact(record["number"], "resolution.diff", diff))
 
     def resolve_conflicts(
         self,
@@ -771,36 +759,45 @@ class Engine:
         validation: tuple[str, ...],
     ) -> None:
         snapshots = [self.snapshot(git, audit, name, versions) for name, versions in stages.items()]
-        decision: dict[str, Any] = {}
-        status = "failed"
-        primary_error = False
-        session = audit.directory / "sessions" / f"{round_number:04d}"
         head = git.text("rev-parse", "HEAD")
         branch = git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.decode().strip() or None
         checks = WorktreeChecks(self.config)
+        decision: Decision | None = None
+        session_count = len(audit.view.get("sessions", []))
+        saved = primary_error = False
+        status = "failed"
         try:
             baseline = checks.baseline(git)
-            if audit.manifest.get("interactive"):
-                parsed, session = self._review(git, audit, round_number, list(stages), validation)
+            if audit.view.get("interactive"):
+                decision, _ = self._review(git, audit, round_number, list(stages), validation)
             else:
-                raw = self.resolver.run(git, audit, round_number, list(stages), validation)
-                parsed = Decision.parse(raw)
-            decision = asdict(parsed)
-            if parsed.confidence < self.config.min_confidence:
+                audit.add_record(
+                    "reviews",
+                    {
+                        "round": round_number,
+                        "attempt": round_number,
+                        "status": "running",
+                        "artifacts": f"proposals/{round_number:04d}",
+                        "feedback": None,
+                    },
+                )
+                decision = Decision.parse(
+                    self.resolver.run(git, audit, round_number, list(stages), validation)
+                )
+            if decision.confidence < self.config.min_confidence:
                 raise LowConfidence("Agent confidence below threshold; worktree preserved")
             checks.guard(git, audit, head, branch)
             checks.verify(git, list(stages), baseline)
-            # Only the orchestrator stages a verified result, including supporting files.
-            git.run("add", "-A", "--", ".")
-            session.mkdir(parents=True, exist_ok=True)
-            (session / "staged.diff").write_bytes(
-                git.run(
-                    "diff", "--cached", "--no-ext-diff", "--no-textconv", "--binary", "HEAD"
-                ).stdout
-            )
+            for record, conflict in snapshots:
+                self._save_resolution(git, audit, record, conflict, decision)
+            audit.save()
+            saved = True
+            self._step(git, audit, ("add", "-A", "--", "."))
             status = "applied"
-            if audit.manifest.get("interactive"):
-                audit.manifest["reviews"][-1]["status"] = "applied"
+            for record, _ in snapshots:
+                record.update(status=status, application="staged")
+            audit.record("reviews").update(status=status)
+            audit.save()
         except LowConfidence:
             primary_error = True
             status = "low_confidence"
@@ -813,68 +810,24 @@ class Engine:
             primary_error = True
             raise
         finally:
-            session_number: int | None = round_number
-            if audit.manifest.get("interactive"):
-                # A failed review never returns its session; use only this stop's attempt.
-                review = next(
-                    (
-                        review
-                        for review in reversed(audit.manifest.get("reviews", []))
-                        if review["round"] == round_number
-                    ),
-                    None,
-                )
-                session_number = review["attempt"] if review else None
-            final_session = (
-                audit.directory / "sessions" / f"{session_number:04d}"
-                if session_number is not None
-                else None
-            )
-            sessions = audit.manifest.get("sessions", [])
-            details = sessions[-1] if sessions and sessions[-1]["round"] == session_number else {}
-            if not decision and "rationale" in details:
-                decision = {"rationale": details["rationale"], "confidence": details["confidence"]}
-            if details.get("status") == "low_confidence":
-                status = "low_confidence"
+            sessions = audit.view.get("sessions", [])
+            session = sessions[-1] if len(sessions) > session_count else None
+            if decision is None and session is not None and "rationale" in session:
+                decision = Decision(session["rationale"], session["confidence"])
             for record, conflict in snapshots:
-                record["status"] = status
-                for label, filename in (("session", "messages.json"), ("files", "files.json")):
-                    if final_session is not None and audit.has_artifact(
-                        (final_session / filename).relative_to(audit.directory).as_posix()
-                    ):
-                        record["artifacts"][label] = str(
-                            (final_session / filename).relative_to(audit.directory)
-                        )
-                try:
-                    path = git.safe_path(conflict.path)
-                    if path.exists() and path.stat().st_size > self.config.max_file_bytes:
-                        raise EzError("Proposal exceeds size limit; see session file snapshot")
-                    content = path.read_bytes().decode("utf-8") if path.exists() else None
-                    if decision:
-                        record["resolution"] = {
-                            "action": "write" if content is not None else "delete",
-                            "content": content,
-                            **decision,
-                        }
-                    record["artifacts"]["proposed"] = audit.artifact(
-                        record["number"], "proposed.txt", content or ""
+                record.update(status=status)
+                if session is not None:
+                    record.artifact("session", f"{session['artifacts']}/messages.json")
+                if not saved:
+                    error = audit.attempt(
+                        "conflict proposal",
+                        partial(self._save_resolution, git, audit, record, conflict, decision),
                     )
-                    diff = "".join(
-                        difflib.unified_diff(
-                            (conflict.ours or "").splitlines(keepends=True),
-                            (content or "").splitlines(keepends=True),
-                            fromfile="ours",
-                            tofile="proposed",
-                        )
-                    )
-                    record["artifacts"]["diff"] = audit.artifact(
-                        record["number"], "resolution.diff", diff
-                    )
-                except (EzError, OSError, ValueError) as exc:
-                    record["capture_error"] = str(exc)
-            save_error = audit.attempt("conflict metadata", audit.save)
-            if save_error is not None and not primary_error:
-                raise EzError("Conflict audit capture failed; inspect audit errors") from save_error
+                    if error is not None:
+                        record.update(capture_error=safe_error(error))
+            error = audit.attempt("conflict decisions", audit.save)
+            if error is not None and not primary_error:
+                raise AuditError("Cannot retain conflict decisions") from error
 
     def _review(
         self,
@@ -889,30 +842,50 @@ class Engine:
         branch = git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.decode().strip() or None
         checks = WorktreeChecks(self.config)
         while True:
-            reviews = audit.manifest.setdefault("reviews", [])
+            reviews = audit.view.get("reviews", [])
             number = len(reviews) + 1
-            proposal: dict[str, Any] = {
+            proposal_data: dict[str, Any] = {
                 "round": round_number,
                 "attempt": number,
                 "feedback": feedback,
                 "status": "running",
+                "application": "not_staged",
+                "stop_id": audit.view["conflicts"][-1]["stop_id"],
+                "conflict_ids": [record["id"] for record in audit.view["conflicts"][-len(paths) :]],
                 "artifacts": f"proposals/{number:04d}",
             }
-            reviews.append(proposal)
+            proposal = audit.add_record("reviews", proposal_data)
             audit.save()
             directory = audit.directory / proposal["artifacts"]
             primary_error = False
             try:
+                before_agent = checks.baseline(git)
                 raw = self.resolver.run(git, audit, number, paths, validation)
                 parsed = Decision.parse(raw)
-                proposal["resolution"] = asdict(parsed)
-                audit.capture_worktree(git, directory, self.config.max_file_bytes, paths)
-                proposal["status"] = "proposed"
+                proposal.update(resolution=asdict(parsed))
+                after_agent = checks.baseline(git)
+                selected = sorted(
+                    set(paths)
+                    | {
+                        name
+                        for name in before_agent.keys() | after_agent.keys()
+                        if before_agent.get(name) != after_agent.get(name)
+                    }
+                )
+                capture_proposal(audit, git, directory, self.config.max_file_bytes, selected)
+                proposal.update(status="proposed")
                 audit.save()
+                review_baseline = checks.baseline(git)
                 index = git.run("ls-files", "--stage", "-z").stdout
-                action, feedback = review_proposal(directory, parsed)
-                proposal["decision"] = action
-                proposal["user_feedback"] = feedback
+                recorded = (
+                    read_evidence(directory / "files.json"),
+                    read_evidence(directory / "worktree.diff"),
+                )
+                action, feedback = review_proposal(
+                    directory, parsed, (self.config.resolved_api_key(),)
+                )
+                proposal.update(decision=action)
+                proposal.update(user_feedback=feedback)
                 audit.save()
                 if action == "stop":
                     raise EzError("Review stopped; proposed files and Git operation preserved")
@@ -920,23 +893,34 @@ class Engine:
                 if git.run("ls-files", "--stage", "-z").stdout != index:
                     raise EzError("Index changed during review; integration stopped")
                 comparison = directory / "after-review"
-                audit.capture_worktree(git, comparison, self.config.max_file_bytes, paths)
-                for filename in ("files.json", "worktree.diff"):
-                    if (directory / filename).read_bytes() != (comparison / filename).read_bytes():
-                        raise EzError("Worktree changed during review; review no longer applies")
+                capture_proposal(audit, git, comparison, self.config.max_file_bytes, selected)
+                if checks.baseline(git) != review_baseline:
+                    raise EzError("Worktree changed during review; review no longer applies")
+                if recorded != (
+                    read_evidence(directory / "files.json"),
+                    read_evidence(directory / "worktree.diff"),
+                ):
+                    raise EzError("Proposal evidence changed during review")
+                proposed_files = json.loads(read_evidence(directory / "files.json"))["files"]
+                reviewed_files = json.loads(read_evidence(comparison / "files.json"))["files"]
+                if proposed_files != reviewed_files or (
+                    read_evidence(directory / "worktree.diff")
+                    != read_evidence(comparison / "worktree.diff")
+                ):
+                    raise EzError("Worktree changed during review; review no longer applies")
                 if action == "accept":
                     return parsed, audit.directory / "sessions" / f"{number:04d}"
             except (EzError, OSError, ValueError, KeyboardInterrupt) as exc:
                 primary_error = True
-                proposal["status"] = (
-                    "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+                proposal.update(
+                    status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
                 )
-                proposal["error"] = str(exc) or "Interrupted by user"
+                proposal.update(error=safe_error(exc))
                 raise
             except BaseException as exc:
                 primary_error = True
-                proposal["status"] = "interrupted" if isinstance(exc, SystemExit) else "failed"
-                proposal["error"] = f"Unexpected {type(exc).__name__}"
+                proposal.update(status="interrupted" if isinstance(exc, SystemExit) else "failed")
+                proposal.update(error=f"Unexpected {type(exc).__name__}")
                 raise
             finally:
                 capture_error = None
@@ -944,7 +928,8 @@ class Engine:
                     capture_error = audit.attempt(
                         "review worktree",
                         partial(
-                            audit.capture_worktree,
+                            capture_proposal,
+                            audit,
                             git,
                             directory,
                             self.config.max_file_bytes,
@@ -954,17 +939,18 @@ class Engine:
                     )
                 save_error = audit.attempt("review metadata", audit.save)
                 if not primary_error and (capture_error is not None or save_error is not None):
-                    raise EzError("Review audit capture failed; inspect audit errors") from (
+                    raise AuditError("Review audit capture failed; inspect audit errors") from (
                         capture_error or save_error
                     )
 
     def validate(self, git: Git, audit: Audit, command: tuple[str, ...]) -> None:
         validation = Validation(command=list(command), status="running")
-        audit.manifest["validation"] = validation
+        audit.annotate(validation=validation)
         try:
             audit.save()
         except Exception:
             validation["status"] = "not_run"
+            audit.annotate(validation=validation)
             raise
         failure: EzError | None = None
         try:
@@ -983,11 +969,7 @@ class Engine:
             failure.__cause__ = exc
         except (OSError, KeyboardInterrupt) as exc:
             validation["status"] = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
-            for name in ("validation.stdout", "validation.stderr"):
-                audit.evidence[name] = {
-                    "status": "unavailable",
-                    "reason": "Validation did not return output",
-                }
+            audit.annotate(validation=validation)
             raise
         else:
             stdout, stderr = result.stdout, result.stderr
@@ -995,19 +977,16 @@ class Engine:
             validation["returncode"] = result.returncode
             if result.returncode:
                 failure = EzError(f"Validation failed with code {result.returncode}")
-        output_error = audit.attempt(
+        audit.annotate(validation=validation)
+        audit.attempt(
             "validation stdout",
-            lambda: (audit.directory / "validation.stdout").write_bytes(stdout),
+            lambda: audit.write("validation.stdout", stdout),
             "validation.stdout",
         )
-        error_output_error = audit.attempt(
+        audit.attempt(
             "validation stderr",
-            lambda: (audit.directory / "validation.stderr").write_bytes(stderr),
+            lambda: audit.write("validation.stderr", stderr),
             "validation.stderr",
         )
         if failure is not None:
             raise failure
-        if output_error is not None or error_output_error is not None:
-            raise EzError("Validation audit capture failed; inspect audit errors") from (
-                output_error or error_output_error
-            )

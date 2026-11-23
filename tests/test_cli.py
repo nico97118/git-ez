@@ -40,6 +40,20 @@ def test_only_supported_git_commands_are_accepted(args):
 
 
 @pytest.mark.unit
+def test_show_rejects_report_without_authoritative_manifest(tmp_path, capsys):
+    report = tmp_path / "report.md"
+    content = "# Integration\nConflict: file.txt\nDecision: combine\nRationale: preserve intent\n"
+    report.write_text(content)
+    before = report.stat().st_mtime_ns
+    assert main(["show", str(tmp_path)]) == 2
+    output = capsys.readouterr()
+    assert not output.out
+    assert "Cannot read resolution journal" in output.err
+    assert report.stat().st_mtime_ns == before
+    assert list(tmp_path.iterdir()) == [report]
+
+
+@pytest.mark.unit
 def test_show_missing_report_returns_error(tmp_path, capsys):
     assert main(["show", str(tmp_path)]) == 2
     assert "git-ez:" in capsys.readouterr().err
@@ -246,7 +260,7 @@ def test_cli_ff_only_refuses_divergence_without_model_call(
     assert not cli_repo.operation_active()
     assert model_server.calls == []
     audit = next((cli_repo.path / ".git/ez/runs").iterdir())
-    assert "--ff-only" in (audit / "report.md").read_text()
+    assert "Not possible to fast-forward" in (audit / "report.md").read_text()
 
 
 @pytest.mark.unit

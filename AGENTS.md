@@ -35,8 +35,9 @@ consequence and clarify the intended change before implementing it.
 - `locking.py`: interprocess execution lock scoped to the current checkout.
 - `conflicts.py`: conflict evidence and resolution decisions.
 - `agent.py`, `agent_runtime.py`, `llm.py`: resolver contract, agent runtime, providers.
-- `audit.py`: persistent evidence and reports.
-- `audit_storage.py`, `audit_safety.py`: private capture files and credential filtering.
+- `audit.py`: conflict decision journal and finalization.
+- `audit_safety.py`, `audit_storage.py`: credential filtering and private atomic files.
+- `audit_report.py`: readable reports derived from saved decisions.
 - `probe.py`: provider connectivity diagnostics.
 - `tests/`: pytest tests, temporary repositories, deterministic resolvers, and local
   HTTP/TLS fixtures.
@@ -72,6 +73,11 @@ changing a behavior. Keep this map accurate when moving responsibilities.
 
 ## README scope and maintenance
 
+`docs/` is for user-facing explanations and references. Keep internal specifications,
+acceptance matrices, review reports, and development logs out of user documentation.
+Retain task-specific working material in the chat unless explicitly requested as
+repository content. Durable contribution rules belong in `AGENTS.md` or `CONTRIBUTING.md`.
+
 Treat `README.md` as a concise entry point for users evaluating and starting with
 git-ez. Keep it current without turning it into an exhaustive reference. It should
 cover:
@@ -91,7 +97,7 @@ and representative rather than enumerating every option or combination.
 Put exhaustive command and configuration details in `docs/man/git-ez.1`, development
 and validation instructions in `CONTRIBUTING.md`, and third-party licensing details
 in `docs/licensing.md`. Use `examples/` for longer demonstrations. Place other
-substantial explanations in an appropriate document under `docs/` when no existing
+substantial user-facing explanations under `docs/` when no existing
 document fits. Link these resources from the README where relevant, and keep the
 links and overlapping claims consistent. Do not move essential limitations out of
 the README merely to shorten it.
@@ -106,8 +112,19 @@ because code changed; leave it unchanged when its existing guidance remains accu
 
 Traceability is part of the feature, including unsuccessful runs.
 
-- Preserve conflict inputs, proposed and applied changes, decisions and reasons,
-  validation results, and final repository state through the existing audit flow.
+For audit changes, use the agreed requirements from the task context. Tie each
+blocking finding to a requirement and a reproducible counterexample. Review its execution, publication,
+and offline-reading boundaries together. Keep optional improvements separate from
+contract violations, record unverified gates explicitly, and do not claim complete
+acceptance from a green test count or a general reread alone.
+
+- Keep the audit focused on interventions above Git. For every conflict handled by
+  the LLM, retain the conflict diff, selected resolution, explanation and confidence.
+  Distinguish proposed, accepted and applied changes, including failed attempts.
+- Use Git for native history and repository diffs. Do not add Git command archives,
+  proof registries or offline certification. Preserve engine checks independently.
+- Retain optional validation results and useful model/tool diagnostics; supporting
+  diagnostic export failures must not become proof requirements.
 - Make unavailable evidence, capture limits, and truncation explicit. Do not present
   a partial capture as complete or follow symlinks while capturing file contents.
 - Keep credentials out of logs, reports, committed fixtures, and model tool

@@ -3,34 +3,45 @@
 
 """Explicit terminal review of captured proposals; never stages files."""
 
-import difflib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any
 
-from .conflicts import Decision
+from .audit_report import safe_text
+from .audit_safety import redact_bytes
+from .audit_storage import read_regular
+from .git import Git
+
+if TYPE_CHECKING:
+    from .audit import Audit
+from .conflicts import Decision, text_diff
 from .errors import EzError
 
 
-def review_proposal(directory: Path, decision: Decision) -> tuple[str, str | None]:
-    print((directory / "worktree.diff").read_text(errors="replace"))
-    capture = json.loads((directory / "files.json").read_text())
+def review_proposal(
+    directory: Path, decision: Decision, secrets: tuple[str, ...] = ()
+) -> tuple[str, str | None]:
+    def display(text: str) -> None:
+        filtered = redact_bytes(text.encode("utf-8", errors="backslashreplace"), secrets).decode()
+        print("\n".join(safe_text(line) for line in filtered.split("\n")))
+
+    display(read_regular(directory / "worktree.diff").decode(errors="replace"))
+    capture = json.loads(read_regular(directory / "files.json"))
     for record in capture["files"]:
-        print(f"File capture: {json.dumps(record, ensure_ascii=True)}")
+        display(f"File capture: {json.dumps(record, ensure_ascii=True)}")
         # Git diff omits untracked contents; show every captured file as well.
         if record.get("artifact"):
-            content = (directory / record["artifact"]).read_text(errors="replace")
-            print(
-                "".join(
-                    difflib.unified_diff(
-                        [],
-                        content.splitlines(keepends=True),
-                        fromfile="/dev/null",
-                        tofile=record["path"] + " (captured current content)",
-                    )
+            relative = PurePosixPath(record["artifact"])
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError("Unsafe proposal path")
+            content = read_regular(directory / relative).decode(errors="replace")
+            display(
+                text_diff(
+                    None, content, "/dev/null", record["path"] + " (captured current content)"
                 )
             )
-    print(f"Capture errors: {capture['capture_errors']}")
-    print(f"Agent rationale, reported checks and uncertainties: {decision.rationale}")
+    display(f"Capture errors: {capture['capture_errors']}")
+    display(f"Agent rationale, reported checks and uncertainties: {decision.rationale}")
     print(f"Agent confidence: {decision.confidence}")
     print("Engine checks and final validation have not yet run for this acceptance.")
     try:
@@ -47,3 +58,33 @@ def review_proposal(directory: Path, decision: Decision) -> tuple[str, str | Non
             print("An explicit choice and nonempty revision feedback are required.")
     except (EOFError, OSError) as exc:
         raise EzError("Cannot read review input; proposal and Git operation preserved") from exc
+
+
+def capture_proposal(
+    audit: "Audit", git: Git, directory: Path, limit: int, paths: list[str]
+) -> None:
+    """Retain the selected proposal for user review, excluding untouched Git resources."""
+    prefix = directory.relative_to(audit.directory).as_posix()
+    diff = git.run(
+        "diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD", "--", *paths
+    ).stdout
+    audit.write(f"{prefix}/worktree.diff", diff)
+    records = []
+    for number, name in enumerate(paths, 1):
+        path = git.safe_path(name)
+        record: dict[str, Any] = {"path": name}
+        if not path.exists():
+            record["state"] = "deleted"
+        else:
+            content = read_regular(path, limit + 1)
+            relative = f"files/{number:04d}.bin"
+            audit.write(f"{prefix}/{relative}", content[:limit])
+            record.update(
+                state="file",
+                artifact=relative,
+                size=path.stat().st_size,
+                recorded_bytes=len(content[:limit]),
+                truncated=len(content) > limit,
+            )
+        records.append(record)
+    audit.write_json(f"{prefix}/files.json", {"files": records, "capture_errors": []})

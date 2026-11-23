@@ -27,17 +27,17 @@ class WorktreeChecks:
             changed |= git.text("symbolic-ref", "-q", "HEAD") != branch
         else:
             changed |= bool(git.run("symbolic-ref", "-q", "HEAD", check=False).stdout)
-        changed |= git.branch_oid(audit.manifest["branch"]) != audit.manifest["before_oid"]
-        for name in ("target", "onto"):
-            ref = audit.manifest.get(f"{name}_ref")
-            if ref:
-                changed |= git.commit_oid(ref) != audit.manifest[f"{name}_oid"]
-        if audit.manifest["operation"] == "rebase":
+        inputs = audit.inputs
+        changed |= git.branch_oid(inputs.branch) != inputs.before_oid
+        for pinned in (inputs.target, inputs.onto):
+            if pinned is not None and pinned.reference:
+                changed |= git.commit_oid(pinned.reference) != pinned.oid
+        if audit.operation == "rebase":
             changed |= not git.rebase_active()
         else:
             merge_head = git.run("rev-parse", "--verify", "MERGE_HEAD", check=False)
             changed |= merge_head.returncode != 0 or (
-                merge_head.stdout.decode().strip() != audit.manifest["target_oid"]
+                merge_head.stdout.decode().strip() != inputs.target.oid
             )
         if changed:
             raise GitStateChanged(

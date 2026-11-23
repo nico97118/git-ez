@@ -142,17 +142,17 @@ def test_real_graph_reads_context_repairs_tests_and_persists_integration(repo, o
         operation=operation,
         check=repo.check,
     )
-    assert audit.manifest["status"] == "succeeded", audit.manifest
-    result = Git(Path(audit.manifest["worktree"]))
+    assert audit.view["status"] == "succeeded", audit.view
+    result = Git(Path(audit.view["worktree"]))
     assert result.text("show", "HEAD:notes.txt") == "Supporting change."
-    assert repo.git.branch_oid("feature") == audit.manifest["result_oid"]
+    assert repo.git.branch_oid("feature") == audit.view["result_oid"]
     assert "task" not in model.exposed_tools
     assert "read_file" in model.exposed_tools
     session = audit.directory / "sessions/0001"
     events = (session / "events.jsonl").read_text()
     assert "rules.txt" in events
     assert "AssertionError" in events
-    assert "notes.txt" in (session / "staged.diff").read_text()
+    assert "notes.txt" in events
     assert not (session / "checkpoints.sqlite").exists()
     assert json.loads((session / "runtime.json").read_text())["checkpoints"] == {
         "storage": "memory",
@@ -181,10 +181,10 @@ def test_finish_accepts_untouched_git_resources(repo, operation, kind):
         operation=operation,
     )
 
-    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.view["status"] == "succeeded", audit.view
     assert (repo.root / "resource.dat").read_bytes() == content
     assert repo.git.run("show", "HEAD:resource.dat").stdout == content
-    assert audit.manifest["sessions"][0]["status"] == "resolved"
+    assert audit.view["sessions"][0]["status"] == "resolved"
 
 
 def test_finish_rejects_agent_changes_to_git_integrated_binary_and_allows_repair(repo):
@@ -214,7 +214,7 @@ def test_finish_rejects_agent_changes_to_git_integrated_binary_and_allows_repair
         ],
     )
 
-    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.view["status"] == "succeeded", audit.view
     assert "Binary content" in str(model.seen[2])
     assert (repo.root / "resource.dat").read_bytes() == b"Git\x00resource"
 
@@ -228,8 +228,16 @@ def test_finish_with_markers_can_recover(repo) -> None:
             [tool("finish", rationale="Repaired after feedback", confidence=0.9)],
         ],
     )
-    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.view["status"] == "succeeded", audit.view
     assert "conflict markers" in str(model.seen[1])
+    events = [
+        json.loads(line)
+        for line in (audit.directory / "sessions/0001/events.jsonl").read_text().splitlines()
+    ]
+    feedback = [event for event in events if event.get("origin") == "middleware"]
+    assert len(feedback) == 1  # The SDK already recorded the attempted finish request.
+    assert feedback[0]["event"] == "tool_result"
+    assert "conflict markers" in feedback[0]["result"]["content"]
 
 
 def test_low_confidence_preserves_edits_and_audit(repo) -> None:
@@ -240,9 +248,9 @@ def test_low_confidence_preserves_edits_and_audit(repo) -> None:
             [tool("finish", rationale="Unclear business intent", confidence=0.1)],
         ],
     )
-    assert audit.manifest["status"] == "failed"
-    assert audit.manifest["sessions"][0]["status"] == "low_confidence"
-    assert (Path(audit.manifest["worktree"]) / "file.txt").read_text() == "uncertain\n"
+    assert audit.view["status"] == "failed"
+    assert audit.view["sessions"][0]["status"] == "low_confidence"
+    assert (Path(audit.view["worktree"]) / "file.txt").read_text() == "uncertain\n"
     assert (audit.directory / "sessions/0001/messages.json").is_file()
     assert "Unclear business intent" in (audit.directory / "report.md").read_text()
     assert (audit.directory / "sessions/0001/decision.json").is_file()
@@ -259,9 +267,9 @@ def test_limits_stop_unfinished_agent_for_the_expected_reason(repo, limit, error
     audit, model = run_agent(
         repo, [[tool("ls", path="/")]] * 5, config=replace(repo.config, **{limit: 2})
     )
-    assert audit.manifest["status"] == "failed"
-    assert error_name in audit.manifest["error"]
-    session = audit.manifest["sessions"][0]
+    assert audit.view["status"] == "failed"
+    assert error_name in audit.view["error"]
+    session = audit.view["sessions"][0]
     assert session["tool_calls"] == 2
     if limit == "agent_max_turns":
         assert len(model.seen) == 2
@@ -289,9 +297,9 @@ def test_all_conflicts_are_in_one_session(repo) -> None:
             [tool("finish", rationale="Both conflicts resolved together", confidence=0.9)],
         ],
     )
-    assert audit.manifest["status"] == "succeeded", audit.manifest
-    assert len(audit.manifest["sessions"]) == 1
-    assert len(audit.manifest["conflicts"]) == 2
+    assert audit.view["status"] == "succeeded", audit.view
+    assert len(audit.view["sessions"]) == 1
+    assert len(audit.view["conflicts"]) == 2
     assert repo.git.text("show", "HEAD:file.txt") == "combined"
     assert repo.git.text("show", "HEAD:second.txt") == "also combined"
     assert not repo.git.conflicts()
@@ -300,15 +308,15 @@ def test_all_conflicts_are_in_one_session(repo) -> None:
 
 def test_git_control_state_changes_are_detected(repo) -> None:
     audit, _ = run_agent(repo, [[tool("execute", command="git rebase --abort")]])
-    assert audit.manifest["status"] == "failed"
-    assert "Git control state" in audit.manifest["error"]
+    assert audit.view["status"] == "failed"
+    assert "Git control state" in audit.view["error"]
     assert repo.git.branch_oid("feature") == repo.source
 
 
 def test_plain_answer_without_finish_is_not_success(repo) -> None:
     audit, _ = run_agent(repo, [[]])
-    assert audit.manifest["status"] == "failed"
-    assert "without a verified finish" in audit.manifest["error"]
+    assert audit.view["status"] == "failed"
+    assert "without a verified finish" in audit.view["error"]
 
 
 def test_later_rebase_stop_gets_an_independent_session(repo) -> None:
@@ -324,8 +332,8 @@ def test_later_rebase_stop_gets_an_independent_session(repo) -> None:
             [tool("finish", rationale="Second replay resolved", confidence=0.9)],
         ],
     )
-    assert audit.manifest["status"] == "succeeded", audit.manifest
-    assert len(audit.manifest["sessions"]) == 2
+    assert audit.view["status"] == "succeeded", audit.view
+    assert len(audit.view["sessions"]) == 2
     for number in ("0001", "0002"):
         assert (audit.directory / "sessions" / number / "messages.json").is_file()
     assert model.position == 4
@@ -348,10 +356,10 @@ def test_changed_merge_head_is_rejected(repo):
         ],
         operation="merge",
     )
-    assert audit.manifest["status"] == "failed"
-    assert "Git control state" in audit.manifest["error"]
+    assert audit.view["status"] == "failed"
+    assert "Git control state" in audit.view["error"]
     assert repo.git.branch_oid("feature") == repo.source
-    assert audit.manifest["conflicts"][0]["status"] == "failed"
+    assert audit.view["conflicts"][0]["status"] == "failed"
 
 
 @pytest.mark.parametrize("transport", ["parameters", "count"])
@@ -399,9 +407,16 @@ def test_finish_in_a_tool_batch_is_rejected_until_it_is_called_alone(repo):
             [tool("finish", rationale="Verified alone", confidence=0.95)],
         ],
     )
-    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.view["status"] == "succeeded", audit.view
     assert "finish must be called alone" in str(model.seen[1])
-    assert audit.manifest["sessions"][0]["rationale"] == "Verified alone"
+    assert audit.view["sessions"][0]["rationale"] == "Verified alone"
+    events = [
+        json.loads(line)
+        for line in (audit.directory / "sessions/0001/events.jsonl").read_text().splitlines()
+    ]
+    rejected = [event for event in events if event.get("tool_call_id") == "call-1-0"]
+    assert [event["event"] for event in rejected] == ["tool_requested", "tool_result"]
+    assert rejected[-1]["result"]["content"] == "finish must be called alone"
 
 
 def test_agent_cannot_override_the_configured_command_timeout(repo):
@@ -414,9 +429,42 @@ def test_agent_cannot_override_the_configured_command_timeout(repo):
             [tool("finish", rationale="Resolved within limits", confidence=0.95)],
         ],
     )
-    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.view["status"] == "succeeded", audit.view
     assert "Command timeout exceeds configured limit" in str(model.seen[1])
     assert not (repo.root / "forbidden.txt").exists()
+    events = [
+        json.loads(line)
+        for line in (audit.directory / "sessions/0001/events.jsonl").read_text().splitlines()
+    ]
+    rejected = [event for event in events if event.get("tool_call_id") == "call-1-0"]
+    assert [event["event"] for event in rejected] == ["tool_requested", "tool_result"]
+    assert rejected[-1]["result"]["content"] == "Command timeout exceeds configured limit"
+    assert audit.view["sessions"][0]["tool_calls"] == 3
+
+
+@pytest.mark.parametrize("bad_call", [tool("missing_tool"), tool("execute")])
+def test_sdk_normalized_tool_feedback_is_recorded_once(repo, bad_call):
+    audit, _ = run_agent(
+        repo,
+        [
+            [bad_call],
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [tool("finish", rationale="Resolved after feedback", confidence=0.95)],
+        ],
+    )
+    assert audit.view["status"] == "succeeded", audit.view.get("error")
+    events = [
+        json.loads(line)
+        for line in (audit.directory / "sessions/0001/events.jsonl").read_text().splitlines()
+    ]
+    requests = [event for event in events if event["event"] == "tool_requested"]
+    results = [event for event in events if event["event"] == "tool_result"]
+    assert len(requests) == len(results) == 3
+    feedback = next(
+        event["result"] for event in results if event["result"]["tool_call_id"] == "call-1-0"
+    )
+    assert feedback["status"] == "error"
+    assert audit.view["sessions"][0]["tool_calls"] == 3
 
 
 def test_context_byte_limit_stops_further_model_calls_and_preserves_evidence(repo):
@@ -425,13 +473,13 @@ def test_context_byte_limit_stops_further_model_calls_and_preserves_evidence(rep
         [[command("print('x' * 10000)")]],
         config=replace(repo.config, agent_max_context_bytes=8192),
     )
-    assert audit.manifest["status"] == "failed"
-    assert "Agent context byte budget exceeded" in audit.manifest["error"]
+    assert audit.view["status"] == "failed"
+    assert "Agent context byte budget exceeded" in audit.view["error"]
     assert len(model.seen) == 1
-    assert audit.manifest["sessions"][0]["tool_calls"] == 1
+    assert audit.view["sessions"][0]["tool_calls"] == 1
     assert repo.git.operation_active()
     assert (audit.directory / "sessions/0001/events.jsonl").is_file()
-    assert (audit.directory / "exit/files.json").is_file()
+    assert (audit.directory / "run.json").is_file()
 
 
 @pytest.mark.parametrize("ref", ["main", "feature"])
@@ -448,25 +496,26 @@ def test_agent_cannot_move_input_refs_while_head_is_detached(repo, ref):
             ]
         ],
     )
-    assert audit.manifest["status"] == "failed"
-    assert "Git control state" in audit.manifest["error"]
-    assert not audit.manifest["integrated"]
+    assert audit.view["status"] == "failed"
+    assert "Git control state" in audit.view["error"]
+    assert not audit.view["integrated"]
     assert len(model.seen) == 1
     assert repo.git.branch_oid(ref) == base
-    assert audit.manifest["before_oid"] == repo.source
-    assert audit.manifest["target_oid"] == repo.parent
-    assert (audit.directory / "exit/files.json").is_file()
+    assert audit.view["before_oid"] == repo.source
+    assert audit.view["target_oid"] == repo.parent
+    assert (audit.directory / "run.json").is_file()
 
 
 def test_provider_failure_is_audited_without_persisting_exception_secrets(repo):
     secret = "provider-echoed-private-token"
     repo.mocker.patch.object(ScriptedModel, "_generate", side_effect=RuntimeError(secret))
     audit, _ = run_agent(repo, [])
-    assert audit.manifest["status"] == "failed"
-    assert not audit.manifest["integrated"]
+    assert audit.view["status"] == "failed"
+    assert not audit.view["integrated"]
     assert repo.git.operation_active()
     assert repo.git.branch_oid("feature") == repo.source
-    events = (audit.directory / "sessions/0001/events.jsonl").read_text()
+    event_path = audit.directory / "sessions/0001/events.jsonl"
+    events = event_path.read_text() if event_path.exists() else ""
     assert '"event": "model_error"' in events
     assert '"type": "RuntimeError"' in events
     for artifact in audit.directory.rglob("*"):
@@ -489,7 +538,7 @@ def test_resolver_mission_distinguishes_upstream_from_result_base(repo):
     )
     repo.mocker.patch("git_ez.agent_runtime.create_chat_model", return_value=model)
     audit = Engine(repo.root, repo.config).run(boundary, onto="main")
-    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.view["status"] == "succeeded", audit.view
     mission = json.loads((audit.directory / "sessions/0001/mission.json").read_text())
     assert mission["target_sha"] == boundary
     assert mission["rebase_base_sha"] == repo.parent
@@ -516,8 +565,8 @@ def test_interactive_revisions_reach_runtime_and_keep_separate_sessions(repo, mo
     mocker.patch("git_ez.agent_runtime.create_chat_model", return_value=model)
     mocker.patch("builtins.input", side_effect=["r", "preserve both intentions", "a"])
     audit = Engine(repo.root, repo.config).run("main", interactive=True)
-    assert audit.manifest["status"] == "succeeded", audit.manifest
-    assert len(audit.manifest["sessions"]) == 2
+    assert audit.view["status"] == "succeeded", audit.view
+    assert len(audit.view["sessions"]) == 2
     for number in (1, 2):
         assert (audit.directory / "sessions" / f"{number:04d}" / "messages.json").is_file()
     mission = json.loads((audit.directory / "sessions/0002/mission.json").read_text())
@@ -566,11 +615,11 @@ def test_agent_files_survive_success_failure_and_interruption(repo, outcome):
     assert not (session / "checkpoints.sqlite").exists()
     assert not (repo.root / ".ez-agent").exists()
     if outcome == "success":
-        assert audit.manifest["status"] == "succeeded"
+        assert audit.view["status"] == "succeeded"
         assert repo.git.text("show", "HEAD:file.txt") == "combined"
         assert repo.git.run("ls-files", "--", "*proof*").stdout == b""
     else:
-        assert audit.manifest["status"] == ("interrupted" if outcome == "interrupted" else "failed")
+        assert audit.view["status"] == ("interrupted" if outcome == "interrupted" else "failed")
         assert repo.git.operation_active()
         assert repo.git.branch_oid("feature") == repo.source
         assert (repo.root / "file.txt").read_text() == "combined\n"
@@ -586,8 +635,30 @@ def test_large_tool_output_is_offloaded_to_persistent_audit_files(repo):
         ],
         config=replace(repo.config, tool_output_bytes=200000, agent_max_context_bytes=1000000),
     )
-    assert audit.manifest["status"] == "succeeded", audit.manifest
+    assert audit.view["status"] == "succeeded", audit.view
     files = list((audit.directory / "sessions/0001/agent-files").rglob("*"))
     assert any(path.is_file() and "0123456789" * 15000 in path.read_text() for path in files)
     assert "/.ez-agent/" in str(model.seen[1])
     assert not (repo.root / ".ez-agent").exists()
+
+
+def test_optional_event_export_failure_preserves_the_conflict_decision(repo):
+    repo.mocker.patch(
+        "git_ez.audit.Audit.append_event", side_effect=OSError("event output unavailable")
+    )
+    audit, model = run_agent(
+        repo,
+        [
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [tool("finish", rationale="Combine both changes", confidence=0.95)],
+        ],
+    )
+    assert audit.view["status"] == "succeeded", audit.view
+    assert audit.published
+    record = json.loads((audit.directory / "run.json").read_text())["conflicts"][0]
+    assert record["resolution"]["rationale"] == "Combine both changes"
+    assert record["resolution"]["confidence"] == 0.95
+    assert record["resolution"]["content"] == "combined\n"
+    assert audit.audit_errors
+    assert repo.git.text("show", "HEAD:file.txt") == "combined"
+    assert model.position == 2

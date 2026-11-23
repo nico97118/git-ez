@@ -114,7 +114,7 @@ git ez merge feature --interactive
 # Run a final validation command in the target repository:
 git ez rebase main --check python -B -m pytest
 
-# Display a saved report using the run directory printed by git-ez:
+# Inspect a saved run:
 git ez show /path/to/project/.git/ez/runs/RUN_ID
 ```
 
@@ -125,7 +125,7 @@ be available, and generated test files must be ignored or cleaned up.
 
 With `--interactive`, choose accept, revise with feedback, or stop for each agent
 proposal. Engine checks still apply after acceptance. No conflicts means no model
-call or review prompt; resolutions already staged by native rerere are audited
+call or review prompt; resolutions already staged by native rerere are continued
 without agent review.
 
 ## Supported scope and limitations
@@ -163,11 +163,11 @@ are not forwarded. See the [manual](docs/man/git-ez.1) and
 
 ### Audit and failure recovery
 
-Runs retain local reports, conflict inputs, decisions, diffs, and agent evidence
-under `ez/runs/<id>` in the repository's common Git directory. Captures can be
-limited or incomplete; these conditions are reported. Audit files may contain
-sensitive code and output. See the [audit guide](docs/audit.md) for artifacts,
-status fields, capture limits, and failure handling.
+For each conflict handled by the LLM, the journal retains the conflict diff,
+resolution, explanation and confidence score under `ez/runs/<id>` in the
+repository's common Git directory. `git ez show` displays the saved journal;
+Git provides commit history and repository diffs. Audit files may contain sensitive
+code and output. See the [audit guide](docs/audit.md) for artifacts and failure handling.
 
 Failure or interruption preserves the actual local state without automatic
 rollback. Inspect the report and `git status`, then use native Git to continue or
@@ -177,9 +177,11 @@ commits and validation output. Audit failures can also fail an otherwise complet
 integration. There is no agent session resume or crash recovery: checkpoints are
 in memory, and durable audit files are not a complete graph history.
 
-Exit codes: `0` for successful integration, report display, or compatible probe;
-`1` for a failed or interrupted run/probe; `2` for configuration, CLI, or precondition
-errors.
+For integrations, exit `0` requires published success; `1` means a failed or
+interrupted run or failed terminal publication; `2` means a configuration, CLI or
+precondition error. Probes use `0` for compatibility and `1` for failure.
+For `show`, `0` means the saved journal was readable and `2` means it could not be
+read. Displaying a journal does not validate a resolution.
 
 ## Documentation
 

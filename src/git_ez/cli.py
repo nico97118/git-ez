@@ -183,7 +183,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command == "show":
-            print((args.run_directory / "report.md").read_text(encoding="utf-8"))
+            from .audit import load_report
+
+            print(load_report(args.run_directory))
             return 0
         if args.command == "probe":
             from .probe import probe
@@ -235,22 +237,32 @@ def main(argv: list[str] | None = None) -> int:
             rerere_autoupdate=args.rerere_autoupdate,
             interactive=args.interactive,
         )
-        print(f"Status: {audit.manifest['status']}")
-        print(f"Report: {audit.directory / 'report.md'}")
-        print(f"Branch: {audit.manifest['branch']}")
-        print(f"Operation: {audit.manifest['operation']}")
-        print(f"Integrated: {audit.manifest['integrated']}")
-        if audit.manifest.get("error"):
-            print(f"Error: {audit.manifest['error']}", file=sys.stderr)
-        for error in audit.audit_errors:
-            print(f"Audit error ({error['phase']}): {error['message']}", file=sys.stderr)
-        report_evidence = audit.evidence.get("report.md")
-        if report_evidence is not None and report_evidence["status"] != "available":
+        from .audit_report import safe_text
+
+        print(f"Run: {safe_text(audit.directory.name)}")
+        print(f"Status: {audit.view['status']}")
+        if audit.owned:
+            print(f"Report: {safe_text(str(audit.directory / 'report.md'))}")
+        else:
             print(
-                f"Report unavailable or incomplete; inspect audit directory: {audit.directory}",
+                "Intended audit directory (not created by this run): "
+                f"{safe_text(str(audit.directory))}"
+            )
+        print(f"Branch: {safe_text(audit.view['branch'])}")
+        print(f"Operation: {audit.view['operation']}")
+        print(f"Integrated: {audit.view['integrated']}")
+        if audit.view.get("error"):
+            print(f"Error: {safe_text(audit.view['error'])}", file=sys.stderr)
+        for error in audit.audit_errors:
+            print(safe_text(f"Audit error ({error['phase']}): {error['message']}"), file=sys.stderr)
+        for warning in audit.presentation_errors:
+            print(f"Warning: {safe_text(warning)}", file=sys.stderr)
+        if not audit.published:
+            print(
+                "Resolution journal could not be saved; inspect the retained files.",
                 file=sys.stderr,
             )
-        return 1 if audit.manifest["status"] in ("failed", "interrupted") else 0
+        return 0 if audit.view["status"] == "succeeded" and audit.published else 1
     except (EzError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"git-ez: {exc}", file=sys.stderr)
         return 2

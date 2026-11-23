@@ -5,7 +5,7 @@
 
 import json
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from importlib.metadata import version
 from pathlib import Path
 from threading import RLock
@@ -23,19 +23,22 @@ from langchain.agents.middleware import (
     ModelCallLimitMiddleware,
     ToolCallLimitMiddleware,
 )
+from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
 from langchain.agents.middleware.types import ToolCallRequest, hook_config
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, ToolMessage, messages_to_dict
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.errors import GraphRecursionError
 from langsmith import tracing_context
 
 from .agent import AGENT_PROMPT
-from .audit import Audit, now, write_json
+from .audit import Audit, now, safe_error
 from .checks import GitStateChanged, WorktreeChecks
 from .config import Config
 from .conflicts import Decision, LowConfidence
-from .errors import EzError
+from .errors import AuditError, EzError
 from .git import Git, git_environment
 from .llm import create_chat_model
 
@@ -69,10 +72,6 @@ def error_info(error: BaseException) -> dict[str, Any]:
     return {"type": type(error).__name__, "status_code": getattr(error, "status_code", None)}
 
 
-class EventCaptureError(EzError):
-    """A required audit event could not be retained."""
-
-
 class SessionLog(BaseCallbackHandler):
     """Local SDK callbacks; no remote tracing service is required."""
 
@@ -86,31 +85,69 @@ class SessionLog(BaseCallbackHandler):
         self.conflicts = 0
         self.tools = 0
         self.messages: list[Any] = []
+        self._tool_requests: set[str | None] = set()
+        self._tool_results: set[str | None] = set()
 
     def event(self, event: str, **data: Any) -> None:
-        with self.lock, (self.directory / "events.jsonl").open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps({"at": now(), "event": event, **data}, default=str) + "\n")
+        with self.lock:
+            self.audit.append_event(
+                (self.directory / "events.jsonl").relative_to(self.audit.directory).as_posix(),
+                {"at": now(), "event": event, **data},
+            )
 
     def capture_event(self, event: str, **data: Any) -> Exception | None:
         return self.audit.attempt(
             f"session {event}",
             lambda: self.event(event, **data),
             (self.directory / "events.jsonl").relative_to(self.audit.directory).as_posix(),
-            append=True,
         )
 
-    def required_event(self, event: str, **data: Any) -> None:
-        failure = self.capture_event(event, **data)
-        if failure is not None:
-            raise EventCaptureError(
-                f"Agent event capture failed ({event}); inspect audit errors"
-            ) from failure
+    def begin_tool(self, identifier: str | None) -> None:
+        # A provider may reuse a call ID on a later turn. The middleware serializes
+        # invocations; acknowledgements belong only to the current invocation.
+        with self.lock:
+            self._tool_requests.discard(identifier)
+            self._tool_results.discard(identifier)
+
+    def feedback(self, call: Mapping[str, Any], message: str) -> ToolMessage:
+        """Record middleware feedback that bypasses ordinary tool-result callbacks."""
+        return self.record_feedback(
+            call,
+            ToolMessage(
+                content=message, status="error", tool_call_id=call["id"], name=call["name"]
+            ),
+        )
+
+    def record_feedback(self, call: Mapping[str, Any], result: ToolMessage) -> ToolMessage:
+        """Retain returned feedback once, including errors normalized by the SDK."""
+        with self.lock:
+            identifier = call["id"]
+            if identifier in self._tool_results:
+                return result
+            if identifier not in self._tool_requests:
+                self.tools += 1
+                self.capture_event(
+                    "tool_requested",
+                    name=call["name"],
+                    input=json.dumps(call["args"]),
+                    tool_call_id=call["id"],
+                    origin="middleware",
+                )
+                self._tool_requests.add(identifier)
+            self.capture_event(
+                "tool_result",
+                result=result.model_dump(mode="json"),
+                tool_call_id=call["id"],
+                origin="middleware",
+            )
+            self._tool_results.add(identifier)
+            return result
 
     def on_chat_model_start(self, serialized: dict[str, Any], messages: Any, **kwargs: Any) -> None:
         self.conflicts += 1
         self.messages = list(messages[-1]) if messages else []
         parameters = kwargs.get("invocation_params", {})
-        self.required_event(
+        self.capture_event(
             "model_requested",
             run_id=kwargs.get("run_id"),
             messages=[messages_to_dict(batch) for batch in messages],
@@ -121,7 +158,7 @@ class SessionLog(BaseCallbackHandler):
         for batch in response.generations:
             if batch and hasattr(batch[0], "message"):
                 self.messages.append(batch[0].message)
-        self.required_event(
+        self.capture_event(
             "model_result", run_id=kwargs.get("run_id"), response=response.model_dump(mode="json")
         )
 
@@ -130,16 +167,23 @@ class SessionLog(BaseCallbackHandler):
 
     def on_tool_start(self, serialized: dict[str, Any], input_str: str, **kwargs: Any) -> None:
         self.tools += 1
-        self.required_event(
+        self.capture_event(
             "tool_requested",
             name=serialized.get("name"),
             input=input_str,
             run_id=kwargs.get("run_id"),
+            tool_call_id=kwargs.get("tool_call_id"),
         )
+        if isinstance(identifier := kwargs.get("tool_call_id"), str):
+            with self.lock:
+                self._tool_requests.add(identifier)
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> None:
         result = output.model_dump(mode="json") if hasattr(output, "model_dump") else str(output)
-        self.required_event("tool_result", result=result, run_id=kwargs.get("run_id"))
+        self.capture_event("tool_result", result=result, run_id=kwargs.get("run_id"))
+        if isinstance(identifier := getattr(output, "tool_call_id", None), str):
+            with self.lock:
+                self._tool_results.add(identifier)
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
         self.capture_event("tool_error", **error_info(error))
@@ -174,8 +218,6 @@ class IntegrationMiddleware(AgentMiddleware[Any, Any, Any]):
             raise EzError("Agent context byte budget exceeded")
         try:
             return handler(request)
-        except EventCaptureError:
-            raise
         except Exception as exc:
             # LangGraph checkpoints persist task exceptions; sanitize before that boundary.
             self.log.capture_event("model_request_failed", **error_info(exc))
@@ -189,33 +231,34 @@ class IntegrationMiddleware(AgentMiddleware[Any, Any, Any]):
         with self.lock:
             self.guard()
             call = request.tool_call
+            self.log.begin_tool(call["id"])
             if call["name"] == "finish":
                 last = next(
                     (m for m in reversed(request.state["messages"]) if isinstance(m, AIMessage)),
                     None,
                 )
                 if last and len(last.tool_calls) != 1:
-                    return ToolMessage(
-                        content="finish must be called alone",
-                        status="error",
-                        tool_call_id=call["id"],
+                    return self.log.feedback(
+                        call,
+                        "finish must be called alone",
                     )
             if (
                 call["name"] == "execute"
                 and isinstance(call["args"].get("timeout"), (int, float))
                 and call["args"]["timeout"] > self.config.timeout
             ):
-                return ToolMessage(
-                    content="Command timeout exceeds configured limit",
-                    status="error",
-                    tool_call_id=call["id"],
+                return self.log.feedback(
+                    call,
+                    "Command timeout exceeds configured limit",
                 )
             try:
                 result = handler(request)
-            except (LowConfidence, GitStateChanged, EventCaptureError):
+            except (LowConfidence, GitStateChanged, AuditError):
                 raise
             except (EzError, OSError, UnicodeError) as exc:
-                result = ToolMessage(content=str(exc), status="error", tool_call_id=call["id"])
+                result = self.log.feedback(call, safe_error(exc))
+            if isinstance(result, ToolMessage) and result.status == "error":
+                result = self.log.record_feedback(call, result)
             self.guard()
             return result
 
@@ -230,7 +273,7 @@ def run_agent(
 ) -> dict[str, Any]:
     directory = audit.directory / "sessions" / f"{round_number:04d}"
     log = SessionLog(directory, audit)
-    session: dict[str, Any] = {
+    session_data: dict[str, Any] = {
         "round": round_number,
         "status": "running",
         "conflicts": paths,
@@ -238,15 +281,19 @@ def run_agent(
         "tool_calls": 0,
         "artifacts": str(directory.relative_to(audit.directory)),
     }
-    audit.manifest.setdefault("sessions", []).append(session)
+    session = audit.add_record("sessions", session_data)
     result: dict[str, Any] = {}
     decision: dict[str, Any] = {}
     # Initialization may fail before HEAD is pinned; capture the current Git state then.
     head = "HEAD"
-    primary_error = False
-    count = len(audit.audit_errors)
     try:
-        directory.mkdir(parents=True)
+        proposal = audit.record("reviews")
+        session.update(
+            proposal_id=proposal["id"],
+            conflict_ids=proposal.get("conflict_ids", []),
+            stop_id=proposal.get("stop_id"),
+        )
+        audit.create_directory(directory)
         audit.save()
         checks = WorktreeChecks(config)
         head = git.text("rev-parse", "HEAD")
@@ -262,13 +309,13 @@ def run_agent(
             proposed = {"rationale": parsed.rationale, "confidence": parsed.confidence}
             if parsed.confidence < config.min_confidence:
                 session.update(proposed)
-                write_json(directory / "decision.json", proposed)
-                session["status"] = "low_confidence"
+                session.update(status="low_confidence")
+                audit.export_json(directory / "decision.json", proposed)
                 raise LowConfidence("Agent confidence below threshold; worktree preserved")
             checks.verify(git, paths, baseline)
             decision.update(proposed)
-            write_json(directory / "decision.json", decision)
             session.update(proposed)
+            audit.export_json(directory / "decision.json", decision)
             return "Resolution verified. Git continuation belongs to git-ez."
 
         metadata = {
@@ -288,7 +335,8 @@ def run_agent(
             "model": config.model,
             "model_context_tokens": config.model_context_tokens,
         }
-        write_json(directory / "runtime.json", metadata)
+        session.update(runtime_metadata=metadata)
+        audit.export_json(directory / "runtime.json", metadata)
         baseline = checks.baseline(git)
         model = create_chat_model(config)
         # Use the public profile API to disable default delegation for this single-agent task.
@@ -306,7 +354,7 @@ def run_agent(
         )
 
         # Deep Agents offloads history/large results without polluting the project or git add -A.
-        (directory / "agent-files").mkdir()
+        audit.create_directory(directory / "agent-files")
         backend = CompositeBackend(
             default=shell,
             routes={
@@ -318,29 +366,31 @@ def run_agent(
         )
 
         mission = {
-            "operation": audit.manifest["operation"],
+            "operation": audit.view["operation"],
             "conflicts": paths,
             "worktree": str(git.path),
-            "branch_sha": audit.manifest["before_oid"],
-            "target_sha": audit.manifest["target_oid"],
+            "branch_sha": audit.view["before_oid"],
+            "target_sha": audit.view["target_oid"],
             "head_sha": head,
             "validation_command": shlex.join(check) if check else None,
             "task": "Investigate and resolve this Git integration using your tools.",
         }
-        if audit.manifest.get("interactive"):
-            review = audit.manifest["reviews"][-1]
+        if audit.view.get("interactive"):
+            review = audit.view["reviews"][-1]
             mission["review_round"] = review["round"]
             mission["user_feedback"] = review["feedback"]
             mission["revision_instruction"] = (
                 "Revise the current worktree proposal using user_feedback; do not restore "
                 "the initial conflict markers. Explain checks performed and uncertainties."
             )
-        if "onto_oid" in audit.manifest:
-            mission["onto_sha"] = audit.manifest["onto_oid"]
-        if "rebase_plan" in audit.manifest:
-            mission["rebase_base_sha"] = audit.manifest["rebase_plan"]["base_oid"]
-            mission["replay_boundary_sha"] = audit.manifest["rebase_plan"]["selection_oid"]
-        write_json(directory / "mission.json", mission)
+        if "onto_oid" in audit.view:
+            mission["onto_sha"] = audit.view["onto_oid"]
+        if "rebase_plan" in audit.view:
+            mission["rebase_base_sha"] = audit.view["rebase_plan"]["base_oid"]
+            mission["replay_boundary_sha"] = audit.view["rebase_plan"]["selection_oid"]
+        session.update(mission=mission, invocation_started=True)
+        audit.export_json(directory / "mission.json", mission)
+        audit.save()
         agent = create_deep_agent(
             model=model,
             backend=backend,
@@ -360,7 +410,7 @@ def run_agent(
             result = agent.invoke(
                 {"messages": [{"role": "user", "content": json.dumps(mission)}]},
                 config={
-                    "configurable": {"thread_id": f"{audit.manifest['id']}-{round_number}"},
+                    "configurable": {"thread_id": f"{audit.view['id']}-{round_number}"},
                     "callbacks": [log],
                     "recursion_limit": config.agent_max_turns * 20 + 100,
                     "max_concurrency": 1,
@@ -372,49 +422,32 @@ def run_agent(
         session.update(status="resolved", **decision)
         return decision
     except BaseException as exc:
-        primary_error = True
         if session["status"] == "running":
-            session["status"] = "failed"
-        if isinstance(exc, (EzError, OSError, KeyboardInterrupt, SystemExit)):
-            raise
-        log.capture_event("agent_error", **error_info(exc))
-        raise EzError(f"Deep Agents failed ({type(exc).__name__}); inspect local events") from exc
+            session.update(
+                status="interrupted"
+                if isinstance(exc, (KeyboardInterrupt, SystemExit))
+                else "failed"
+            )
+        if isinstance(
+            exc, (ModelCallLimitExceededError, ToolCallLimitExceededError, GraphRecursionError)
+        ):
+            log.capture_event("agent_error", **error_info(exc))
+            raise EzError(
+                f"Deep Agents limit reached ({type(exc).__name__}); inspect local events"
+            ) from exc
+        if not isinstance(exc, (EzError, OSError, KeyboardInterrupt, SystemExit)):
+            log.capture_event("agent_error", **error_info(exc))
+        raise
     finally:
         session.update(tool_calls=log.tools, model_calls=log.conflicts)
         folder = directory.relative_to(audit.directory).as_posix()
-        capture_failure = audit.attempt(
-            "session worktree",
-            lambda: audit.capture_worktree(
-                git, directory, config.max_file_bytes, paths, reference=head
-            ),
-            f"{folder}/files.json",
-        )
-        if capture_failure is not None:
-            session["capture_error"] = str(capture_failure)
-        messages_failure = audit.attempt(
+        audit.attempt(
             "session messages",
-            lambda: write_json(
-                directory / "messages.json", messages_to_dict(result.get("messages", log.messages))
+            lambda: audit.write_json(
+                f"{folder}/messages.json", messages_to_dict(result.get("messages", log.messages))
             ),
             f"{folder}/messages.json",
         )
-        if len(audit.audit_errors) > count and session["status"] == "resolved":
-            session["status"] = "failed"
-        metadata_failure = audit.attempt("session metadata", audit.save)
-        if len(audit.audit_errors) > count and session["status"] == "resolved":
-            session["status"] = "failed"
-        # The terminal event includes the outcome of the session metadata attempt.
-        # The engine still publishes the final run summaries after this returns.
-        events_failure = audit.attempt(
-            "session events",
-            lambda: log.event("session_finished", status=session["status"]),
-            f"{folder}/events.jsonl",
-            append=True,
-        )
-        if len(audit.audit_errors) > count:
-            if session["status"] == "resolved":
-                session["status"] = "failed"
-            if not primary_error:
-                raise EzError("Agent session audit capture failed; inspect audit errors") from (
-                    capture_failure or messages_failure or events_failure or metadata_failure
-                )
+        log.capture_event("session_finished", status=session["status"])
+        audit.attempt("agent files", lambda: audit.redact_agent_files(directory / "agent-files"))
+        audit.attempt("session metadata", audit.save)

@@ -4,8 +4,10 @@
 """Verify a built wheel in a fresh environment outside the source checkout."""
 
 import argparse
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -56,6 +58,17 @@ def main() -> None:
             )
             return re.sub(r".\x08", "", result.stdout)
 
+        def fails(code: int, *args: str) -> subprocess.CalledProcessError:
+            try:
+                run(*args)
+            except subprocess.CalledProcessError as exc:
+                if exc.returncode != code:
+                    raise RuntimeError(
+                        f"Unexpected exit code for {args}: {exc.returncode}"
+                    ) from exc
+                return exc
+            raise RuntimeError(f"Expected exit {code} for {args}")
+
         distribution = run(
             str(python),
             "-I",
@@ -98,8 +111,13 @@ def main() -> None:
         report = root / "audit"
         report.mkdir()
         (report / "report.md").write_text("# Installed wheel audit\n", encoding="utf-8")
-        if "# Installed wheel audit" not in run("git", "ez", "show", str(report)):
-            raise RuntimeError("Installed extension could not display an audit")
+        error = fails(2, "git", "ez", "show", str(report))
+        if "Cannot read resolution journal" not in error.stderr:
+            raise RuntimeError("Installed extension did not explain the missing manifest")
+        (report / "run.json").write_text('{"schema_version":1,"status":"succeeded"}')
+        error = fails(2, "git", "ez", "show", str(report))
+        if "Cannot read resolution journal" not in error.stderr:
+            raise RuntimeError("Installed extension accepted an unsupported audit schema")
         for operation in ("merge", "rebase"):
             repository = root / operation
             run("git", "init", "-b", "main", str(repository))
@@ -132,7 +150,7 @@ def main() -> None:
             if git("status", "--porcelain"):
                 raise RuntimeError(f"Installed {operation} left a dirty checkout")
             audits = list((repository / ".git/ez/runs").iterdir())
-            if len(audits) != 1 or "integration report" not in git("ez", "show", str(audits[0])):
+            if len(audits) != 1 or "resolution journal" not in git("ez", "show", str(audits[0])):
                 raise RuntimeError(f"Installed {operation} did not preserve a readable audit")
             if operation == "rebase":
                 if git("rev-list", "--count", "main..HEAD").strip() != "1":
@@ -143,8 +161,50 @@ def main() -> None:
                     raise RuntimeError("Installed autosquash did not capture its sequence")
                 if not (audits[0] / "rebase-todo.txt.sha256").is_file():
                     raise RuntimeError("Installed autosquash did not capture its fingerprint")
-                if not (audits[0] / "rebase-commits.log").is_file():
-                    raise RuntimeError("Installed autosquash did not capture commit messages")
+            manifest_path = audits[0] / "run.json"
+            manifest = manifest_path.read_bytes()
+            payload = json.loads(manifest)
+            if payload["schema_version"] != 3:
+                raise RuntimeError("Installed extension did not publish schema 3")
+            cache = audits[0] / "report.md"
+            cache.write_text("# Stale cached report: failed\n")
+            if "Recorded status: **succeeded**" not in run("git", "ez", "show", str(audits[0])):
+                raise RuntimeError("Installed reader trusted a stale report")
+            cache.unlink()
+            run("git", "ez", "show", str(audits[0]))
+            if cache.exists() or manifest_path.read_bytes() != manifest:
+                raise RuntimeError("Installed reader modified its input")
+            if (audits[0] / "result.diff").exists():
+                raise RuntimeError("Installed extension duplicated Git history")
+            fails(
+                1,
+                "git",
+                "-C",
+                str(repository),
+                "ez",
+                operation,
+                "main",
+                "--check",
+                str(python),
+                "-c",
+                "raise SystemExit(7)",
+            )
+            failed = next(
+                path for path in (repository / ".git/ez/runs").iterdir() if path != audits[0]
+            )
+            if "Recorded status: **failed**" not in run("git", "ez", "show", str(failed)):
+                raise RuntimeError(
+                    "Installed reader could not verify a faithfully recorded failure"
+                )
+            archived_success = root / f"{operation}-success-audit"
+            archived_failure = root / f"{operation}-failed-audit"
+            audits[0].rename(archived_success)
+            failed.rename(archived_failure)
+            shutil.rmtree(repository)
+            for archive in (archived_success, archived_failure):
+                run("git", "ez", "show", str(archive))
+            if (archived_success / "run.json").read_bytes() != manifest:
+                raise RuntimeError("Relocated audit reading modified its historical manifest")
         print(
             "Installed wheel: imports, Git discovery, help, manual, audits, "
             "merge, autosquash passed"

@@ -1,484 +1,294 @@
 # SPDX-FileCopyrightText: 2026 git-ez contributors
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Durable integration manifests, resolution evidence and reports."""
+"""A small journal of git-ez interventions, conflict proposals and decisions."""
 
-import hashlib
+import copy
 import json
-import stat
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, NotRequired, TypedDict, cast
+from threading import RLock
+from typing import Any, Literal, NotRequired, TypedDict
+from uuid import UUID, uuid4
 
-from .errors import EzError
-from .git import Git
-
-RunStatus = Literal["running", "succeeded", "failed", "interrupted"]
-ValidationStatus = Literal[
-    "not_requested", "not_run", "running", "passed", "failed", "timed_out", "interrupted"
-]
-
-
-class Failure(TypedDict):
-    phase: str
-    type: str
-    message: str
-    artifact: NotRequired[str]
-
-
-class Evidence(TypedDict):
-    status: Literal["available", "partial", "unavailable"]
-    reason: NotRequired[str]
+from .audit_report import render_markdown
+from .audit_safety import redact_bytes, redact_chunks
+from .audit_storage import directory_fd, encode_json, publish, read_regular, write_json
+from .errors import AuditError, EzError
 
 
 class Validation(TypedDict):
     command: list[str]
-    status: ValidationStatus
+    status: Literal[
+        "not_requested", "not_run", "running", "passed", "failed", "timed_out", "interrupted"
+    ]
     returncode: NotRequired[int]
+
+
+@dataclass(frozen=True)
+class PinnedRef:
+    oid: str
+    reference: str | None
+
+
+@dataclass(frozen=True)
+class PinnedInputs:
+    branch: str
+    before_oid: str
+    target: PinnedRef
+    onto: PinnedRef | None
 
 
 def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def write_json(path: Path, data: object) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+def safe_error(error: BaseException, secrets: tuple[str, ...] = ()) -> str:
+    message = (
+        str(error) if isinstance(error, EzError) else f"{type(error).__name__}: operation failed"
+    )
+    if isinstance(error, KeyboardInterrupt):
+        message = "Interrupted by user"
+    for secret in secrets:
+        if secret:
+            message = message.replace(secret, "<redacted>")
+    return message
+
+
+class Record(Mapping[str, Any]):
+    def __init__(self, audit: "Audit", data: dict[str, Any]):
+        self.audit, self.data = audit, data
+
+    def __getitem__(self, key: str) -> Any:
+        return copy.deepcopy(self.data[key])
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.data)
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def update(self, *args: Mapping[str, Any], **values: Any) -> None:
+        with self.audit._lock:
+            self.data.update(*args, **values)
+
+    def artifact(self, label: str, path: str) -> None:
+        self.data.setdefault("artifacts", {})[label] = path
 
 
 class Audit:
-    def __init__(self, directory: Path, manifest: dict[str, Any]):
+    def __init__(self, directory: Path, metadata: dict[str, Any]):
         self.directory = directory
-        self.manifest = manifest
-        self.manifest["id"] = directory.name
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._data = copy.deepcopy(metadata)
+        self._data.update(id=directory.name, schema_version=3, status="running", integrated=False)
+        self._lock = RLock()
+        self._secrets: tuple[str, ...] = ()
+        self.owned = self.published = self._finished = False
+        self.audit_errors: list[dict[str, Any]] = []
+        self.presentation_errors: list[str] = []
+
+    @property
+    def view(self) -> dict[str, Any]:
+        with self._lock:
+            return copy.deepcopy(self._data)
+
+    @property
+    def inputs(self) -> PinnedInputs:
+        data = self._data
+        return PinnedInputs(
+            data["branch"],
+            data["before_oid"],
+            PinnedRef(data["target_oid"], data.get("target_ref")),
+            PinnedRef(data["onto_oid"], data.get("onto_ref")) if data.get("onto_oid") else None,
+        )
+
+    @property
+    def operation(self) -> str:
+        return str(self._data["operation"])
+
+    def protect(self, *secrets: str) -> None:
+        self._secrets = tuple(secret for secret in secrets if secret)
+
+    def _clean(self, value: Any, *, content_keys: bool = False) -> Any:
+        if isinstance(value, str):
+            return redact_bytes(value.encode("utf-8"), self._secrets).decode("utf-8")
+        if isinstance(value, UUID):
+            return str(value)
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                name = self._clean(key) if content_keys else key
+                if name in result:
+                    raise ValueError("Credential filtering would merge content keys")
+                result[name] = (
+                    item
+                    if not content_keys
+                    and key in ("status", "action", "application", "schema_version", "integrated")
+                    else self._clean(item, content_keys=content_keys)
+                )
+            return result
+        if isinstance(value, (list, tuple)):
+            return [self._clean(item, content_keys=content_keys) for item in value]
+        if value is None or isinstance(value, (int, float, bool)):
+            return value
+        raise ValueError("Unsupported journal value")
+
+    def initialize(self) -> None:
+        with directory_fd(self.directory.parent, create=True) as parent:
+            os.mkdir(self.directory.name, mode=0o700, dir_fd=parent)
+        self.owned = True
         self.save()
 
+    def annotate(self, **values: Any) -> None:
+        self._data.update(values)
+
+    def add_record(self, group: str, data: Mapping[str, Any]) -> Record:
+        record = dict(data)
+        record.setdefault("id", uuid4().hex)
+        self._data.setdefault(group, []).append(record)
+        return Record(self, record)
+
+    def record(self, group: str, index: int = -1) -> Record:
+        return Record(self, self._data[group][index])
+
     def save(self) -> None:
-        self.manifest["updated_at"] = now()
-        write_json(self.directory / "run.json", self.manifest)
-        self.report()
+        if not self.owned:
+            raise AuditError("Journal directory was not created by this run")
+        with self._lock:
+            self._data["updated_at"] = now()
+            write_json(self.directory / "run.json", self._clean(self._data))
 
     def set_status(
         self,
-        status: RunStatus,
+        status: str,
         error: BaseException | None = None,
         *,
         phase: str = "audit",
         message: str | None = None,
     ) -> None:
-        self.manifest["status"] = status
-        if error is not None:
-            if message is None:
-                message = str(error) or "Interrupted by user"
-            self.manifest["error"] = message
-            failure: Failure = {"phase": phase, "type": type(error).__name__, "message": message}
-            self.manifest["failure"] = failure
+        self._data["status"] = status
+        if error is not None and "failure" not in self._data:
+            diagnostic = self._clean(message) if message else safe_error(error, self._secrets)
+            self._data.update(
+                error=diagnostic,
+                failure={"phase": phase, "type": type(error).__name__, "message": diagnostic},
+            )
 
-    @property
-    def audit_errors(self) -> list[Failure]:
-        return cast(list[Failure], self.manifest.setdefault("audit_errors", []))
+    def completed(self, oid: str) -> None:
+        self._data.update(integrated=True, result_oid=oid)
 
-    @property
-    def evidence(self) -> dict[str, Evidence]:
-        return cast(dict[str, Evidence], self.manifest.setdefault("evidence", {}))
+    def create_directory(self, path: Path) -> None:
+        if not self.owned:
+            raise AuditError("Journal directory was not created by this run")
+        path.relative_to(self.directory)
+        with directory_fd(path, create=True):
+            pass
+
+    def write(self, artifact: str, content: bytes) -> None:
+        path = Path(artifact)
+        if not self.owned or path.is_absolute() or ".." in path.parts:
+            raise AuditError("Invalid journal destination")
+        try:
+            publish(self.directory / path, redact_bytes(content, self._secrets), replace=True)
+        except (OSError, ValueError) as exc:
+            raise AuditError("Cannot retain conflict resolution", artifact) from exc
+
+    def write_json(self, artifact: str, data: object) -> None:
+        self.write(artifact, encode_json(self._clean(data)))
+
+    def artifact(self, number: int, filename: str, content: str) -> str:
+        path = f"conflicts/{number:04d}/{filename}"
+        self.write(path, content.encode("utf-8"))
+        return path
 
     def has_artifact(self, artifact: str) -> bool:
-        try:
-            return (self.directory / artifact).is_file()
-        except OSError:
-            return False
+        return (self.directory / artifact).is_file()
 
     def attempt(
-        self,
-        phase: str,
-        action: Callable[[], object],
-        artifact: str | None = None,
-        *,
-        append: bool = False,
+        self, phase: str, action: Callable[[], object], artifact: str | None = None
     ) -> Exception | None:
-        """Capture each independent artifact without replacing an operation's failure."""
-        if artifact is not None:
-            previous = self.evidence.get(artifact)
-            if append and previous is not None and previous["status"] != "available":
-                self.evidence[artifact] = {**previous, "status": "partial"}
-            else:
-                self.evidence[artifact] = {"status": "available"}
         try:
             action()
         except Exception as exc:
-            # Serialization/report bugs are secondary too; termination signals propagate.
-            failure: Failure = {"phase": phase, "type": type(exc).__name__, "message": str(exc)}
-            if artifact is not None:
-                failure["artifact"] = artifact
-            self.audit_errors.append(failure)
-            if artifact is not None:
-                self.evidence[artifact] = {
-                    "status": "partial" if self.has_artifact(artifact) else "unavailable",
-                    "reason": str(exc),
+            self.audit_errors.append(
+                {
+                    "phase": phase,
+                    "type": type(exc).__name__,
+                    "message": safe_error(exc, self._secrets),
+                    "artifact": artifact,
                 }
+            )
             return exc
         return None
 
+    def export_json(self, path: Path, data: object) -> None:
+        relative = path.relative_to(self.directory).as_posix()
+        self.attempt("session metadata", lambda: self.write_json(relative, data), relative)
+
+    def append_event(self, artifact: str, data: object) -> None:
+        if not isinstance(data, dict):
+            raise ValueError("Expected an event object")
+        content = {
+            key: value if key in ("event", "at") else self._clean(value, content_keys=True)
+            for key, value in data.items()
+        }
+        path = self.directory / artifact
+        with self._lock, directory_fd(path.parent, create=True) as parent:
+            descriptor = os.open(
+                path.name,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent,
+            )
+            with os.fdopen(descriptor, "ab") as stream:
+                stream.write(
+                    (json.dumps(content, ensure_ascii=True, allow_nan=False) + "\n").encode()
+                )
+
+    def redact_agent_files(self, directory: Path) -> None:
+        for path in directory.rglob("*"):
+            if path.is_file():
+                original = read_regular(path)
+                filtered = b"".join(
+                    redact_chunks((original,), tuple(s.encode() for s in self._secrets))
+                )
+                if filtered != original:
+                    publish(path, filtered, replace=True)
+
     def finalize(self) -> None:
-        """Attempt both summaries and expose failures even when one cannot be saved."""
-
-        def fail_if_needed() -> None:
-            if self.audit_errors and self.manifest["status"] == "succeeded":
-                self.set_status(
-                    "failed", EzError("Audit finalization failed; inspect audit errors")
-                )
-
-        def manifest() -> None:
-            self.manifest["updated_at"] = now()
-            write_json(self.directory / "run.json", self.manifest)
-
-        fail_if_needed()
-        # Publish the final manifest last, after the report's actual outcome is known.
-        self.evidence["run.json"] = {"status": "available"}
-        report_error = self.attempt("report", self.report, "report.md")
-        fail_if_needed()
-        manifest_error = self.attempt("manifest", manifest, "run.json")
-        fail_if_needed()
-        if manifest_error is not None and report_error is None:
-            # The report is still writable: record the manifest failure there.
-            self.attempt("report", self.report, "report.md")
-        fail_if_needed()
-
-    def artifact(self, number: int, filename: str, content: str) -> str:
-        folder = self.directory / "conflicts" / f"{number:04d}"
-        folder.mkdir(parents=True, exist_ok=True)
-        target = folder / filename
-        target.write_bytes(content.encode("utf-8"))
-        return target.relative_to(self.directory).as_posix()
-
-    def capture_worktree(
-        self,
-        git: Git,
-        directory: Path,
-        limit: int,
-        paths: list[str] | None = None,
-        reference: str = "HEAD",
-    ) -> None:
-        """Archive tracked edits and non-ignored new files without staging or following links."""
-        directory.mkdir(parents=True, exist_ok=True)
-        diff = git.run(
-            "diff", "--no-ext-diff", "--no-textconv", "--binary", reference, "--", check=False
+        if self._finished:
+            return
+        self._finished = True
+        if self._data["status"] == "running":
+            self.set_status("failed", EzError("Run ended without a recorded result"))
+        self._data["finished_at"] = now()
+        self._data["audit_errors"] = self.audit_errors
+        failure = self.attempt("journal", self.save)
+        self.published = failure is None
+        if failure is not None:
+            if "failure" not in self._data:
+                self.set_status("failed", AuditError("Cannot save the resolution journal"))
+            return
+        error = self.attempt(
+            "report",
+            lambda: self.write("report.md", render_markdown(self._clean(self._data)).encode()),
         )
-        (directory / "worktree.diff").write_bytes(diff.stdout)
-        changed = git.run(
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--name-only",
-            "-z",
-            reference,
-            "--",
-            check=False,
-        )
-        untracked = git.run("ls-files", "--others", "--exclude-standard", "-z", check=False)
-        names = set(
-            (changed.stdout + untracked.stdout)
-            .decode("utf-8", errors="surrogateescape")
-            .split("\0")
-        )
-        names.update(paths or [])
-        records: list[dict[str, Any]] = []
-        for name in sorted(names - {""}):
-            record: dict[str, Any] = {"path": name}
-            records.append(record)
-            try:
-                path = git.safe_path(name)
-                if not path.exists():
-                    record["state"] = "deleted"
-                    continue
-                info = path.stat()
-                if not stat.S_ISREG(info.st_mode):
-                    raise EzError("Not a regular file")
-                # Retain raw bytes, including files an unfinished agent left invalid or binary.
-                with path.open("rb") as stream:
-                    content = stream.read(limit + 1)
-                truncated = len(content) > limit
-                content = content[:limit]
-                artifact = Path("files") / f"{len(records):04d}.bin"
-                (directory / "files").mkdir(exist_ok=True)
-                (directory / artifact).write_bytes(content)
-                record.update(
-                    state="file",
-                    artifact=artifact.as_posix(),
-                    size=info.st_size,
-                    mode=stat.S_IMODE(info.st_mode),
-                    recorded_bytes=len(content),
-                    truncated=truncated,
-                    recorded_sha256=hashlib.sha256(content).hexdigest(),
-                )
-            except (EzError, OSError, ValueError) as exc:
-                record.update(state="unavailable", error=str(exc))
-        head = git.run("rev-parse", "HEAD", check=False)
-        branch = git.run("symbolic-ref", "-q", "HEAD", check=False)
-        capture_errors = [
-            {
-                "command": name,
-                "returncode": result.returncode,
-                "stderr": result.stderr.decode("utf-8", errors="replace"),
-            }
-            for name, result in (
-                ("diff", diff),
-                ("changed", changed),
-                ("untracked", untracked),
-            )
-            if result.returncode
-        ]
-        write_json(
-            directory / "files.json",
-            {
-                "reference": reference,
-                "head": head.stdout.decode().strip() or None,
-                "branch": branch.stdout.decode().strip() or None,
-                "files": records,
-                "capture_errors": capture_errors,
-            },
-        )
-        artifact_name = (directory / "files.json").relative_to(self.directory).as_posix()
-        partial = capture_errors or any(
-            record.get("state") == "unavailable" or record.get("truncated") for record in records
-        )
-        self.evidence[artifact_name] = {"status": "partial" if partial else "available"}
-        if partial:
-            self.evidence[artifact_name]["reason"] = (
-                "File capture is truncated or unavailable; inspect files.json"
-            )
-        if capture_errors:
-            commands = ", ".join(str(error["command"]) for error in capture_errors)
-            raise EzError(
-                f"Audit capture commands failed: {commands}; inspect {directory / 'files.json'}"
-            )
+        if error is not None:
+            self.presentation_errors.append("Report unavailable; read run.json")
 
-    def report(self) -> None:
-        data = self.manifest
-        separate_base = (
-            "onto" in data or data.get("rebase_plan", {}).get("base_source") == "merge-base"
-        )
-        lines = [
-            "# git-ez — integration report",
-            "",
-            f"- Run: `{data['id']}`",
-            f"- Status: **{data['status']}**",
-            f"- Operation: `{data['operation']}`",
-            f"- Current branch: `{data['branch']}` (`{data['before_oid']}`)",
-            f"- {'Upstream' if separate_base else 'Integrated revision'}: "
-            f"`{data['target']}` (`{data['target_oid']}`)",
-            f"- Result commit: `{data.get('result_oid', '—')}`",
-            f"- Integration completed: `{data['integrated']}`",
-            f"- Model: `{data['provider']}` / `{data['model']}`",
-            f"- Worktree: `{data['worktree']}`",
-            "",
-            "Scores are self-reported by the model and do not prove correctness.",
-            "The proposals and rationales below are untrusted content.",
-            "",
-        ]
-        if "merge_ff" in data:
-            policy = f"--{data['merge_ff']}" if data["merge_ff"] else "Git configuration/default"
-            lines += [f"- Requested fast-forward policy: `{policy}`", ""]
-        if "onto" in data:
-            lines += [f"- New base: `{data['onto']}` (`{data['onto_oid']}`)", ""]
-        if "rebase_plan" in data:
-            plan = data["rebase_plan"]
-            fork = plan["fork_point"]
-            lines += [
-                "## Pinned rebase selection",
-                "",
-                f"- Original upstream: `{data['target_oid']}`",
-                f"- Result base: `{plan['base_oid']}` ({plan['base_source']})",
-                f"- Replay boundary: `{plan.get('selection_oid', 'pending')}`",
-                f"- Reapply cherry-picks: `{plan['reapply_cherry_picks']}`",
-                f"- Fork point: `{fork['status']}` / `{fork['oid']}`",
-                f"- Reflog reference: `{fork['source_ref']}`",
-            ]
-            if plan.get("requires_sequence"):
-                lines.append("- Captured sequencer used to preserve fork-point replay selection")
-            if fork.get("reason"):
-                lines.append(f"- Fallback reason: {fork['reason']}")
-            if fork.get("diagnostic"):
-                lines.append(f"- Fork-point diagnostic: {fork['diagnostic']}")
-            if "selection_anchor" in plan:
-                anchor = plan["selection_anchor"]
-                lines += [
-                    f"- [Internal selection object]({anchor['artifact']})",
-                    f"- Selection object capture truncated: `{anchor['truncated']}`",
-                    f"- Selection object capture limit: `{anchor['limit_bytes']}` bytes",
-                ]
-            lines.append("")
-        if "rerere_autoupdate_effective" in data:
-            lines += [
-                f"- Requested rerere autoupdate: `{data['rerere_autoupdate']}`",
-                f"- Effective rerere autoupdate: `{data['rerere_autoupdate_effective']}`",
-                "",
-            ]
-        if "rebase_options" in data:
-            lines += [
-                "## Rebase options",
-                "",
-                "```json",
-                json.dumps(data["rebase_options"], indent=2),
-                "```",
-                "",
-            ]
-        if "commit_options" in data:
-            lines += [
-                "## Commit options",
-                "",
-                "```json",
-                json.dumps(data["commit_options"], indent=2),
-                "```",
-                "",
-            ]
-        if "rebase_sequence" in data:
-            sequence = data["rebase_sequence"]
-            lines += [
-                "## Generated rebase sequence",
-                "",
-                f"- Capture: `{sequence['status']}`",
-                f"- Capture limit: `{sequence['limit_bytes']}` bytes",
-            ]
-            if sequence["status"] == "captured":
-                lines.append(f"- [Native Git instructions]({sequence['artifact']})")
-            elif sequence.get("error"):
-                lines.append(f"- Unavailable evidence: {sequence['error']}")
-            lines.append("")
-        if "result_commits" in data:
-            commits = data["result_commits"]
-            lines += [
-                "## Resulting commits and messages",
-                "",
-                f"- [Native Git raw log]({commits['artifact']})",
-                f"- Truncated: `{commits['truncated']}`",
-                f"- Capture limit: `{commits['limit_bytes']}` bytes",
-                "",
-            ]
-        if data.get("empty_commits"):
-            lines += ["## Empty conflict resolutions", ""]
-            for entry in data["empty_commits"]:
-                lines += [f"- `{entry['commit']}`: `{entry['policy']}` — {entry['reason']}"]
-            lines.append("")
-        if data.get("error"):
-            lines += ["## Run stopped", "", str(data["error"]), ""]
-        if "range_diff" in data:
-            comparison = data["range_diff"]
-            lines += [
-                "## Commit comparison before / after rebase",
-                "",
-                f"- Before: `{comparison['before']}`",
-                f"- After: `{comparison['after']}`",
-                f"- [Before / after range-diff]({comparison['artifact']})",
-                "",
-                "`=`: equivalent patch; `!`: modified patch; "
-                "`<`: removed commit; `>`: added commit.",
-                "Commit matching is heuristic; this diff does not prove "
-                "semantic equivalence between the two series.",
-                "",
-            ]
-        for conflict in data.get("conflicts", []):
-            lines += [
-                f"## Conflict {conflict['number']}: {conflict['path']!r}",
-                "",
-                f"- Status: `{conflict['status']}`",
-                f"- Replayed commit / HEAD: `{conflict['head']}`",
-            ]
-            if "resolution" in conflict:
-                resolution = conflict["resolution"]
-                lines += [
-                    f"- Action: `{resolution['action']}`",
-                    f"- Confidence: {resolution['confidence']}",
-                    "",
-                    *["> " + line for line in resolution["rationale"].splitlines()],
-                    "",
-                ]
-            for label, path in conflict.get("artifacts", {}).items():
-                lines.append(f"- [{label}]({path})")
-            if conflict.get("capture_error"):
-                lines.append(f"Partial capture: {conflict['capture_error']}")
-            lines.append("")
-        for session in data.get("sessions", []):
-            folder = session["artifacts"]
-            lines += [
-                f"## Agent session {session['round']}",
-                "",
-                f"- Status: `{session['status']}` — {session['tool_calls']} tool calls",
-                f"- Runtime: `{session['runtime']}`",
-                f"- [Agent configuration]({folder}/runtime.json)",
-                f"- [Agent files and offloaded history]({folder}/agent-files/)",
-                f"- [Conversation]({folder}/messages.json)",
-                f"- [Tool events]({folder}/events.jsonl)",
-                f"- [Worktree diff]({folder}/worktree.diff)",
-                f"- [File state, including new files]({folder}/files.json)",
-            ]
-            if (self.directory / folder / "staged.diff").is_file():
-                lines += [
-                    f"- [Full staged diff]({folder}/staged.diff)",
-                ]
-            if "rationale" in session:
-                lines += [
-                    f"- Confidence: {session['confidence']}",
-                    f"- [Decision and rationale]({folder}/decision.json)",
-                    "",
-                    *["> " + line for line in session["rationale"].splitlines()],
-                ]
-            if session.get("capture_error"):
-                lines.append(f"Capture failed: {session['capture_error']}")
-            lines.append("")
-        for review in data.get("reviews", []):
-            folder = review["artifacts"]
-            lines += [
-                f"## Proposal {review['attempt']} (conflict stop {review['round']})",
-                "",
-                f"- Status: {review['status']}",
-                f"- User decision: {review.get('decision', 'unavailable')}",
-                f"- Feedback: {review.get('user_feedback') or '—'}",
-                f"- [Proposal diff]({folder}/worktree.diff)",
-                f"- [File contents and capture limits]({folder}/files.json)",
-                f"- Rationale: {review.get('resolution', {}).get('rationale', 'unavailable')}",
-                "- Acceptance authorizes engine checks; application is recorded separately.",
-                "",
-            ]
-        for native in data.get("native_resolutions", []):
-            lines += ["## Reused Git resolution", "", native["rationale"], ""]
-        if data.get("failure"):
-            lines += [f"Failure phase: `{data['failure']['phase']}`", ""]
-        if data.get("audit_errors"):
-            lines += [
-                "## Audit errors",
-                "",
-                "These errors do not replace the original failure.",
-                "",
-            ]
-            for error in data["audit_errors"]:
-                lines.append(f"- {error['phase']}: {error['type']}: {error['message']}")
-            lines.append("")
-        if data.get("evidence"):
-            lines += ["## Evidence availability", ""]
-            for artifact, evidence in sorted(data["evidence"].items()):
-                detail = f" — {evidence['reason']}" if evidence.get("reason") else ""
-                lines.append(f"- `{artifact}`: **{evidence['status']}**{detail}")
-            lines.append("")
-        lines += ["## Git traces", "", "- [Integration log](integration.log)"]
-        if data.get("exit_state"):
-            lines += [
-                "- [Final file state](exit/files.json)",
-                "- [Exit diff](exit/worktree.diff)",
-            ]
-        if data.get("capture_error"):
-            lines += [f"Final capture failed: {data['capture_error']}"]
-        if data.get("result_oid"):
-            lines.append("- [Full before / after diff](result.diff)")
-        lines.append("")
-        if "validation" in data:
-            lines += [
-                f"Validation status: `{data['validation'].get('status', 'unknown')}`",
-                f"Validation command: `{data['validation']['command']}`",
-                f"Exit code: `{data['validation'].get('returncode', 'unavailable')}`",
-                "",
-            ]
-        (self.directory / "report.md").write_text("\n".join(lines), encoding="utf-8")
+
+def load_report(directory: Path) -> str:
+    try:
+        data = json.loads(read_regular(directory / "run.json"))
+        if (
+            not isinstance(data, dict)
+            or data.get("schema_version") != 3
+            or not isinstance(data.get("conflicts"), list)
+        ):
+            raise ValueError("Unsupported resolution journal")
+        return render_markdown(data)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise EzError("Cannot read resolution journal; inspect run.json directly") from exc

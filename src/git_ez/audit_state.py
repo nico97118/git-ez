@@ -8,7 +8,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal, NotRequired, TypedDict, cast
+from typing import Any, Literal, NotRequired, TypedDict
 
 RunStatus = Literal["running", "succeeded", "failed", "interrupted"]
 IntegrationStatus = Literal["not_started", "in_progress", "completed", "not_completed", "unknown"]
@@ -436,9 +436,8 @@ class AuditView:
     payload: bytes
     diagnostics: tuple[str, ...] = ()
     exit_code: int = 0
-    legacy: bool = False
 
     @property
     def data(self) -> dict[str, Any]:
         decoded = json.loads(self.payload)
-        return cast(dict[str, Any], decoded) if self.legacy else snapshot_view(decoded)
+        return snapshot_view(decoded)

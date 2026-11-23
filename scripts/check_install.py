@@ -114,9 +114,9 @@ def main() -> None:
         if "Cannot verify audit manifest" not in error.stderr:
             raise RuntimeError("Installed extension did not explain the missing manifest")
         (report / "run.json").write_text('{"schema_version":1,"status":"succeeded"}')
-        error = fails(1, "git", "ez", "show", str(report))
-        if "Unverified legacy audit" not in error.stderr:
-            raise RuntimeError("Installed extension promoted a legacy audit")
+        error = fails(2, "git", "ez", "show", str(report))
+        if "Cannot verify audit manifest" not in error.stderr:
+            raise RuntimeError("Installed extension accepted an unsupported audit schema")
         for operation in ("merge", "rebase"):
             repository = root / operation
             run("git", "init", "-b", "main", str(repository))

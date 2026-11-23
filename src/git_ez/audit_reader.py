@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 git-ez contributors
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Read-only verification of authoritative snapshots, including conservative legacy views."""
+"""Read-only verification of authoritative snapshots."""
 
 import json
 from pathlib import Path
@@ -18,13 +18,6 @@ def load_audit(directory: Path) -> AuditView:
         payload: Any = json.loads(content)
         if not isinstance(payload, dict):
             raise ValueError("Audit manifest must be an object")
-        if payload.get("schema_version", 1) == 1:
-            return AuditView(
-                content,
-                ("Unverified legacy audit; recorded state may be incomplete or stale.",),
-                1,
-                True,
-            )
         validate_snapshot(payload)
         issues: list[str] = []
         if payload["lifecycle"] != "finished":

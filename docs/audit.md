@@ -138,10 +138,10 @@ indicates a pre-admission/configuration/usage error. Unexpected execution except
 and `SystemExit` retain their propagation semantics after best-effort cleanup.
 For `show`, exit 0 means a valid terminal audit whose mandatory evidence meets policy
 (including a correctly recorded failed run); exit 1 means a displayable but unfinished,
-unverifiable or legacy audit; exit 2 means no trustworthy manifest view is available.
-Schema-1 audits are retained unchanged and displayed with an unconditional legacy
-warning. Unknown schemas or malformed/missing manifests never fall back to trusting
-an old success report. Pure-rendering failure uses a minimal structured text view.
+unverifiable audit; exit 2 means no trustworthy manifest view is available.
+Only schema 2 is supported. Unsupported schemas or malformed/missing manifests never
+fall back to trusting an old success report. Pure-rendering failure uses a minimal
+structured text view.
 
 Publication atomically replaces one manifest on a local filesystem after its capture
 files have been written. Captures are not overwritten with another snapshot. Stream

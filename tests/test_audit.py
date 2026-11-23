@@ -380,7 +380,10 @@ Engine(Path(sys.argv[1]), Config(model='unused')).run('main', 'merge')
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("manifest", [b"not-json", b"[]", b'{"schema_version":999}'])
+@pytest.mark.parametrize(
+    "manifest",
+    [b"not-json", b"[]", b'{"schema_version":999}', b'{"schema_version":1}', b"{}"],
+)
 def test_unreadable_manifest_never_falls_back_to_cached_success(tmp_path, manifest, capsys):
     (tmp_path / "run.json").write_bytes(manifest)
     (tmp_path / "report.md").write_text("Status: **succeeded**")
@@ -388,14 +391,6 @@ def test_unreadable_manifest_never_falls_back_to_cached_success(tmp_path, manife
     output = capsys.readouterr()
     assert "succeeded" not in output.out
     assert "without trusting cached reports" in output.err
-
-
-@pytest.mark.unit
-def test_legacy_view_is_unconditionally_unverified(tmp_path, capsys):
-    (tmp_path / "run.json").write_text(json.dumps({"schema_version": 1, "status": "succeeded"}))
-    (tmp_path / "report.md").write_text("old cached success")
-    assert main(["show", str(tmp_path)]) == 1
-    assert "Unverified legacy" in capsys.readouterr().err
 
 
 @pytest.mark.integration

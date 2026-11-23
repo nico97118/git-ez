@@ -370,8 +370,8 @@ show validates the manifest and required evidence read-only, without Git or mode
 calls. It never trusts an old success cache over an unfinished/unreadable manifest.
 A nonfinalized snapshot is the last recorded state, not proof of a live process.
 Historical results and current evidence verification are displayed separately.
-Schema-1 audits are retained unchanged and labeled unverified legacy evidence.
-Unknown schemas and missing/malformed manifests produce raw-file guidance.
+Only schema 2 is supported. Unsupported schemas and missing/malformed manifests
+produce raw-file guidance.
 .PP
 Audit files may contain sensitive source code and output. Captures use private
 regular files and no-follow reads. Checksums detect inconsistencies, not malicious
@@ -387,7 +387,7 @@ audit whose required evidence meets policy, including a correctly recorded faile
 .TP
 .B 1
 Failed/interrupted admitted run, failed terminal publication, or failed probe.
-For show: displayable but unfinished, unverifiable, or legacy audit.
+For show: displayable but unfinished or unverifiable audit.
 .TP
 .B 2
 Configuration, command-line, pre-admission, or delivery error. For show: no trusted

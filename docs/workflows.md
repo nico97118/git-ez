@@ -61,13 +61,16 @@ run. Test artifacts must be ignored or cleaned up by the target project.
 The probe checks a text response, a native call to the harmless `compatibility_echo`
 tool, and subsequent use of its result, through the same connectors used for resolution.
 It does not modify a repository or execute model commands. A `compatible` result is not
-a measure of conflict-resolution quality. By default, the JSON report is written to stdout;
-use `git ez probe > report.json` to save it to a file. Diagnostics go to stderr in both modes.
+a measure of conflict-resolution quality. The command writes a single final JSON report to
+stdout and diagnostics to stderr. Use `git ez probe > report.json` to save the report.
+No intermediate snapshots are saved.
 
-The former `--output <file>` option has been removed; migrate to shell redirection.
-Only the final report is emitted; intermediate snapshots are no longer saved. A shell
-may create or truncate the destination even if the command fails. An interruption
-before completion may leave no complete report.
+A failed compatibility check is included in the JSON report. A configuration error or
+interruption before completion may leave no report. The shell may create or truncate
+the destination file even if the command fails.
+
+For existing scripts, replace `git ez probe --output report.json` with
+`git ez probe > report.json`.
 
 Exit codes: `0` = successful local integration, displayed report, or compatible probe;
 `1` = failed run/probe; `2` = configuration, CLI, or precondition error.

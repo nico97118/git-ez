@@ -36,6 +36,7 @@ consequence and clarify the intended change before implementing it.
 - `conflicts.py`: conflict evidence and resolution decisions.
 - `agent.py`, `agent_runtime.py`, `llm.py`: resolver contract, agent runtime, providers.
 - `audit.py`: persistent evidence and reports.
+- `audit_storage.py`, `audit_safety.py`: private capture files and credential filtering.
 - `probe.py`: provider connectivity diagnostics.
 - `tests/`: pytest tests, temporary repositories, deterministic resolvers, and local
   HTTP/TLS fixtures.

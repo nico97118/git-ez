@@ -817,6 +817,7 @@ class Engine:
         branch = git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.decode().strip() or None
         checks = WorktreeChecks(self.config)
         decision: Decision | None = None
+        proposal: Record | None = None
         session_count = len(audit.view.get("sessions", []))
         saved = primary_error = False
         status = "failed"
@@ -826,7 +827,7 @@ class Engine:
             if audit.view.get("interactive"):
                 decision, _ = self._review(git, audit, round_number, list(stages), validation)
             else:
-                audit.add_record(
+                proposal = audit.add_record(
                     "reviews",
                     {
                         "round": round_number,
@@ -844,8 +845,7 @@ class Engine:
                 raise LowConfidence("Agent confidence below threshold; worktree preserved")
             checks.guard(git, audit, head, branch)
             checks.verify(git, list(stages), baseline)
-            if not audit.view.get("interactive"):
-                proposal = audit.record("reviews")
+            if proposal is not None:
                 self._capture_attempt(git, audit, proposal, decision)
                 self._capture_changes(git, audit, proposal, list(stages), baseline)
             for record, conflict in snapshots:
@@ -885,8 +885,7 @@ class Engine:
                     )
                     if error is not None:
                         record.update(capture_error=safe_error(error))
-            if not audit.view.get("interactive") and audit.view.get("reviews"):
-                proposal = audit.record("reviews")
+            if proposal is not None:
                 if not proposal.get("conflicts"):
                     audit.attempt(
                         "attempt proposal",

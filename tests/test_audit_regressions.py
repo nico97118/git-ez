@@ -141,3 +141,31 @@ def test_quitting_the_pager_does_not_replay_the_report(monkeypatch, capsys):
     monkeypatch.setenv("GIT_PAGER", "sh -c 'exit 0'")
     display("REPORT-MUST-NOT-BE-REPLAYED\n")
     assert "REPORT-MUST-NOT-BE-REPLAYED" not in capsys.readouterr().out
+
+
+def test_later_baseline_failure_preserves_previous_applied_attempt(repo, monkeypatch):
+    from git_ez.audit import load_report
+    from git_ez.checks import WorktreeChecks
+
+    repo.file.write_text("source second\n")
+    repo.git.run("commit", "-am", "second conflicting change")
+    second_oid = repo.git.text("rev-parse", "HEAD")
+    original = WorktreeChecks.baseline
+
+    def baseline(self, git):
+        head = git.run("rev-parse", "--verify", "REBASE_HEAD", check=False).stdout.decode().strip()
+        if head == second_oid:
+            raise OSError("Cannot inspect the later conflict")
+        return original(self, git)
+
+    monkeypatch.setattr(WorktreeChecks, "baseline", baseline)
+    audit = Engine(repo.root, repo.config, repo.resolver).run("main", "rebase")
+    assert audit.view["status"] == "failed"
+    assert len(repo.resolver.calls) == 1
+    assert len(audit.view["reviews"]) == 1
+    first = audit.view["reviews"][0]
+    assert first["status"] == "applied"
+    assert first["application"] == "staged"
+    assert first["resolution"] == {"rationale": "Combine both intentions", "confidence": 0.95}
+    assert "Confidence: 0.95" in load_report(audit.directory)
+    assert repo.git.rebase_active()

@@ -354,13 +354,14 @@ def test_signing_before_attached_check_is_still_an_integration_option():
     "arguments",
     [
         ["show", "run", "--check", "command"],
-        ["probe", "--output", "report.json", "--check=command"],
+        ["probe", "--check=command"],
     ],
 )
-def test_check_is_rejected_for_non_integration_commands(arguments):
+def test_check_is_rejected_for_non_integration_commands(arguments, capsys):
     with pytest.raises(SystemExit) as error:
         parser().parse_args(arguments)
     assert error.value.code == 2
+    assert "--check is only supported for rebase and merge" in capsys.readouterr().err
 
 
 @pytest.mark.integration

@@ -13,6 +13,7 @@ from typing import Any, Literal, NotRequired, TypedDict
 from .audit_policy import (
     ROLES,
     artifact_owner,
+    capture_satisfies,
     missing_requirements,
     required_artifacts,
     requirement_records,
@@ -95,19 +96,10 @@ def evidence_health(
     """Apply the same retained-evidence policy to live and serialized facts."""
     capture_issues = [issue for issue in issues if "blocking" in issue]
     if (
-        any(
-            entry.get("role") == "conflict_proposal" and entry.get("truncated")
-            for entry in evidence.values()
-        )
-        or any(observation.get("errors") for observation in observations)
+        any(observation.get("errors") for observation in observations)
         or any(issue["blocking"] for issue in capture_issues)
         or any(
-            entry.get("requirement", "blocking") == "blocking"
-            and (
-                entry["status"] == "unavailable"
-                or entry.get("result")
-                in ("not_attempted", "io_error", "observation_error", "invalid", "interrupted")
-            )
+            entry.get("requirement", "blocking") == "blocking" and not capture_satisfies(entry)
             for entry in evidence.values()
         )
     ):

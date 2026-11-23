@@ -329,7 +329,12 @@ class Engine:
                 selection = self.git.text(*args)
                 raw = self.git.run("cat-file", "commit", selection).stdout
                 artifact = "rebase-selection-anchor.txt"
-                audit.write(artifact, raw[: self.config.max_file_bytes])
+                audit.write(
+                    artifact,
+                    raw,
+                    role="rebase_selection",
+                    retained_limit=self.config.max_file_bytes,
+                )
                 plan["selection_anchor"] = {
                     "oid": selection,
                     "parents": [upstream, fork],

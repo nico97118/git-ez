@@ -14,7 +14,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from .audit_capture import capture_worktree, observe
-from .audit_policy import artifact_owner, required_artifacts
+from .audit_policy import artifact_owner, capture_satisfies, required_artifacts
 from .audit_report import render_markdown
 from .audit_safety import redact_bytes, redact_chunks
 from .audit_state import (
@@ -743,6 +743,9 @@ class Audit:
                 self.limit_evidence(
                     artifact, "truncated", "Retained evidence exceeds configured limit"
                 )
+            entry = self._state.evidence[artifact]
+            if entry["requirement"] == "blocking" and not capture_satisfies(entry):
+                raise AuditError("Capture does not satisfy its required evidence policy", artifact)
 
     def write_json(
         self,

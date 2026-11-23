@@ -9,7 +9,7 @@ import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .audit_policy import required_artifacts
+from .audit_policy import capture_satisfies, required_artifacts
 from .audit_state import AuditView, snapshot_view, validate_snapshot
 from .audit_storage import AuditStore, fingerprint, inventory_paths, read_regular, regular_fd
 from .errors import EzError
@@ -115,12 +115,7 @@ def load_audit(directory: Path) -> AuditView:
                     )
                 if (size, digest) != (entry["retained_bytes"], entry["sha256"]):
                     raise ValueError("Retained evidence does not match its manifest")
-                if entry.get("result") in (
-                    "io_error",
-                    "observation_error",
-                    "invalid",
-                    "interrupted",
-                ):
+                if not capture_satisfies(entry):
                     raise ValueError("Capture did not satisfy its evidence requirement")
                 if inventory is not None:
                     _inventory(inventory, artifact, payload)

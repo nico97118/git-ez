@@ -24,7 +24,7 @@ from git_ez.audit_state import now, validate_snapshot
 from git_ez.audit_storage import AuditStore, publish, read_regular
 from git_ez.cli import main
 from git_ez.engine import Engine
-from git_ez.errors import EzError
+from git_ez.errors import AuditError, EzError
 from tests.test_engine import repo as repo
 
 
@@ -198,6 +198,38 @@ def test_json_redaction_preserves_keys_and_schema_values(audit):
     data = json.loads((audit.directory / "inventory.json").read_bytes())
     assert data == {"files": [{"state": "file", "path": "<redacted>/private"}]}
     assert audit.evidence["inventory.json"]["redacted"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "role, accepted",
+    [
+        (role, False)
+        for role in (
+            "proof",
+            "conflict_input",
+            "conflict_proposal",
+            "result_diff",
+            "range_diff",
+            "staged_diff",
+            "git_step_stdout",
+            "git_step_stderr",
+            "rebase_sequence",
+        )
+    ]
+    + [(role, True) for role in ("file_content", "commit_log", "rebase_selection")],
+)
+def test_capture_prefix_policy_controls_live_and_offline_evidence(audit, role, accepted):
+    if accepted:
+        audit.write("capture.bin", b"long contents", role=role, retained_limit=4)
+    else:
+        with pytest.raises(AuditError):
+            audit.write("capture.bin", b"long contents", role=role, retained_limit=4)
+    assert audit.evidence["capture.bin"]["truncated"]
+    assert audit.evidence_ready is accepted
+    audit.set_status("failed", EzError("Stopped fixture"))
+    audit.finalize()
+    assert load_audit(audit.directory).exit_code == (0 if accepted else 1)
 
 
 @pytest.mark.unit

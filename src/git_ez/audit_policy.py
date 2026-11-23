@@ -22,6 +22,7 @@ ROLES = frozenset(
         "result_diff",
         "range_diff",
         "commit_log",
+        "rebase_selection",
         "rebase_sequence",
         "sequence_digest",
         "sequence_metadata",
@@ -29,6 +30,35 @@ ROLES = frozenset(
         "final_inventory",
     }
 )
+
+# Prefixes are accepted only where the existing capture policy defines a bound.
+# Inventory truncation describes bounded children, never a truncated JSON document.
+PREFIX_ROLES = frozenset(
+    {
+        "file_content",
+        "worktree_inventory",
+        "final_inventory",
+        "commit_log",
+        "rebase_selection",
+        "metadata_export",
+    }
+)
+
+
+def capture_satisfies(entry: Mapping[str, Any]) -> bool:
+    """Whether retained content satisfies this role's capture policy."""
+    if entry.get("status") == "unavailable" or entry.get("result") in (
+        "not_attempted",
+        "io_error",
+        "observation_error",
+        "invalid",
+        "interrupted",
+        "unsupported",
+    ):
+        return False
+    if entry.get("truncated") or entry.get("result") == "truncated":
+        return entry.get("role") in PREFIX_ROLES
+    return True
 
 
 def artifact_owner(path: str, data: Mapping[str, Any]) -> str:
@@ -90,6 +120,9 @@ def required_artifacts(data: Mapping[str, Any]) -> dict[str, str]:
             required["range-diff.txt"] = "range_diff"
             if "rebase_sequence" in data:
                 required["rebase-commits.log"] = "commit_log"
+    anchor = data.get("rebase_plan", {}).get("selection_anchor")
+    if anchor:
+        required[anchor["artifact"]] = "rebase_selection"
     sequence = data.get("rebase_sequence")
     if sequence and sequence.get("status") != "pending":
         required[sequence["artifact"]] = "rebase_sequence"

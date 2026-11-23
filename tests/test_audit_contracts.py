@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from git_ez.audit import Audit
 from git_ez.audit_capture import observe
 from git_ez.audit_reader import load_audit
 from git_ez.audit_report import render_markdown
@@ -215,6 +216,22 @@ def test_serialization_rechecks_invariants_after_redaction(repo, token):
     repo.config = Config(model="test", api_key=token)
     audit = success(repo)
     assert load_audit(audit.directory).exit_code == 0
+
+
+def test_truncated_result_diff_cannot_satisfy_success(repo, monkeypatch):
+    write = Audit.write
+
+    def bounded(audit, artifact, content, **kwargs):
+        if artifact == "result.diff":
+            kwargs["retained_limit"] = 8
+        return write(audit, artifact, content, **kwargs)
+
+    monkeypatch.setattr(Audit, "write", bounded)
+    audit = Engine(repo.root, repo.config, repo.resolver).run("main", "merge")
+    assert audit.evidence["result.diff"]["truncated"]
+    assert audit.view["status"] == "failed"
+    assert audit.view["integrated"]
+    assert load_audit(audit.directory).exit_code == 1
 
 
 def test_sequence_source_rejects_symlinks_in_parent_components(repo):

@@ -117,7 +117,10 @@ filtered manifest is validated before it can replace the previous revision.
 A missing required proposal or native-step capture prevents the next Git mutation.
 A final evidence failure preserves any completed integration but fails the run.
 An intentionally bounded file prefix is distinguished from an unexpected read/write
-failure. Never-produced outputs, such as stdout from an unstarted validation,
+failure. Prefixes are accepted only for bounded supporting files, their inventories,
+rebase selection objects and raw commit logs. Conflict inputs/proposals, staged
+diffs, result diffs, range-diffs and native command outputs require complete capture.
+Never-produced outputs, such as stdout from an unstarted validation,
 are marked inapplicable rather than presented as lost captured output.
 Ordinary model/tool events are required. After a failed append, the stream is sealed
 at its last acknowledged prefix; later finalization cannot make a missing event

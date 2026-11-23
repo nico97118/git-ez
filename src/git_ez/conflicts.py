@@ -7,6 +7,7 @@ import difflib
 import math
 import re
 from dataclasses import asdict, dataclass
+from io import StringIO
 from typing import Any
 
 from .errors import EzError
@@ -57,8 +58,8 @@ class LowConfidence(EzError):
 def text_diff(before: str | None, after: str | None, fromfile: str, tofile: str) -> str:
     """Render missing final newlines explicitly, as native Git diffs do."""
     lines = difflib.unified_diff(
-        (before or "").splitlines(keepends=True),
-        (after or "").splitlines(keepends=True),
+        StringIO(before or "", newline="\n").readlines(),
+        StringIO(after or "", newline="\n").readlines(),
         fromfile=fromfile,
         tofile=tofile,
     )

@@ -33,7 +33,9 @@ def artifact_lines(directory: Path | None, relative: str | None) -> list[str]:
         return [f"File: {literal(relative)}"]
     try:
         content = saved_text(directory, relative)
-        return [safe_text(line) for line in content.splitlines()] or ["(no changes)"]
+        if not content:
+            return ["(no changes)"]
+        return [safe_text(line) for line in content.removesuffix("\n").split("\n")]
     except (OSError, ValueError):
         return [f"Capture unavailable: {literal(relative)}"]
 

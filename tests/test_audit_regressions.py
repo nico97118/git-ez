@@ -169,3 +169,23 @@ def test_later_baseline_failure_preserves_previous_applied_attempt(repo, monkeyp
     assert first["resolution"] == {"rationale": "Combine both intentions", "confidence": 0.95}
     assert "Confidence: 0.95" in load_report(audit.directory)
     assert repo.git.rebase_active()
+
+
+@pytest.mark.parametrize("separator", ["\n", "\r", "\r\n", "\u2028", "\x85"])
+def test_text_diff_preserves_non_lf_characters(repo, separator):
+    from git_ez.audit_report import artifact_lines
+    from git_ez.conflicts import text_diff
+
+    before = f"left{separator}old"
+    after = f"left{separator}new"
+    repo.file.write_bytes(before.encode())
+    patch = repo.root / "resolution.patch"
+    patch.write_bytes(text_diff(before, after, "a/file.txt", "b/file.txt").encode())
+    repo.git.run("apply", "--check", str(patch))
+    repo.git.run("apply", str(patch))
+    assert repo.file.read_bytes() == after.encode()
+    if separator not in ("\n", "\r\n"):
+        escaped = f"\\u{ord(separator):04x}"
+        display = artifact_lines(repo.root, patch.name)
+        assert f"-left{escaped}old" in display
+        assert f"+left{escaped}new" in display

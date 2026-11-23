@@ -389,6 +389,12 @@ history. Only schema 4 is supported; inspect older journals directly.
 Known configured credentials are filtered. Audit files may contain sensitive
 source code and output; review before sharing. Unexpected execution exceptions
 propagate after best-effort cleanup. Resource budgets remain in effect.
+.PP
+Model/tool events record requests, responses and tool actions. Shell invocations
+retain command, execution directory, duration, exit code, available stdout/stderr
+and truncation. Scripts are single invocations, not per-subprocess traces.
+Usage metadata is retained when the provider supplies it. The process environment
+and authorization headers are not dumped.
 .SH EXIT STATUS
 .TP
 .B 0

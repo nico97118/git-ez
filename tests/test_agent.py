@@ -662,3 +662,57 @@ def test_optional_event_export_failure_preserves_the_conflict_decision(repo):
     assert audit.audit_errors
     assert repo.git.text("show", "HEAD:file.txt") == "combined"
     assert model.position == 2
+
+
+@pytest.mark.parametrize("mode", ["exit", "truncate", "timeout"])
+def test_shell_invocations_keep_results_streams_and_timing(repo, mode):
+    from git_ez.audit import load_report
+
+    script = (
+        "import sys; print('stdout-marker'); print('stderr-marker', file=sys.stderr); sys.exit(7)"
+    )
+    execute = command(script)
+    config = repo.config
+    if mode == "truncate":
+        config = replace(config, tool_output_bytes=128)
+        execute = command("print('x' * 1000)")
+    if mode == "timeout":
+        execute = command("import time; print('before-timeout', flush=True); time.sleep(5)")
+        execute["args"]["timeout"] = 1
+    audit, _ = run_agent(
+        repo,
+        [
+            [execute],
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [tool("finish", rationale="Resolved after checking the command", confidence=0.95)],
+        ],
+        config=config,
+    )
+    assert audit.view["status"] == "succeeded", audit.view
+    events = [
+        json.loads(line)
+        for line in (audit.directory / "sessions/0001/events.jsonl").read_text().splitlines()
+    ]
+    start = next(e for e in events if e["event"] == "command_started")
+    end = next(e for e in events if e["event"] == "command_finished")
+    assert start["command_id"] == end["command_id"]
+    assert start["cwd"] == str(repo.root)
+    assert start["command"] == execute["args"]["command"]
+    assert end["duration_seconds"] >= 0
+    if mode == "exit":
+        assert end["exit_code"] == 7
+        assert end["stdout"] == "stdout-marker\n"
+        assert end["stderr"] == "stderr-marker\n"
+    elif mode == "truncate":
+        assert end["truncated"] and end["stdout_truncated"]
+        assert len(end["stdout"].encode()) <= 128
+    else:
+        assert end["outcome"] == "timed_out"
+        assert end["exit_code"] == 124
+        assert "before-timeout" in end["stdout"]
+    assert "command_started" not in load_report(audit.directory)
+    assert "command_started" in load_report(audit.directory, verbose=True)
+    model_start = next(e for e in events if e["event"] == "model_requested")
+    assert model_start["messages"]
+    model_end = next(e for e in events if e["event"] == "model_result")
+    assert model_end["duration_seconds"] >= 0

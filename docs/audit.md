@@ -32,3 +32,11 @@ remain distinct; a final journal publication failure returns nonzero.
 
 Known configured credentials are filtered. File reads do not follow symlinks.
 Source code and outputs can still be sensitive; inspect them before sharing.
+
+Session `events.jsonl` records model requests/responses and tool actions in order.
+Shell invocations retain command, working directory, timing, exit code, available
+stdout/stderr and capture truncation. SDK timeouts require the timeout return code,
+not merely a matching string in successful output. Scripts are single invocations;
+subprocesses are not individually traced. Model usage metadata is retained when
+provided. Credentials and the full process environment are not dumped. Events are
+written progressively, independently of in-memory graph checkpoints.

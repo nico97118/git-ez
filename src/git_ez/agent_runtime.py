@@ -9,7 +9,9 @@ from collections.abc import Callable, Mapping
 from importlib.metadata import version
 from pathlib import Path
 from threading import RLock
+from time import monotonic
 from typing import Any
+from uuid import uuid4
 
 from deepagents import (
     GeneralPurposeSubagentProfile,
@@ -18,6 +20,7 @@ from deepagents import (
     register_harness_profile,
 )
 from deepagents.backends import CompositeBackend, FilesystemBackend, LocalShellBackend
+from deepagents.backends.protocol import ExecuteResponse
 from langchain.agents.middleware import (
     AgentMiddleware,
     ModelCallLimitMiddleware,
@@ -87,6 +90,7 @@ class SessionLog(BaseCallbackHandler):
         self.messages: list[Any] = []
         self._tool_requests: set[str | None] = set()
         self._tool_results: set[str | None] = set()
+        self._model_started: dict[str, float] = {}
 
     def event(self, event: str, **data: Any) -> None:
         with self.lock:
@@ -145,6 +149,7 @@ class SessionLog(BaseCallbackHandler):
 
     def on_chat_model_start(self, serialized: dict[str, Any], messages: Any, **kwargs: Any) -> None:
         self.conflicts += 1
+        self._model_started[str(kwargs.get("run_id"))] = monotonic()
         self.messages = list(messages[-1]) if messages else []
         parameters = kwargs.get("invocation_params", {})
         self.capture_event(
@@ -159,11 +164,21 @@ class SessionLog(BaseCallbackHandler):
             if batch and hasattr(batch[0], "message"):
                 self.messages.append(batch[0].message)
         self.capture_event(
-            "model_result", run_id=kwargs.get("run_id"), response=response.model_dump(mode="json")
+            "model_result",
+            run_id=kwargs.get("run_id"),
+            response=response.model_dump(mode="json"),
+            duration_seconds=monotonic()
+            - self._model_started.pop(str(kwargs.get("run_id")), monotonic()),
         )
 
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
-        self.capture_event("model_error", **error_info(error))
+        self.capture_event(
+            "model_error",
+            run_id=kwargs.get("run_id"),
+            duration_seconds=monotonic()
+            - self._model_started.pop(str(kwargs.get("run_id")), monotonic()),
+            **error_info(error),
+        )
 
     def on_tool_start(self, serialized: dict[str, Any], input_str: str, **kwargs: Any) -> None:
         self.tools += 1
@@ -187,6 +202,66 @@ class SessionLog(BaseCallbackHandler):
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
         self.capture_event("tool_error", **error_info(error))
+
+
+class JournalShell(LocalShellBackend):
+    """Keep command results before the SDK combines or offloads their output."""
+
+    def __init__(self, log: SessionLog, output_limit: int, **kwargs: Any):
+        super().__init__(max_output_bytes=output_limit, **kwargs)
+        self.log = log
+        self.output_limit = output_limit
+        self.streams: dict[str, Any] = {}
+
+    def _combine_output(self, stdout: str | None, stderr: str | None) -> tuple[str, bool]:
+        # The pinned SDK exposes separate streams only at this combination hook.
+        remaining = self.output_limit
+        self.streams = {}
+        for name, value in (("stdout", stdout), ("stderr", stderr)):
+            raw = (value or "").encode()
+            retained = raw[:remaining]
+            self.streams[name] = retained.decode(errors="replace")
+            self.streams[f"{name}_truncated"] = len(retained) < len(raw)
+            remaining -= len(retained)
+        return super()._combine_output(stdout, stderr)
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        identifier = uuid4().hex
+        start = monotonic()
+        self.streams = {}
+        self.log.capture_event(
+            "command_started",
+            command_id=identifier,
+            command=command,
+            cwd=str(self.cwd),
+            timeout=timeout,
+        )
+        try:
+            result = super().execute(command, timeout=timeout)
+        except BaseException as exc:
+            self.log.capture_event(
+                "command_finished",
+                command_id=identifier,
+                duration_seconds=monotonic() - start,
+                outcome="interrupted"
+                if isinstance(exc, (KeyboardInterrupt, SystemExit))
+                else "failed",
+                **error_info(exc),
+            )
+            raise
+        self.log.capture_event(
+            "command_finished",
+            command_id=identifier,
+            duration_seconds=monotonic() - start,
+            exit_code=result.exit_code,
+            outcome="timed_out"
+            if result.exit_code == 124 and result.output.startswith("Error: Command timed out")
+            else "returned",
+            truncated=result.truncated,
+            output=result.output,
+            **self.streams,
+        )
+        return result
 
 
 class IntegrationMiddleware(AgentMiddleware[Any, Any, Any]):
@@ -345,11 +420,12 @@ def run_agent(
             HarnessProfile(general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)),
         )
         env = agent_environment(config)
-        shell = LocalShellBackend(
+        shell = JournalShell(
+            log,
+            config.tool_output_bytes,
             root_dir=git.path,
             virtual_mode=True,
             timeout=max(1, int(config.timeout)),
-            max_output_bytes=config.tool_output_bytes,
             env=env,
         )
 

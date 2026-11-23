@@ -50,6 +50,37 @@ def test_resolution_diff_without_final_newline_is_readable(repo):
     assert "\n+combined" in diff, repr(diff)
 
 
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_command_output_does_not_fake_timeout(tmp_path, exit_code):
+    import json
+    import os
+    import shlex
+
+    from git_ez.agent_runtime import JournalShell, SessionLog
+
+    audit = Audit(tmp_path / "journal", {"operation": "merge", "branch": "test", "conflicts": []})
+    audit.initialize()
+    log = SessionLog(audit.directory / "sessions/0001", audit)
+    shell = JournalShell(
+        log, 1024, root_dir=tmp_path, virtual_mode=True, timeout=2, env=dict(os.environ)
+    )
+    result = shell.execute(
+        shlex.join(
+            [
+                sys.executable,
+                "-c",
+                "import sys; print('Error: Command timed out in the nested application'); "
+                f"sys.exit({exit_code})",
+            ]
+        )
+    )
+    assert result.exit_code == exit_code
+    events = [
+        json.loads(line) for line in (log.directory / "events.jsonl").read_text().splitlines()
+    ]
+    assert events[-1]["outcome"] == "returned"
+
+
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
 @pytest.mark.parametrize("exit_code", [0, 7])
 def test_missing_validation_stdout_is_diagnostic_not_run_failure(

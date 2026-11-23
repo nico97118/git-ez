@@ -668,10 +668,11 @@ def test_optional_event_export_failure_preserves_the_conflict_decision(repo):
 def test_shell_invocations_keep_results_streams_and_timing(repo, mode):
     from git_ez.audit import load_report
 
-    script = (
-        "import sys; print('stdout-marker'); print('stderr-marker', file=sys.stderr); sys.exit(7)"
+    # Shell built-ins keep exact stream assertions independent of Python startup
+    # diagnostics from coverage instrumentation (notably the FreeBSD C tracer warning).
+    execute = tool(
+        "execute", command="printf 'stdout-marker\\n'; printf 'stderr-marker\\n' >&2; exit 7"
     )
-    execute = command(script)
     config = repo.config
     if mode == "truncate":
         config = replace(config, tool_output_bytes=128)

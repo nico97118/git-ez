@@ -87,6 +87,8 @@ class SessionLog(BaseCallbackHandler):
         self.conflicts = 0
         self.tools = 0
         self.messages: list[Any] = []
+        self._tool_requests: set[str | None] = set()
+        self._tool_results: set[str | None] = set()
 
     def event(self, event: str, **data: Any) -> None:
         with self.lock:
@@ -110,12 +112,29 @@ class SessionLog(BaseCallbackHandler):
                 f"Agent event capture failed ({event}); inspect audit errors"
             ) from failure
 
-    def feedback(
-        self, call: Mapping[str, Any], message: str, *, record_request: bool
-    ) -> ToolMessage:
-        """Record middleware feedback that bypasses ordinary tool-result callbacks."""
+    def begin_tool(self, identifier: str | None) -> None:
+        # A provider may reuse a call ID on a later turn. The middleware serializes
+        # invocations; acknowledgements belong only to the current invocation.
         with self.lock:
-            if record_request:
+            self._tool_requests.discard(identifier)
+            self._tool_results.discard(identifier)
+
+    def feedback(self, call: Mapping[str, Any], message: str) -> ToolMessage:
+        """Record middleware feedback that bypasses ordinary tool-result callbacks."""
+        return self.record_feedback(
+            call,
+            ToolMessage(
+                content=message, status="error", tool_call_id=call["id"], name=call["name"]
+            ),
+        )
+
+    def record_feedback(self, call: Mapping[str, Any], result: ToolMessage) -> ToolMessage:
+        """Retain returned feedback once, including errors normalized by the SDK."""
+        with self.lock:
+            identifier = call["id"]
+            if identifier in self._tool_results:
+                return result
+            if identifier not in self._tool_requests:
                 self.tools += 1
                 self.required_event(
                     "tool_requested",
@@ -124,15 +143,14 @@ class SessionLog(BaseCallbackHandler):
                     tool_call_id=call["id"],
                     origin="middleware",
                 )
-            result = ToolMessage(
-                content=message, status="error", tool_call_id=call["id"], name=call["name"]
-            )
+                self._tool_requests.add(identifier)
             self.required_event(
                 "tool_result",
                 result=result.model_dump(mode="json"),
                 tool_call_id=call["id"],
                 origin="middleware",
             )
+            self._tool_results.add(identifier)
             return result
 
     def on_chat_model_start(self, serialized: dict[str, Any], messages: Any, **kwargs: Any) -> None:
@@ -164,11 +182,18 @@ class SessionLog(BaseCallbackHandler):
             name=serialized.get("name"),
             input=input_str,
             run_id=kwargs.get("run_id"),
+            tool_call_id=kwargs.get("tool_call_id"),
         )
+        if isinstance(identifier := kwargs.get("tool_call_id"), str):
+            with self.lock:
+                self._tool_requests.add(identifier)
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> None:
         result = output.model_dump(mode="json") if hasattr(output, "model_dump") else str(output)
         self.required_event("tool_result", result=result, run_id=kwargs.get("run_id"))
+        if isinstance(identifier := getattr(output, "tool_call_id", None), str):
+            with self.lock:
+                self._tool_results.add(identifier)
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
         self.capture_event("tool_error", **error_info(error))
@@ -218,6 +243,7 @@ class IntegrationMiddleware(AgentMiddleware[Any, Any, Any]):
         with self.lock:
             self.guard()
             call = request.tool_call
+            self.log.begin_tool(call["id"])
             if call["name"] == "finish":
                 last = next(
                     (m for m in reversed(request.state["messages"]) if isinstance(m, AIMessage)),
@@ -227,7 +253,6 @@ class IntegrationMiddleware(AgentMiddleware[Any, Any, Any]):
                     return self.log.feedback(
                         call,
                         "finish must be called alone",
-                        record_request=True,
                     )
             if (
                 call["name"] == "execute"
@@ -237,14 +262,15 @@ class IntegrationMiddleware(AgentMiddleware[Any, Any, Any]):
                 return self.log.feedback(
                     call,
                     "Command timeout exceeds configured limit",
-                    record_request=True,
                 )
             try:
                 result = handler(request)
             except (LowConfidence, GitStateChanged, AuditError):
                 raise
             except (EzError, OSError, UnicodeError) as exc:
-                result = self.log.feedback(call, safe_error(exc), record_request=False)
+                result = self.log.feedback(call, safe_error(exc))
+            if isinstance(result, ToolMessage) and result.status == "error":
+                result = self.log.record_feedback(call, result)
             self.guard()
             return result
 

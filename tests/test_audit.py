@@ -172,6 +172,24 @@ def test_scope_cannot_claim_a_decision_without_its_required_facts(audit, group, 
 
 
 @pytest.mark.unit
+def test_tool_feedback_receipts_are_scoped_to_each_invocation(audit):
+    from git_ez.agent_runtime import SessionLog
+
+    log = SessionLog(audit.directory / "sessions/1", audit)
+    call = {"id": "reused", "name": "unknown", "args": {}}
+    for _ in range(2):
+        log.begin_tool(call["id"])
+        result = log.feedback(call, "Unknown tool")
+        log.record_feedback(call, result)  # Already acknowledged in this invocation.
+    events = [
+        json.loads(line)
+        for line in (audit.directory / "sessions/1/events.jsonl").read_text().splitlines()
+    ]
+    assert [event["event"] for event in events] == ["tool_requested", "tool_result"] * 2
+    assert log.tools == 2
+
+
+@pytest.mark.unit
 def test_failure_precedence_and_terminal_publication(audit):
     audit.set_status("failed", EzError("initial failure"), phase="integration")
     audit.attempt("secondary", lambda: (_ for _ in ()).throw(OSError("private detail")))

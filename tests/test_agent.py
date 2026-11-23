@@ -528,6 +528,31 @@ def test_middleware_feedback_capture_failure_stops_before_next_model_call(repo, 
     assert not (repo.root / "forbidden.txt").exists()
 
 
+@pytest.mark.parametrize("bad_call", [tool("missing_tool"), tool("execute")])
+def test_sdk_normalized_tool_feedback_is_recorded_once(repo, bad_call):
+    audit, _ = run_agent(
+        repo,
+        [
+            [bad_call],
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [tool("finish", rationale="Resolved after feedback", confidence=0.95)],
+        ],
+    )
+    assert audit.view["status"] == "succeeded", audit.view.get("error")
+    events = [
+        json.loads(line)
+        for line in (audit.directory / "sessions/0001/events.jsonl").read_text().splitlines()
+    ]
+    requests = [event for event in events if event["event"] == "tool_requested"]
+    results = [event for event in events if event["event"] == "tool_result"]
+    assert len(requests) == len(results) == 3
+    feedback = next(
+        event["result"] for event in results if event["result"]["tool_call_id"] == "call-1-0"
+    )
+    assert feedback["status"] == "error"
+    assert audit.view["sessions"][0]["tool_calls"] == 3
+
+
 def test_context_byte_limit_stops_further_model_calls_and_preserves_evidence(repo):
     audit, model = run_agent(
         repo,

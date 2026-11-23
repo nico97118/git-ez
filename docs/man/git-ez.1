@@ -14,8 +14,7 @@ git-ez \- local rebase and merge with AI-assisted conflict resolution
 .RI [ --repo " directory"]
 .RI [ --check " executable arguments..."]
 .br
-.B git ez probe --output
-.I report.json
+.B git ez probe
 .br
 .B git ez show
 .I run-directory
@@ -58,6 +57,23 @@ environment variables.
 .PP
 Valid model configuration is required even when no conflicts occur; no model
 call is made when Git resolves the operation without assistance.
+.SH PROBE
+The probe checks a text response, a native call to the harmless
+compatibility_echo tool, and subsequent use of its result through the configured
+model connector. It does not expose repository contents or shell tools to the
+model. A compatible result does not measure conflict-resolution quality.
+.PP
+The command writes a single final JSON report to standard output and diagnostics
+to standard error. No intermediate snapshots are saved. Use shell redirection
+to save the report:
+.PP
+.nf
+git ez probe > report.json
+.fi
+.PP
+A failed compatibility check is included in the JSON report. A configuration
+error or interruption before completion may leave no report. The shell may
+create or truncate the destination file even if the command fails.
 .SH INSTALLATION ON FREEBSD
 FreeBSD support is experimental. CI targets FreeBSD 15.1 amd64/Python 3.12
 only.
@@ -399,7 +415,7 @@ Configuration, command-line, or precondition error.
 .nf
 git config --global ez.model exact-model-id
 git config --global ez.endpoint https://ai-server.example/v1
-git ez probe --output /tmp/ai-compatibility.json
+git ez probe > /tmp/ai-compatibility.json
 git ez rebase main
 git ez merge feature
 git ez rebase main --check python -B -m pytest

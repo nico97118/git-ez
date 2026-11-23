@@ -15,7 +15,9 @@ git ez merge feature
 git ez rebase origin/main --repo /path/to/project --check python -B -m pytest
 
 # Probe model compatibility without exposing the repository or shell tools:
-git ez probe --output /tmp/ai-compatibility.json
+git ez probe
+# Save the JSON report to a file instead:
+git ez probe > /tmp/ai-compatibility.json
 
 # Read an existing report:
 git ez show /path/to/project/.git/ez/runs/RUN_ID
@@ -59,7 +61,16 @@ run. Test artifacts must be ignored or cleaned up by the target project.
 The probe checks a text response, a native call to the harmless `compatibility_echo`
 tool, and subsequent use of its result, through the same connectors used for resolution.
 It does not modify a repository or execute model commands. A `compatible` result is not
-a measure of conflict-resolution quality.
+a measure of conflict-resolution quality. The command writes a single final JSON report to
+stdout and diagnostics to stderr. Use `git ez probe > report.json` to save the report.
+No intermediate snapshots are saved.
+
+A failed compatibility check is included in the JSON report. A configuration error or
+interruption before completion may leave no report. The shell may create or truncate
+the destination file even if the command fails.
+
+For existing scripts, replace `git ez probe --output report.json` with
+`git ez probe > report.json`.
 
 Exit codes: `0` = successful local integration, displayed report, or compatible probe;
 `1` = failed run/probe; `2` = configuration, CLI, or precondition error.

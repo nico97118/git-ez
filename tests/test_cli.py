@@ -148,11 +148,9 @@ def test_probe_uses_git_configuration(tmp_path, monkeypatch, mocker):
     Git(tmp_path).run("config", "ez.model", "configured-model")
     monkeypatch.chdir(tmp_path)
     probe = mocker.patch("git_ez.probe.probe", return_value={"status": "compatible"})
-    output = tmp_path / "probe.json"
-    assert main(["probe", "--output", str(output)]) == 0
-    config, destination = probe.call_args.args
+    assert main(["probe"]) == 0
+    (config,) = probe.call_args.args
     assert config.model == "configured-model"
-    assert destination == output
 
 
 @pytest.mark.integration
@@ -356,13 +354,14 @@ def test_signing_before_attached_check_is_still_an_integration_option():
     "arguments",
     [
         ["show", "run", "--check", "command"],
-        ["probe", "--output", "report.json", "--check=command"],
+        ["probe", "--check=command"],
     ],
 )
-def test_check_is_rejected_for_non_integration_commands(arguments):
+def test_check_is_rejected_for_non_integration_commands(arguments, capsys):
     with pytest.raises(SystemExit) as error:
         parser().parse_args(arguments)
     assert error.value.code == 2
+    assert "--check is only supported for rebase and merge" in capsys.readouterr().err
 
 
 @pytest.mark.integration
@@ -638,3 +637,143 @@ def test_cli_prints_primary_failure_and_audit_errors_when_summaries_cannot_be_sa
     assert "report destination unavailable" in output.err
     assert "Report unavailable or incomplete" in output.err
     assert not cli_repo.operation_active()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("outcome", ["compatible", "provider_error", "partial_failure"])
+def test_probe_json_destination(tmp_path, monkeypatch, mocker, capsys, outcome):
+    import json
+
+    from git_ez.config import Config
+    from git_ez.errors import EzError
+
+    monkeypatch.chdir(tmp_path)
+    mocker.patch("git_ez.cli.Config.from_git", return_value=Config(model="test"))
+    compatible = outcome == "compatible"
+    if outcome != "provider_error":
+        from langchain_core.messages import AIMessage
+
+        def respond(messages):
+            import re
+
+            marker = re.search(r"ez-[0-9a-f]{32}", str(messages)).group()
+            if len(messages) == 1 and "Call compatibility_echo" in messages[0].content:
+                if outcome == "partial_failure":
+                    return AIMessage(content="no tool call")
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "compatibility_echo", "args": {"value": marker}, "id": "call"}
+                    ],
+                )
+            return AIMessage(content=marker)
+
+        model = mocker.Mock()
+        model.invoke.side_effect = respond
+        model.bind_tools.return_value = model
+        mocker.patch("git_ez.probe.create_chat_model", return_value=model)
+    else:
+        mocker.patch("git_ez.probe.create_chat_model", side_effect=EzError("Invalid provider"))
+    assert main(["probe"]) == (0 if compatible else 1)
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["status"] == ("compatible" if compatible else "failed")
+    assert f"Compatibility: {report['status']}" in captured.err
+    assert list(tmp_path.iterdir()) == []
+    if outcome == "provider_error":
+        assert report["error"]["message"] == "Invalid provider"
+    elif outcome == "partial_failure":
+        assert [check["ok"] for check in report["checks"]] == [True, False]
+        assert report["error"]["type"] == "EzError"
+
+
+@pytest.mark.unit
+def test_probe_rejects_removed_output_option(tmp_path, mocker, capsys):
+    probe = mocker.patch("git_ez.probe.probe")
+    output = tmp_path / "report.json"
+    with pytest.raises(SystemExit, match="2"):
+        main(["probe", "--output", str(output)])
+    captured = capsys.readouterr()
+    assert "unrecognized arguments: --output" in captured.err
+    assert captured.out == ""
+    assert not output.exists()
+    probe.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("on_flush", [False, True])
+def test_probe_stdout_write_failure(mocker, capsys, on_flush):
+    import io
+
+    from git_ez.config import Config
+
+    mocker.patch("git_ez.cli.Config.from_git", return_value=Config(model="test"))
+    mocker.patch("git_ez.probe.probe", return_value={"status": "compatible"})
+
+    class FailedOutput(io.StringIO):
+        def write(self, value):
+            if not on_flush:
+                raise BrokenPipeError("consumer closed")
+            return super().write(value)
+
+        def flush(self):
+            raise OSError("storage full")
+
+    with mocker.patch("git_ez.cli.sys.stdout", FailedOutput()):
+        assert main(["probe"]) != 0
+    captured = capsys.readouterr()
+    assert "git-ez:" in captured.err
+    assert "Compatibility: compatible" not in captured.err
+
+
+@pytest.mark.unit
+def test_probe_configuration_error(mocker, capsys):
+    from git_ez.errors import EzError
+
+    mocker.patch("git_ez.cli.Config.from_git", side_effect=EzError("Configure ez.model"))
+    probe = mocker.patch("git_ez.probe.probe")
+    assert main(["probe"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Configure ez.model" in captured.err
+    probe.assert_not_called()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("destination", ["file", "pipe"])
+def test_probe_redirected_json(tmp_path, model_server, destination):
+    import json
+
+    git = Git(tmp_path)
+    git.run("init", "-b", "main")
+    git.run("config", "ez.model", "test")
+    git.run("config", "ez.endpoint", model_server.endpoint)
+    before = git.run("status", "--porcelain").stdout
+    command = [sys.executable, "-m", "git_ez.cli", "probe"]
+    if destination == "file":
+        output = tmp_path / "report.json"
+        with output.open("w") as stream:
+            result = subprocess.run(command, cwd=tmp_path, stdout=stream, stderr=subprocess.PIPE)
+        report = json.loads(output.read_text())
+    else:
+        with subprocess.Popen(
+            command, cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        ) as producer:
+            consumer = subprocess.run(
+                [sys.executable, "-c", "import json,sys; print(json.load(sys.stdin)['status'])"],
+                stdin=producer.stdout,
+                capture_output=True,
+                text=True,
+            )
+            producer.stdout.close()
+            _, diagnostics = producer.communicate()
+        assert producer.returncode == 1
+        assert b"Compatibility: failed" in diagnostics
+        assert consumer.returncode == 0
+        assert consumer.stdout == "failed\n"
+        assert git.run("status", "--porcelain").stdout == before
+        return
+    assert result.returncode == 1
+    assert b"Compatibility: failed" in result.stderr
+    assert report["status"] == "failed"
+    assert report["checks"][0]["ok"] is False

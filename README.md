@@ -100,7 +100,9 @@ target must already exist locally; git-ez pins its revision when the run starts.
 
 ```bash
 # Check model/tool compatibility without exposing the repository or shell tools:
-git ez probe --output /tmp/ai-compatibility.json
+git ez probe
+# Save the JSON report to a file instead:
+git ez probe > /tmp/ai-compatibility.json
 
 # Rebase the current branch onto main, or merge feature into the current branch:
 git ez rebase main

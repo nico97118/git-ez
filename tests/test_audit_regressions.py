@@ -15,6 +15,30 @@ from tests.test_engine import repo as repo
 pytestmark = pytest.mark.integration
 
 
+@pytest.mark.parametrize("interactive", [False, True])
+@pytest.mark.parametrize("ending", ["error", "interrupted", "low_confidence"])
+def test_failed_attempt_retains_supporting_changes(repo, monkeypatch, interactive, ending):
+    monkeypatch.setattr("builtins.input", lambda prompt: "s")
+    from git_ez.errors import EzError
+
+    def fail(*args):
+        repo.file.write_text("partial conflict resolution\n")
+        (repo.root / "support.txt").write_text("SUPPORTING-CHANGE-REVIEW\n")
+        if ending == "interrupted":
+            raise KeyboardInterrupt
+        if ending == "low_confidence":
+            return {"rationale": "Needs manual review", "confidence": 0.1}
+        raise EzError("resolver failed")
+
+    repo.resolver.run = fail
+    audit = Engine(repo.root, repo.config, repo.resolver).run(
+        "main", "merge", interactive=interactive
+    )
+    assert audit.view["status"] == ("interrupted" if ending == "interrupted" else "failed")
+    files = list(audit.directory.rglob("*"))
+    assert any(p.is_file() and b"SUPPORTING-CHANGE-REVIEW" in p.read_bytes() for p in files)
+
+
 def test_resolution_diff_without_final_newline_is_readable(repo):
     repo.file.write_text("source")
     repo.git.run("commit", "--amend", "--no-edit", "-a")

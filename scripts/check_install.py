@@ -164,8 +164,8 @@ def main() -> None:
             manifest_path = audits[0] / "run.json"
             manifest = manifest_path.read_bytes()
             payload = json.loads(manifest)
-            if payload["schema_version"] != 3:
-                raise RuntimeError("Installed extension did not publish schema 3")
+            if payload["schema_version"] != 4:
+                raise RuntimeError("Installed extension did not publish schema 4")
             cache = audits[0] / "report.md"
             cache.write_text("# Stale cached report: failed\n")
             if "Recorded status: **succeeded**" not in run("git", "ez", "show", str(audits[0])):

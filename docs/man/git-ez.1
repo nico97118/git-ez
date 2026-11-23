@@ -361,11 +361,13 @@ and
 permissions remain unchanged during resolution, including binary and oversized
 resources. Audit file capture limits still apply.
 .PP
-New runs use journal schema 3. For every conflict handled by the LLM, the
+New runs use journal schema 4. For every conflict handled by the LLM, the
 journal retains the conflict diff, resolution, explanation and confidence.
 Original inputs are in conflicts/NNNN/request.json; conflict.diff compares
 ours and theirs. resolution.txt and resolution.diff retain the proposal.
-run.json records whether it was applied. Git remains the source for commit
+run.json records whether it was applied. Each reprompt keeps a distinct attempt
+with its proposal, explanation, confidence and user feedback. All proposal diffs
+compare to the original ours. Failed attempts retain supporting agent changes. Git remains the source for commit
 history and repository diffs; native command archives are not retained.
 .PP
 A session can resolve multiple files with the same explanation and confidence.
@@ -382,7 +384,7 @@ conflict captures are reported explicitly. File reads do not follow symlinks.
 .PP
 show renders run.json read-only without Git or model calls, ignoring a stale
 report.md. It displays recorded facts without certifying files or reconstructing
-history. Only schema 3 is supported; inspect older journals directly.
+history. Only schema 4 is supported; inspect older journals directly.
 .PP
 Known configured credentials are filtered. Audit files may contain sensitive
 source code and output; review before sharing. Unexpected execution exceptions

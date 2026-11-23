@@ -307,7 +307,7 @@ class Engine:
         audit = Audit(
             common / "ez" / "runs" / uuid4().hex,
             {
-                "schema_version": 2,
+                "schema_version": 4,
                 "created_at": now(),
                 "status": "running",
                 "operation": operation,
@@ -720,7 +720,13 @@ class Engine:
         return record, conflict
 
     def _save_resolution(
-        self, git: Git, audit: Audit, record: Record, conflict: Conflict, decision: Decision | None
+        self,
+        git: Git,
+        audit: Audit,
+        record: Record,
+        conflict: Conflict,
+        decision: Decision | None,
+        directory: str | None = None,
     ) -> None:
         record.update(
             resolution={
@@ -744,11 +750,59 @@ class Engine:
                 **(asdict(decision) if decision is not None else {}),
             }
         )
-        record.artifact(
-            "proposed", audit.artifact(record["number"], "resolution.txt", content or "")
-        )
+        prefix = directory or f"conflicts/{record['number']:04d}"
+        audit.write(f"{prefix}/resolution.txt", (content or "").encode())
+        record.artifact("proposed", f"{prefix}/resolution.txt")
         diff = text_diff(conflict.ours, content, "ours", "resolution")
-        record.artifact("diff", audit.artifact(record["number"], "resolution.diff", diff))
+        audit.write(f"{prefix}/resolution.diff", diff.encode())
+        record.artifact("diff", f"{prefix}/resolution.diff")
+
+    def _capture_attempt(
+        self, git: Git, audit: Audit, proposal: Record, decision: Decision | None
+    ) -> None:
+        captures = []
+        for conflict in audit.view["conflicts"]:
+            if conflict["id"] not in proposal["conflict_ids"]:
+                continue
+            payload = json.loads(read_evidence(audit.directory / conflict["artifacts"]["request"]))
+            record = Record(audit, {"number": conflict["number"], "path": conflict["path"]})
+            self._save_resolution(
+                git,
+                audit,
+                record,
+                Conflict(**payload),
+                decision,
+                f"{proposal['artifacts']}/conflicts/{conflict['number']:04d}",
+            )
+            captures.append(record.data)
+        proposal.update(conflicts=captures)
+        audit.save()
+
+    def _capture_changes(
+        self,
+        git: Git,
+        audit: Audit,
+        proposal: Record,
+        paths: list[str],
+        baseline: dict[str, tuple[int, str] | None],
+    ) -> list[str]:
+        current = WorktreeChecks(self.config).baseline(git)
+        selected = sorted(
+            set(paths)
+            | {
+                name
+                for name in baseline.keys() | current.keys()
+                if baseline.get(name) != current.get(name)
+            }
+        )
+        capture_proposal(
+            audit,
+            git,
+            audit.directory / proposal["artifacts"],
+            self.config.max_file_bytes,
+            selected,
+        )
+        return selected
 
     def resolve_conflicts(
         self,
@@ -766,6 +820,7 @@ class Engine:
         session_count = len(audit.view.get("sessions", []))
         saved = primary_error = False
         status = "failed"
+        baseline: dict[str, tuple[int, str] | None] | None = None
         try:
             baseline = checks.baseline(git)
             if audit.view.get("interactive"):
@@ -779,6 +834,7 @@ class Engine:
                         "status": "running",
                         "artifacts": f"proposals/{round_number:04d}",
                         "feedback": None,
+                        "conflict_ids": [record["id"] for record, _ in snapshots],
                     },
                 )
                 decision = Decision.parse(
@@ -788,6 +844,10 @@ class Engine:
                 raise LowConfidence("Agent confidence below threshold; worktree preserved")
             checks.guard(git, audit, head, branch)
             checks.verify(git, list(stages), baseline)
+            if not audit.view.get("interactive"):
+                proposal = audit.record("reviews")
+                self._capture_attempt(git, audit, proposal, decision)
+                self._capture_changes(git, audit, proposal, list(stages), baseline)
             for record, conflict in snapshots:
                 self._save_resolution(git, audit, record, conflict, decision)
             audit.save()
@@ -796,7 +856,7 @@ class Engine:
             status = "applied"
             for record, _ in snapshots:
                 record.update(status=status, application="staged")
-            audit.record("reviews").update(status=status)
+            audit.record("reviews").update(status=status, application="staged")
             audit.save()
         except LowConfidence:
             primary_error = True
@@ -825,6 +885,23 @@ class Engine:
                     )
                     if error is not None:
                         record.update(capture_error=safe_error(error))
+            if not audit.view.get("interactive") and audit.view.get("reviews"):
+                proposal = audit.record("reviews")
+                if not proposal.get("conflicts"):
+                    audit.attempt(
+                        "attempt proposal",
+                        partial(self._capture_attempt, git, audit, proposal, decision),
+                    )
+                if baseline is not None and not audit.has_artifact(
+                    f"{proposal['artifacts']}/files.json"
+                ):
+                    audit.attempt(
+                        "attempt supporting files",
+                        partial(
+                            self._capture_changes, git, audit, proposal, list(stages), baseline
+                        ),
+                    )
+                proposal.update(status=status, resolution=asdict(decision) if decision else None)
             error = audit.attempt("conflict decisions", audit.save)
             if error is not None and not primary_error:
                 raise AuditError("Cannot retain conflict decisions") from error
@@ -841,6 +918,7 @@ class Engine:
         head = git.text("rev-parse", "HEAD")
         branch = git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.decode().strip() or None
         checks = WorktreeChecks(self.config)
+        before_agent = checks.baseline(git)
         while True:
             reviews = audit.view.get("reviews", [])
             number = len(reviews) + 1
@@ -858,21 +936,14 @@ class Engine:
             audit.save()
             directory = audit.directory / proposal["artifacts"]
             primary_error = False
+            parsed: Decision | None = None
+            session_count = len(audit.view.get("sessions", []))
             try:
-                before_agent = checks.baseline(git)
                 raw = self.resolver.run(git, audit, number, paths, validation)
                 parsed = Decision.parse(raw)
                 proposal.update(resolution=asdict(parsed))
-                after_agent = checks.baseline(git)
-                selected = sorted(
-                    set(paths)
-                    | {
-                        name
-                        for name in before_agent.keys() | after_agent.keys()
-                        if before_agent.get(name) != after_agent.get(name)
-                    }
-                )
-                capture_proposal(audit, git, directory, self.config.max_file_bytes, selected)
+                self._capture_attempt(git, audit, proposal, parsed)
+                selected = self._capture_changes(git, audit, proposal, paths, before_agent)
                 proposal.update(status="proposed")
                 audit.save()
                 review_baseline = checks.baseline(git)
@@ -923,17 +994,26 @@ class Engine:
                 proposal.update(error=f"Unexpected {type(exc).__name__}")
                 raise
             finally:
+                sessions = audit.view.get("sessions", [])
+                if parsed is None and len(sessions) > session_count and "rationale" in sessions[-1]:
+                    parsed = Decision(sessions[-1]["rationale"], sessions[-1]["confidence"])
+                    proposal.update(resolution=asdict(parsed))
+                if not proposal.get("conflicts"):
+                    audit.attempt(
+                        "attempt proposal",
+                        partial(self._capture_attempt, git, audit, proposal, parsed),
+                    )
                 capture_error = None
                 if not audit.has_artifact(f"{proposal['artifacts']}/files.json"):
                     capture_error = audit.attempt(
                         "review worktree",
                         partial(
-                            capture_proposal,
-                            audit,
+                            self._capture_changes,
                             git,
-                            directory,
-                            self.config.max_file_bytes,
+                            audit,
+                            proposal,
                             paths,
+                            before_agent,
                         ),
                         f"{proposal['artifacts']}/files.json",
                     )

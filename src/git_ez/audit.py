@@ -83,7 +83,7 @@ class Audit:
     def __init__(self, directory: Path, metadata: dict[str, Any]):
         self.directory = directory
         self._data = copy.deepcopy(metadata)
-        self._data.update(id=directory.name, schema_version=3, status="running", integrated=False)
+        self._data.update(id=directory.name, schema_version=4, status="running", integrated=False)
         self._lock = RLock()
         self._secrets: tuple[str, ...] = ()
         self.owned = self.published = self._finished = False
@@ -274,21 +274,23 @@ class Audit:
             return
         error = self.attempt(
             "report",
-            lambda: self.write("report.md", render_markdown(self._clean(self._data)).encode()),
+            lambda: self.write(
+                "report.md", render_markdown(self._clean(self._data), self.directory).encode()
+            ),
         )
         if error is not None:
             self.presentation_errors.append("Report unavailable; read run.json")
 
 
-def load_report(directory: Path) -> str:
+def load_report(directory: Path, *, verbose: bool = False) -> str:
     try:
         data = json.loads(read_regular(directory / "run.json"))
         if (
             not isinstance(data, dict)
-            or data.get("schema_version") != 3
+            or data.get("schema_version") != 4
             or not isinstance(data.get("conflicts"), list)
         ):
             raise ValueError("Unsupported resolution journal")
-        return render_markdown(data)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return render_markdown(data, directory, verbose=verbose)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise EzError("Cannot read resolution journal; inspect run.json directly") from exc

@@ -36,15 +36,16 @@ Low confidence, an error, or an interruption leaves local state available for in
 There is no automatic rollback. The CLI's `Integrated` field indicates known Git
 completion; schema-2 manifests record this as `git.integration=completed`. Overall
 `succeeded` also requires successful checks and publication of the terminal manifest.
-Validation failure after integration
-therefore preserves the local result with a failed run status. Failure to write a
+Validation failure after integration therefore preserves the local result with a
+failed run status. Failure to write a
 required agent-session or final audit snapshot also fails the run, including failures
 of the Git commands that capture diffs and enumerate files. Partial capture evidence
 is retained and the failure is reported in the manifest and Markdown report.
-A session snapshot failure prevents Git continuation; a final snapshot failure preserves any completed
-integration. A secondary capture error does not replace the original failure reason.
+A session snapshot failure prevents Git continuation; a final snapshot failure
+preserves any completed integration. A secondary capture error does not replace
+the original failure reason.
 
-## Audit
+## Evidence and artifacts
 
 Traces are stored in the target repository's common Git directory:
 
@@ -55,15 +56,22 @@ Traces are stored in the target repository's common Git directory:
   config.json                # Effective configuration with redacted token
   system-prompt.txt
   integration.log            # Git commands and output
+  git-steps/0001.stdout / 0001.stderr # Canonical native command outputs
   result.diff                # Full before/after diff
   range-diff.txt             # Commit series comparison, rebase only
   rebase-todo.txt            # Initial native sequence, sequencer-backed rebases
+  rebase-todo.txt.sha256     # Retained sequence fingerprint written before replay
+  rebase-todo.txt.capture.json # Source size, hashes, and redaction metadata
   rebase-commits.log         # Result commits/messages, sequencer-backed rebases; truncation is explicit
   rebase-selection-anchor.txt # Internal exclusion object when needed; truncation is explicit
   conflicts/0001/
     base.txt / ours.txt / theirs.txt / marked.txt
     request.json             # Initial conflict evidence
     proposed.txt / resolution.diff
+  proposals/0001/            # Interactive attempts; auto-0001 for automatic proposals
+    worktree.diff / files.json / files/*.bin
+  native-resolutions/0001/
+    staged.diff             # Native rerere reuse before Git continuation
   sessions/0001/
     runtime.json / mission.json
     agent-files/             # Agent files and offloaded history, outside the worktree
@@ -75,11 +83,14 @@ Traces are stored in the target repository's common Git directory:
     files.json / worktree.diff / files/*.bin
 ```
 
-Files are created at the corresponding stage; an interrupted operation has no final
-diff. Snapshots retain edits, new non-ignored files, and deletions, including after a
+Files are created only when their stage is reached. An interruption after Git
+completion can still leave a result diff and a completed integration fact.
+Snapshots retain edits, new non-ignored files, and deletions, including after a
 failure. Copies are limited to `ez.maxFileBytes`; truncation and read errors are reported.
 Symlinks are not followed. The final capture also retains the effects of validation
 that changed files or HEAD.
+
+## Recorded state
 
 New runs use audit schema 2. `run.json` is the authoritative, revisioned snapshot;
 `report.md` is a derived cache. The manifest separates execution from evidence:
@@ -104,6 +115,8 @@ New runs use audit schema 2. `run.json` is the authoritative, revisioned snapsho
 - Session execution and evidence health are separate: `resolved` does not imply
   that its required evidence was retained or that Git continued. Proposed,
   accepted and actually staged changes remain distinct.
+
+## Required evidence and capture limits
 
 Proof obligations come from admitted scopes and execution facts, independently of
 the files that were successfully written. Removing a registry entry cannot remove
@@ -133,12 +146,14 @@ also have required request/result events; failure to retain them stops the sessi
 before its next model call. Later finalization cannot make a missing event
 complete. Unindexed trailing bytes remain raw, unverified evidence.
 
+## Finalization and publication
+
 Independent final captures are attempted even after a primary error. A failed terminal
 publication does not replace the causal failure. When capture itself is the first
 stop reason, it is classified as an audit failure, including after a passed
 validation command. A failed terminal publication produces a nonzero command result
-and a warning that saved state may be
-older. Git is never rolled back. If initialization cannot create an owned directory,
+and a warning that saved state may be older. Git is never rolled back. If
+initialization cannot create an owned directory,
 the CLI identifies the intended location without overwriting another run.
 When replacement may have occurred without acknowledgement, publication is shown
 as `unknown`, with the attempted and last acknowledged revisions retained in the
@@ -149,6 +164,8 @@ canonical events and facts exist. Their loss is a visible warning. Markdown rend
 and cache publication occur after the core manifest is committed; a presentation-only
 failure does not change that committed outcome. The cache identifies its source run,
 revision and manifest hash, but its existence is not proof of current success.
+
+## Reading and verification
 
 `git ez show RUN_DIRECTORY` reads and validates the manifest and required evidence,
 then renders a fresh view without executing Git, loading a model, or modifying files.

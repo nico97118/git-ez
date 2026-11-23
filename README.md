@@ -164,8 +164,8 @@ are not forwarded. See the [manual](docs/man/git-ez.1) and
 Runs retain local reports, conflict inputs, decisions, diffs, and agent evidence
 under `ez/runs/<id>` in the repository's common Git directory. Captures can be
 limited or incomplete; these conditions are reported. `run.json` is authoritative;
-Markdown reports are derived. `git ez show` verifies the saved evidence. Audit files may contain
-sensitive code and output. See the [audit guide](docs/audit.md) for artifacts,
+Markdown reports are derived. `git ez show` verifies the saved evidence. Audit files
+may contain sensitive code and output. See the [audit guide](docs/audit.md) for artifacts,
 status fields, capture limits, and failure handling.
 
 Failure or interruption preserves the actual local state without automatic

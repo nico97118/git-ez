@@ -348,60 +348,68 @@ and
 permissions remain unchanged during resolution, including binary and oversized
 resources. Audit file capture limits still apply.
 .PP
-New runs use schema 2. The revisioned run.json is authoritative; report.md is a
-reconstructible cache. Git completion, execution outcome, validation, final checks
-and evidence health are separate. A later audit failure cannot erase a known
-completed integration or its result commit. Missing observations are explicit;
-current ancestry alone does not prove a missing native command result.
+New runs use schema 2. The revisioned run.json is authoritative; report.md is
+a reconstructible cache. Git completion, execution outcome, validation, final
+checks and evidence health are separate. A later audit failure cannot erase a
+known completed integration or its result commit. Missing observations are
+explicit; current ancestry alone does not prove a missing native command
+result.
 .PP
 Required evidence failures stop further integration mutations or fail overall
-success. Independent final captures are attempted; the original failure remains
-primary. Ordinary model/tool events are required. A failed append seals the stream
-at its acknowledged prefix. Intentional file truncation, I/O loss, missing outputs
-and optional exports have distinct evidence records. A resolved agent session may
-have incomplete evidence and a failed run. Confidence is not independent validation.
+success. Independent final captures are attempted; the original failure
+remains primary. Ordinary model/tool events are required. A failed append
+seals the stream at its acknowledged prefix. Intentional file truncation, I/O
+loss, missing outputs and optional exports have distinct evidence records. A
+resolved agent session may have incomplete evidence and a failed run.
+Confidence is not independent validation.
 .PP
-Proof obligations are derived from admitted scopes and returned execution facts,
-independently of the captures present in the registry. The writer and reader use
-the same policy. Native rerere reuse requires its staged diff before continuation.
-File inventories and ordered event prefixes are verified as linked evidence.
+Proof obligations are derived from admitted scopes and returned execution
+facts, independently of the captures present in the registry. The writer and
+reader use the same policy. Native rerere reuse requires its staged diff
+before continuation. File inventories and ordered event prefixes are verified
+as linked evidence.
 .PP
-Compacted conversation and duplicate metadata exports are optional when canonical
-facts/events exist. Markdown/cache failure after core publication is a presentation
-warning and does not rewrite the committed outcome. Failed terminal publication
-produces a nonzero command result and warns that saved state may be older.
+Compacted conversation and duplicate metadata exports are optional when
+canonical facts/events exist. Markdown/cache failure after core publication is
+a presentation warning and does not rewrite the committed outcome. Failed
+terminal publication produces a nonzero command result and warns that saved
+state may be older.
 .PP
 An uncertain replacement acknowledgement is displayed as unknown publication;
-inspect the saved revision. The live terminal result is frozen. Missing optional
-exports and unindexed raw artifacts produce warnings without invalidating verified
-mandatory evidence. Unindexed files are not followed or read as historical proof.
+inspect the saved revision. The live terminal result is frozen. Missing
+optional exports and unindexed raw artifacts produce warnings without
+invalidating verified mandatory evidence. Unindexed files are not followed or
+read as historical proof.
 .PP
-show validates the manifest and required evidence read-only, without Git or model
-calls. It never trusts an old success cache over an unfinished/unreadable manifest.
-A nonfinalized snapshot is the last recorded state, not proof of a live process.
-Historical results and current evidence verification are displayed separately.
-Only schema 2 is supported. Unsupported schemas and missing/malformed manifests
-produce raw-file guidance.
+show validates the manifest and required evidence read-only, without Git or
+model calls. It never trusts an old success cache over an
+unfinished/unreadable manifest. A nonfinalized snapshot is the last recorded
+state, not proof of a live process. Historical results and current evidence
+verification are displayed separately. Only schema 2 is supported. Unsupported
+schemas and missing/malformed manifests produce raw-file guidance.
 .PP
 Audit files may contain sensitive source code and output. Captures use private
-regular files and no-follow reads. Checksums detect inconsistencies, not malicious
-rewriting by a host-privileged process. Atomic manifest replacement does not promise
-power-loss durability, an atomic transaction with Git, or automatic recovery.
-Unexpected execution exceptions propagate after best-effort cleanup; arbitrary
-exception bodies are not archived. Global resource budgets are unchanged.
+regular files and no-follow reads. Checksums detect inconsistencies, not
+malicious rewriting by a host-privileged process. Atomic manifest replacement
+does not promise power-loss durability, an atomic transaction with Git, or
+automatic recovery. Unexpected execution exceptions propagate after
+best-effort cleanup; arbitrary exception bodies are not archived. Global
+resource budgets are unchanged.
 .SH EXIT STATUS
 .TP
 .B 0
-Published core integration success or a compatible probe. For show: a valid terminal
-audit whose required evidence meets policy, including a correctly recorded failed run.
+Published core integration success or a compatible probe. For show: a valid
+terminal audit whose required evidence meets policy, including a correctly
+recorded failed run.
 .TP
 .B 1
 Failed/interrupted admitted run, failed terminal publication, or failed probe.
 For show: displayable but unfinished or unverifiable audit.
 .TP
 .B 2
-Configuration, command-line, pre-admission, or delivery error. For show: no trusted
-manifest view is available. Cached Markdown is not treated as an authoritative fallback.
+Configuration, command-line, pre-admission, or delivery error. For show: no
+trusted manifest view is available. Cached Markdown is not treated as an
+authoritative fallback.
 .SH EXAMPLES
 .nf
 git config --global ez.model exact-model-id

@@ -3,17 +3,16 @@
 
 """Probe the actual SDK/model protocol without opening a repository or running commands."""
 
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .audit import now, write_json
+from .audit import now
 from .config import Config
 from .errors import EzError
 from .llm import base_url, create_chat_model
 
 
-def probe(config: Config, output: Path | None = None) -> dict[str, Any]:
+def probe(config: Config) -> dict[str, Any]:
     from langchain_core.messages import HumanMessage, ToolMessage, messages_to_dict
     from langsmith import tracing_context
 
@@ -40,9 +39,6 @@ def probe(config: Config, output: Path | None = None) -> dict[str, Any]:
         "checks": [],
         "note": "Only protocol compatibility is tested; no Git or filesystem tools are exposed.",
     }
-    if output is not None:
-        output = output.resolve()
-        output.parent.mkdir(parents=True, exist_ok=True)
     try:
         model = create_chat_model(config)
         with tracing_context(enabled=False):
@@ -54,8 +50,6 @@ def probe(config: Config, output: Path | None = None) -> dict[str, Any]:
                     "response": messages_to_dict([message]),
                 }
             )
-            if output is not None:
-                write_json(output, report)
             if not report["checks"][-1]["ok"]:
                 raise EzError("Model did not return the requested chat marker")
             bound = model.bind_tools([schema])
@@ -74,8 +68,6 @@ def probe(config: Config, output: Path | None = None) -> dict[str, Any]:
             report["checks"].append(
                 {"name": "tool_call", "ok": ok, "response": messages_to_dict([call])}
             )
-            if output is not None:
-                write_json(output, report)
             if not ok:
                 raise EzError("Server/model did not produce the expected native tool call")
             final = bound.invoke(
@@ -102,7 +94,4 @@ def probe(config: Config, output: Path | None = None) -> dict[str, Any]:
         }
         if isinstance(exc, EzError):
             report["error"]["message"] = str(exc)
-    finally:
-        if output is not None:
-            write_json(output, report)
     return report

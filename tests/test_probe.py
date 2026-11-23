@@ -76,17 +76,14 @@ def run_probe(mocker, monkeypatch, tmp_path: Path, provider="openai", failure=No
         if provider == "ollama"
         else "http://localhost:8000/v1/chat/completions",
     )
-    folder = tmp_path / "case-1"
-    folder.mkdir()
-    output = Path(folder) / "probe.json"
     monkeypatch.setenv("EZ_PROBE_TEST_KEY", "not-to-be-archived")
     model = create_chat_model(config)
     owner = model.root_client if provider == "openai" else model._client
     owner._client.close()
     owner._client = client
     mocker.patch("git_ez.probe.create_chat_model", return_value=model)
-    report = probe(config, output)
-    saved = output.read_text()
+    report = probe(config)
+    saved = json.dumps(report)
     assert "not-to-be-archived" not in saved
     assert json.loads(saved)["status"] == report["status"]
     client.close()
@@ -256,9 +253,8 @@ def test_probe_rejects_incomplete_or_incorrect_protocol_roundtrips(
 def test_probe_does_not_archive_unexpected_provider_exception_contents(mocker, tmp_path):
     secret = "provider-echoed-secret-token"
     mocker.patch("git_ez.probe.create_chat_model", side_effect=RuntimeError(secret))
-    report_file = tmp_path / "probe.json"
-    report = probe(Config(model="test"), report_file)
+    report = probe(Config(model="test"))
     assert report["status"] == "failed"
     assert report["error"] == {"type": "RuntimeError", "status_code": None}
     assert report["checks"] == []
-    assert secret not in report_file.read_text()
+    assert secret not in json.dumps(report)

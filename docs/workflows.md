@@ -17,7 +17,7 @@ git ez rebase origin/main --repo /path/to/project --check python -B -m pytest
 # Probe model compatibility without exposing the repository or shell tools:
 git ez probe
 # Save the JSON report to a file instead:
-git ez probe --output /tmp/ai-compatibility.json
+git ez probe > /tmp/ai-compatibility.json
 
 # Read an existing report:
 git ez show /path/to/project/.git/ez/runs/RUN_ID
@@ -62,7 +62,12 @@ The probe checks a text response, a native call to the harmless `compatibility_e
 tool, and subsequent use of its result, through the same connectors used for resolution.
 It does not modify a repository or execute model commands. A `compatible` result is not
 a measure of conflict-resolution quality. By default, the JSON report is written to stdout;
-use `--output <file>` to save it to a file instead. Diagnostics go to stderr in both modes.
+use `git ez probe > report.json` to save it to a file. Diagnostics go to stderr in both modes.
+
+The former `--output <file>` option has been removed; migrate to shell redirection.
+Only the final report is emitted; intermediate snapshots are no longer saved. A shell
+may create or truncate the destination even if the command fails. An interruption
+before completion may leave no complete report.
 
 Exit codes: `0` = successful local integration, displayed report, or compatible probe;
 `1` = failed run/probe; `2` = configuration, CLI, or precondition error.

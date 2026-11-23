@@ -86,6 +86,57 @@ def test_completed_integration_stays_verifiable_after_validation_failure(repo):
     assert load_audit(audit.directory).exit_code == 0
 
 
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_validation_capture_failure_preserves_primary_domain(repo, monkeypatch, returncode):
+    write = AuditStore.write
+
+    def fail_stdout(store, artifact, content, **kwargs):
+        if artifact == "validation.stdout":
+            raise OSError("Synthetic output capture failure")
+        return write(store, artifact, content, **kwargs)
+
+    monkeypatch.setattr(AuditStore, "write", fail_stdout)
+    audit = Engine(repo.root, repo.config, repo.resolver).run(
+        "main", "merge", validation=(sys.executable, "-c", f"raise SystemExit({returncode})")
+    )
+    assert audit.view["integration"] == "completed"
+    assert audit.view["validation"]["returncode"] == returncode
+    assert audit.view["failure"]["domain"] == ("audit" if returncode == 0 else "execution")
+    assert audit.view["status"] == "failed"
+
+
+@pytest.mark.parametrize("phase", ["conflict", "review"])
+def test_first_metadata_capture_failure_retains_audit_domain(repo, monkeypatch, phase):
+    save = Audit.save
+    accepted_checkpoints = 0
+    failed = False
+
+    def fail_metadata(audit):
+        nonlocal accepted_checkpoints, failed
+        data = audit.view
+        if phase == "review" and data.get("reviews", [{}])[-1].get("decision") == "accept":
+            accepted_checkpoints += 1
+            should_fail = accepted_checkpoints == 2
+        else:
+            conflicts = data.get("conflicts", [])
+            should_fail = phase == "conflict" and conflicts and "resolution" in conflicts[-1]
+        if should_fail and not failed:
+            failed = True
+            raise OSError("Synthetic metadata capture failure")
+        return save(audit)
+
+    monkeypatch.setattr(Audit, "save", fail_metadata)
+    monkeypatch.setattr("builtins.input", lambda _: "a")
+    audit = Engine(repo.root, repo.config, repo.resolver).run(
+        "main", "merge", interactive=phase == "review"
+    )
+    assert failed
+    assert audit.view["status"] == "failed"
+    assert audit.view["failure"]["domain"] == "audit"
+    assert not audit.view["integrated"]
+    assert repo.git.operation_active()
+
+
 @pytest.mark.parametrize("interactive", [False, True])
 def test_applied_proposal_requires_its_canonical_decision(repo, monkeypatch, interactive):
     monkeypatch.setattr("builtins.input", lambda _: "a")

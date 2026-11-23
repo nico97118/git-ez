@@ -134,7 +134,10 @@ before its next model call. Later finalization cannot make a missing event
 complete. Unindexed trailing bytes remain raw, unverified evidence.
 
 Independent final captures are attempted even after a primary error. A failed terminal
-publication produces a nonzero command result and a warning that saved state may be
+publication does not replace the causal failure. When capture itself is the first
+stop reason, it is classified as an audit failure, including after a passed
+validation command. A failed terminal publication produces a nonzero command result
+and a warning that saved state may be
 older. Git is never rolled back. If initialization cannot create an owned directory,
 the CLI identifies the intended location without overwriting another run.
 When replacement may have occurred without acknowledgement, publication is shown

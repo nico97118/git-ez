@@ -1232,7 +1232,9 @@ class Engine:
                     audit.capture_error("proposal evidence", exc, None)
             save_error = audit.attempt("conflict metadata", audit.save)
             if save_error is not None and not primary_error:
-                raise EzError("Conflict audit capture failed; inspect audit errors") from save_error
+                raise AuditError(
+                    "Conflict audit capture failed; inspect audit errors"
+                ) from save_error
 
     def _review(
         self,
@@ -1327,7 +1329,7 @@ class Engine:
                     )
                 save_error = audit.attempt("review metadata", audit.save)
                 if not primary_error and (capture_error is not None or save_error is not None):
-                    raise EzError("Review audit capture failed; inspect audit errors") from (
+                    raise AuditError("Review audit capture failed; inspect audit errors") from (
                         capture_error or save_error
                     )
 
@@ -1381,7 +1383,7 @@ class Engine:
         if failure is not None:
             raise failure
         if output_error is not None or error_output_error is not None:
-            raise EzError("Validation audit capture failed; inspect audit errors") from (
+            raise AuditError("Validation audit capture failed; inspect audit errors") from (
                 output_error or error_output_error
             )
 

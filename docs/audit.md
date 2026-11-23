@@ -128,7 +128,9 @@ diffs, result diffs, range-diffs and native command outputs require complete cap
 Never-produced outputs, such as stdout from an unstarted validation,
 are marked inapplicable rather than presented as lost captured output.
 Ordinary model/tool events are required. After a failed append, the stream is sealed
-at its last acknowledged prefix; later finalization cannot make a missing event
+at its last acknowledged prefix. Recoverable tool refusals and middleware feedback
+also have required request/result events; failure to retain them stops the session
+before its next model call. Later finalization cannot make a missing event
 complete. Unindexed trailing bytes remain raw, unverified evidence.
 
 Independent final captures are attempted even after a primary error. A failed terminal

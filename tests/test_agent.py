@@ -231,6 +231,14 @@ def test_finish_with_markers_can_recover(repo) -> None:
     )
     assert audit.view["status"] == "succeeded", audit.view
     assert "conflict markers" in str(model.seen[1])
+    events = [
+        json.loads(line)
+        for line in (audit.directory / "sessions/0001/events.jsonl").read_text().splitlines()
+    ]
+    feedback = [event for event in events if event.get("origin") == "middleware"]
+    assert len(feedback) == 1  # The SDK already recorded the attempted finish request.
+    assert feedback[0]["event"] == "tool_result"
+    assert "conflict markers" in feedback[0]["result"]["content"]
 
 
 def test_low_confidence_preserves_edits_and_audit(repo) -> None:
@@ -459,6 +467,13 @@ def test_finish_in_a_tool_batch_is_rejected_until_it_is_called_alone(repo):
     assert audit.view["status"] == "succeeded", audit.view
     assert "finish must be called alone" in str(model.seen[1])
     assert audit.view["sessions"][0]["rationale"] == "Verified alone"
+    events = [
+        json.loads(line)
+        for line in (audit.directory / "sessions/0001/events.jsonl").read_text().splitlines()
+    ]
+    rejected = [event for event in events if event.get("tool_call_id") == "call-1-0"]
+    assert [event["event"] for event in rejected] == ["tool_requested", "tool_result"]
+    assert rejected[-1]["result"]["content"] == "finish must be called alone"
 
 
 def test_agent_cannot_override_the_configured_command_timeout(repo):
@@ -473,6 +488,43 @@ def test_agent_cannot_override_the_configured_command_timeout(repo):
     )
     assert audit.view["status"] == "succeeded", audit.view
     assert "Command timeout exceeds configured limit" in str(model.seen[1])
+    assert not (repo.root / "forbidden.txt").exists()
+    events = [
+        json.loads(line)
+        for line in (audit.directory / "sessions/0001/events.jsonl").read_text().splitlines()
+    ]
+    rejected = [event for event in events if event.get("tool_call_id") == "call-1-0"]
+    assert [event["event"] for event in rejected] == ["tool_requested", "tool_result"]
+    assert rejected[-1]["result"]["content"] == "Command timeout exceeds configured limit"
+    assert audit.view["sessions"][0]["tool_calls"] == 3
+
+
+@pytest.mark.parametrize("event_name", ["tool_requested", "tool_result"])
+def test_middleware_feedback_capture_failure_stops_before_next_model_call(repo, event_name):
+    from git_ez.agent_runtime import SessionLog
+
+    event = SessionLog.event
+
+    def fail_feedback(self, name, **data):
+        if name == event_name and data.get("origin") == "middleware":
+            raise OSError("Synthetic feedback capture failure")
+        event(self, name, **data)
+
+    repo.mocker.patch.object(SessionLog, "event", fail_feedback)
+    audit, model = run_agent(
+        repo,
+        [
+            [tool("execute", command="touch forbidden.txt", timeout=repo.config.timeout + 1)],
+            [command("from pathlib import Path; Path('file.txt').write_text('combined\\n')")],
+            [tool("finish", rationale="Should not be reached", confidence=0.95)],
+        ],
+    )
+    assert len(model.seen) == 1
+    assert audit.view["status"] == "failed"
+    assert audit.view["failure"]["domain"] == "audit"
+    assert audit.view["audit_health"] == "incomplete"
+    assert repo.git.operation_active()
+    assert repo.git.branch_oid("feature") == repo.source
     assert not (repo.root / "forbidden.txt").exists()
 
 

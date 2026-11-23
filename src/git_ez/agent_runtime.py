@@ -5,7 +5,7 @@
 
 import json
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from importlib.metadata import version
 from pathlib import Path
 from threading import RLock
@@ -32,7 +32,7 @@ from langsmith import tracing_context
 
 from .agent import AGENT_PROMPT
 from .audit import Audit
-from .audit_state import now
+from .audit_state import now, safe_error
 from .checks import GitStateChanged, WorktreeChecks
 from .config import Config
 from .conflicts import Decision, LowConfidence
@@ -109,6 +109,31 @@ class SessionLog(BaseCallbackHandler):
             raise EventCaptureError(
                 f"Agent event capture failed ({event}); inspect audit errors"
             ) from failure
+
+    def feedback(
+        self, call: Mapping[str, Any], message: str, *, record_request: bool
+    ) -> ToolMessage:
+        """Record middleware feedback that bypasses ordinary tool-result callbacks."""
+        with self.lock:
+            if record_request:
+                self.tools += 1
+                self.required_event(
+                    "tool_requested",
+                    name=call["name"],
+                    input=json.dumps(call["args"]),
+                    tool_call_id=call["id"],
+                    origin="middleware",
+                )
+            result = ToolMessage(
+                content=message, status="error", tool_call_id=call["id"], name=call["name"]
+            )
+            self.required_event(
+                "tool_result",
+                result=result.model_dump(mode="json"),
+                tool_call_id=call["id"],
+                origin="middleware",
+            )
+            return result
 
     def on_chat_model_start(self, serialized: dict[str, Any], messages: Any, **kwargs: Any) -> None:
         self.conflicts += 1
@@ -199,27 +224,27 @@ class IntegrationMiddleware(AgentMiddleware[Any, Any, Any]):
                     None,
                 )
                 if last and len(last.tool_calls) != 1:
-                    return ToolMessage(
-                        content="finish must be called alone",
-                        status="error",
-                        tool_call_id=call["id"],
+                    return self.log.feedback(
+                        call,
+                        "finish must be called alone",
+                        record_request=True,
                     )
             if (
                 call["name"] == "execute"
                 and isinstance(call["args"].get("timeout"), (int, float))
                 and call["args"]["timeout"] > self.config.timeout
             ):
-                return ToolMessage(
-                    content="Command timeout exceeds configured limit",
-                    status="error",
-                    tool_call_id=call["id"],
+                return self.log.feedback(
+                    call,
+                    "Command timeout exceeds configured limit",
+                    record_request=True,
                 )
             try:
                 result = handler(request)
-            except (LowConfidence, GitStateChanged, EventCaptureError):
+            except (LowConfidence, GitStateChanged, AuditError):
                 raise
             except (EzError, OSError, UnicodeError) as exc:
-                result = ToolMessage(content=str(exc), status="error", tool_call_id=call["id"])
+                result = self.log.feedback(call, safe_error(exc), record_request=False)
             self.guard()
             return result
 

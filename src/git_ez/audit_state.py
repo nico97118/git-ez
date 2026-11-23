@@ -552,6 +552,8 @@ def validate_snapshot(payload: dict[str, Any]) -> None:
     integration = payload["git"]["integration"]
     if integration not in ("not_started", "in_progress", "completed", "not_completed", "unknown"):
         raise ValueError("Invalid Git integration outcome")
+    if integration == "completed":
+        _validate_completion(payload)
     for key in ("steps", "observations"):
         if not isinstance(payload["git"].get(key), list) or any(
             not isinstance(item, dict) for item in payload["git"][key]
@@ -685,19 +687,6 @@ def validate_snapshot(payload: dict[str, Any]) -> None:
             for index, step in enumerate(steps, 1)
         ):
             raise ValueError("Native evidence references are inconsistent")
-        integrations = [step for step in steps if step.get("purpose") == "integration"]
-        if not integrations or integrations[-1]["returncode"] != 0:
-            raise ValueError("Audit success lacks a successful final integration step")
-        completion = next(
-            item
-            for item in payload["git"]["observations"]
-            if item["id"] == integrations[-1]["after"]
-        )
-        if (
-            completion.get("head") != payload["git"]["result_oid"]
-            or completion.get("operation_active") is not False
-        ):
-            raise ValueError("Completion contradicts its native observation")
         facts = payload["details"].get("final_check_facts", {})
         if (
             facts.get("result_oid") != payload["git"]["result_oid"]
@@ -723,6 +712,33 @@ def validate_snapshot(payload: dict[str, Any]) -> None:
             raise ValueError("Final verification lacks its individual observations")
     # JSON validation also rejects non-finite numbers and accidental SDK objects.
     json.dumps(payload, allow_nan=False)
+
+
+def _validate_completion(payload: dict[str, Any]) -> None:
+    """Known Git completion needs native proof even when later work fails."""
+    integrations = [
+        step for step in payload["git"]["steps"] if step.get("purpose") == "integration"
+    ]
+    if (
+        not integrations
+        or integrations[-1].get("result") != "returned"
+        or integrations[-1].get("returncode") != 0
+    ):
+        raise ValueError("Git completion lacks a successful final integration step")
+    step = integrations[-1]
+    observations = payload["git"]["observations"]
+    positions = {record["id"]: index for index, record in enumerate(observations)}
+    before, after = positions.get(step.get("before")), positions.get(step.get("after"))
+    if before is None or after is None or before >= after:
+        raise ValueError("Git completion lacks its ordered native observations")
+    completion = observations[after]
+    if (
+        observations[before]["errors"]
+        or completion["errors"]
+        or completion.get("head") != payload["git"]["result_oid"]
+        or completion.get("operation_active") is not False
+    ):
+        raise ValueError("Completion contradicts its native observation")
 
 
 @dataclass(frozen=True)

@@ -4,6 +4,7 @@
 """Audit acceptance contracts across publication, scopes and evidence policy."""
 
 import json
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -52,6 +53,37 @@ def test_reader_rejects_contradictory_validation_result(repo):
     payload["checks"]["validation"] = {"command": ["false"], "status": "passed", "returncode": 7}
     replace_manifest(audit, payload)
     assert main(["show", str(audit.directory)]) != 0
+
+
+@pytest.mark.parametrize("outcome", ["pending", "failed", "interrupted"])
+@pytest.mark.parametrize("damage", ["returncode", "observation", "missing_step"])
+def test_completed_integration_requires_native_proof_for_every_outcome(repo, outcome, damage):
+    audit = success(repo)
+    payload = json.loads((audit.directory / "run.json").read_bytes())
+    payload["outcome"] = outcome
+    if outcome == "pending":
+        payload["lifecycle"] = "active"
+    if damage == "returncode":
+        payload["git"]["steps"][-1]["returncode"] = 7
+    elif damage == "missing_step":
+        payload["git"]["steps"] = []
+    else:
+        step = payload["git"]["steps"][-1]
+        next(item for item in payload["git"]["observations"] if item["id"] == step["after"])[
+            "operation_active"
+        ] = True
+    replace_manifest(audit, payload)
+    assert main(["show", str(audit.directory)]) == 2
+
+
+def test_completed_integration_stays_verifiable_after_validation_failure(repo):
+    audit = Engine(repo.root, repo.config, repo.resolver).run(
+        "main", "merge", validation=(sys.executable, "-c", "raise SystemExit(7)")
+    )
+    assert audit.view["status"] == "failed"
+    assert audit.view["integration"] == "completed"
+    assert audit.view["validation"]["returncode"] == 7
+    assert load_audit(audit.directory).exit_code == 0
 
 
 @pytest.mark.parametrize("interactive", [False, True])

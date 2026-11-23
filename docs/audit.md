@@ -119,6 +119,8 @@ filtered manifest is validated before it can replace the previous revision.
 
 A missing required proposal or native-step capture prevents the next Git mutation.
 A final evidence failure preserves any completed integration but fails the run.
+Every `completed` integration claim requires its successful native Git step and
+completion observation, including in failed, interrupted and unfinished runs.
 An intentionally bounded file prefix is distinguished from an unexpected read/write
 failure. Prefixes are accepted only for bounded supporting files, their inventories,
 rebase selection objects and raw commit logs. Conflict inputs/proposals, staged

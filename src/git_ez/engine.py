@@ -5,6 +5,7 @@
 
 import hashlib
 import json
+import stat
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -1003,20 +1004,25 @@ class Engine:
                 if not entry:
                     continue
                 header, raw_name = entry.split(b"\t", 1)
-                _, oid, stage = header.decode("ascii").split()
+                mode, oid, stage = header.decode("ascii").split()
                 name = raw_name.decode("utf-8")
                 if stage != "0":
                     raise EzError(f"Approved resolution still has unmerged index entries: {name}")
-                indexed[name] = oid
+                indexed[name] = (mode, oid)
             for name, expected in approved.items():
                 if expected is None:
                     if name in indexed:
                         raise EzError(f"Approved deletion was not staged: {name}")
                 elif (
                     name not in indexed
-                    or git.text("hash-object", f"--path={name}", "--", name) != indexed[name]
+                    or git.text("hash-object", f"--path={name}", "--", name) != indexed[name][1]
                 ):
                     raise EzError(f"Approved content was not staged: {name}")
+                elif indexed[name][0] != ("100755" if expected[0] & stat.S_IXUSR else "100644"):
+                    raise EzError(
+                        f"Approved executable mode was not staged: {name}; "
+                        "inspect core.fileMode and resolve manually"
+                    )
             if checks.fingerprints(git, paths) != approved:
                 raise EzError("Approved worktree contents changed during staging")
         finally:

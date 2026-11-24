@@ -462,7 +462,10 @@ runs after integration, as in noninteractive mode.
 On acceptance, all reviewed paths are staged and their index blobs are checked
 using native Git clean filters. For those paths only, assume-unchanged and
 skip-worktree hints are temporarily cleared, then restored on surviving index
-entries. A staging mismatch stops integration before Git continuation.
+entries. The index executable bit must also match each approved file. If
+core.fileMode=false causes Git to ignore an approved permission change, git-ez
+reports the mismatch and restores the conflict instead of continuing. A staging
+mismatch stops integration before Git continuation.
 .PP
 Quit and interruption restore the original tracked file content, modes and
 unmerged

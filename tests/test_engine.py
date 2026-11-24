@@ -3470,3 +3470,38 @@ def test_repeated_sigint_at_restore_entry_preserves_the_conflict(repo, mocker, d
 
     assert conflict_fingerprint(repo) == baselines[0]
     assert signal.getsignal(signal.SIGINT) == previous_handler
+
+
+@pytest.mark.parametrize("operation", ["merge", "rebase"])
+@pytest.mark.parametrize("file_mode", [False, True])
+def test_interactive_checks_approved_executable_mode_before_continuation(
+    repo, mocker, operation, file_mode
+):
+    repo.git.run("config", "core.fileMode", str(file_mode).lower())
+    original = repo.resolver.run
+    baselines = []
+
+    def resolve(git, audit, number, paths, check):
+        baselines.append(conflict_fingerprint(repo))
+        result = original(git, audit, number, paths, check)
+        repo.file.chmod(0o755)
+        return result
+
+    repo.resolver.run = resolve
+    prompt = mocker.patch("builtins.input", return_value="a")
+    audit = integrate(repo, operation, interactive=True)
+    prompt.assert_called_once()
+    assert repo.git.text("config", "--bool", "core.fileMode") == str(file_mode).lower()
+    if file_mode:
+        assert audit.view["status"] == "succeeded", audit.view
+        assert repo.git.text("ls-tree", "HEAD", "--", "file.txt").startswith("100755 ")
+        assert repo.git.text("show", "HEAD:file.txt") == "combined"
+        assert not repo.git.operation_active()
+    else:
+        assert audit.view["status"] == "failed", audit.view
+        assert "Approved executable mode was not staged: file.txt" in audit.view["error"]
+        assert "core.fileMode" in audit.view["error"]
+        assert repo.git.branch_oid("feature") == repo.source_oid
+        assert repo.git.operation_active()
+        assert conflict_fingerprint(repo) == baselines[0]
+        assert audit.view["reviews"][-1]["restoration"] == "original_conflict_restored"

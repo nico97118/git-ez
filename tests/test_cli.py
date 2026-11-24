@@ -6,6 +6,7 @@
 import os
 import subprocess
 import sys
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -186,7 +187,7 @@ def test_version_is_available_without_a_repository_or_configuration(tmp_path):
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "git-ez 0.1.0"
+    assert result.stdout.strip() == f"git-ez {version('git-ez-ai')}"
 
 
 @pytest.mark.unit
@@ -207,7 +208,7 @@ def test_module_entry_point_reports_version_without_configuration(tmp_path):
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "git-ez 0.1.0"
+    assert result.stdout.strip() == f"git-ez {version('git-ez-ai')}"
 
 
 @pytest.mark.integration

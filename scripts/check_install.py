@@ -100,7 +100,13 @@ def main() -> None:
             "assert importlib.util.find_spec('sqlite_vec') is None; "
             "assert importlib.util.find_spec('langgraph.checkpoint.sqlite') is None",
         )
-        if not run("git", "ez", "--version").startswith("git-ez "):
+        installed_version = run(
+            str(python),
+            "-I",
+            "-c",
+            "from importlib.metadata import version; print(version('git-ez-ai'))",
+        ).strip()
+        if run("git", "ez", "--version").strip() != f"git-ez {installed_version}":
             raise RuntimeError("Installed Git extension did not report its version")
         for args in (("ez", "-h"), ("ez", "rebase", "-h"), ("ez", "cherry-pick", "-h")):
             if "usage:" not in run("git", *args):

@@ -1,6 +1,7 @@
 .TH GIT-EZ 1 "November 24, 2026" "git-ez" "Git Manual"
 .SH NAME
-git-ez \- local rebase and merge with AI-assisted conflict resolution
+git-ez \- local rebase, merge and cherry-pick with AI-assisted conflict
+resolution
 .SH SYNOPSIS
 .B git ez rebase
 .I target
@@ -11,6 +12,16 @@ git-ez \- local rebase and merge with AI-assisted conflict resolution
 .B git ez merge
 .I target
 .RI [ --ff " | " --no-ff " | " --ff-only ]
+.RI [ --repo " directory"]
+.RI [ --check " executable arguments..."]
+.br
+.B git ez cherry-pick
+.I commit
+.RB [ --interactive ]
+.RI [ --repo " directory"]
+.RI [ --check " executable arguments..."]
+.br
+.B git ez cherry-pick --continue
 .RI [ --repo " directory"]
 .RI [ --check " executable arguments..."]
 .br
@@ -44,15 +55,15 @@ performed.
 For new integrations, a checked-out branch, clean checkout and no active Git
 operation are required.
 Commit or stash local changes with native Git before running git-ez. Autostash
-is unsupported: both operations pass --no-autostash, overriding rebase.autoStash
+is unsupported: rebase and merge pass --no-autostash, overriding rebase.autoStash
 and merge.autoStash without changing the saved configuration.
 For new integrations, the target is required and pinned at startup. Only simple
-rebase and merge are
-supported; arbitrary Git options are not forwarded. Interactive rebase,
+rebase, merge and single-commit cherry-pick are supported; arbitrary Git options
+are not forwarded. Interactive rebase,
 rebasing merge commits, merge --squash, --no-commit, octopus
 merge,
-and unrelated histories are unsupported. Use --continue to resume a supported
-operation already started with Git or git-ez.
+and unrelated histories for rebase/merge are unsupported. Use --continue to
+resume a supported operation already started with Git or git-ez.
 .PP
 Only one git-ez integration can run per checkout. A concurrent invocation fails
 immediately, before repository checks, audit creation, or model calls. The lock
@@ -66,7 +77,7 @@ Git operations and local changes are preserved for inspection and native
 recovery.
 .PP
 New rebases use the merge backend with update-refs and rebase-merges disabled.
-Autostash is explicitly disabled for both operations. Merge uses --no-edit and
+Autostash is explicitly disabled for rebase and merge. Merge uses --no-edit and
 respects Git's fast-forward policy. New integrations and assisted resolution run Git
 noninteractively with diff3 conflict markers. Hooks and signing are respected.
 Caller configuration is otherwise retained, except repository-redirection
@@ -74,6 +85,29 @@ environment variables.
 .PP
 New integrations require valid model configuration even when no conflicts occur;
 no model call is made when Git resolves the operation without assistance.
+.SH CHERRY-PICK
+.B git ez cherry-pick <commit>
+applies one non-merge commit to the current branch. Root commits and commits
+from unrelated histories are supported. The source is pinned before execution;
+final verification requires exactly one new commit whose parent is the original
+HEAD.
+Ranges, multiple commits, merge commits (including --mainline), --no-commit,
+--ff, -x and empty-commit policy flags are unsupported. Empty picks stop and
+preserve Git state for native inspection, skipping or an explicit empty commit.
+.PP
+The shared --gpg-sign, --no-gpg-sign, --signoff, --no-signoff,
+--rerere-autoupdate, --no-rerere-autoupdate, --interactive, --repo and --check
+options apply. Git supplies the author and message. On assisted continuation,
+git-ez commits the staged resolution with the requested signing and signoff
+options; hooks remain enabled. Cherry-pick has no autostash and requires a
+clean checkout.
+.PP
+.B git ez cherry-pick --continue
+continues a single native cherry-pick after manual resolution and staging. It
+never calls the model. Native sequencer operations (multiple commits or ranges)
+require native Git continuation and are rejected before changing state.
+Optional --check runs after completion and records its validation audit.
+--skip and --abort remain native Git commands.
 .SH PROBE
 The probe checks a text response, a native call to the harmless
 compatibility_echo tool, and subsequent use of its result through the configured
@@ -481,8 +515,8 @@ git ez rebase main --check python -B -m pytest
 .fi
 .SH INTERACTIVE PROPOSAL REVIEW
 .B --interactive
-is supported for merge and rebase. One global approval covers all files in the
-current conflicting Git step. The complete diff and captured additions appear
+is supported for merge, rebase and cherry-pick. One global approval covers all
+files in the current conflicting Git step. The complete diff and captured additions appear
 automatically. Choose accept, reject/reprompt with feedback, or quit. This is
 not
 Git's interactive rebase sequence editor. Empty input never accepts; EOF stops
@@ -508,7 +542,8 @@ mismatch stops integration before Git continuation.
 .PP
 Quit and interruption restore the original tracked file content, modes and
 unmerged
-index, and preserve native merge/rebase metadata. They do not abort or reset
+index, and preserve native merge/rebase/cherry-pick metadata. They do not abort
+or reset
 the operation. Resolve manually, git add the files,
 and use git ez rebase --continue or git ez merge --continue (or native Git).
 Each later conflict requires
@@ -550,6 +585,7 @@ native rerere autoupdate resolutions do not pass through harness review.
 .BR git (1),
 .BR git-config (1),
 .BR git-rebase (1),
-.BR git-merge (1)
+.BR git-merge (1),
+.BR git-cherry-pick (1)
 .PP
 https://github.com/nico97118/git-ez

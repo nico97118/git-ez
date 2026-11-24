@@ -3,7 +3,7 @@
 ## Purpose and scope
 
 `git-ez` is a Git extension: users run `git ez rebase <target>` or
-`git ez merge <target>` to perform a local integration with LLM-assisted conflict
+`git ez merge <target>` or `git ez cherry-pick <commit>` to perform a local integration with LLM-assisted conflict
 resolution and an inspectable audit of changes, decisions, and reasons.
 
 - The Python distribution is `git-ez-ai`, the import package is `git_ez`, and the

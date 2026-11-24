@@ -1,16 +1,17 @@
 # git-ez
 
-A Git extension for **local rebase and merge with AI-assisted conflict resolution**,
+A Git extension for **local rebase, merge and cherry-pick with AI-assisted conflict resolution**,
 with an audit trail of changes, decisions, and their rationale.
 
 ```bash
 git ez rebase main
 git ez merge feature
+git ez cherry-pick <commit>
 ```
 
 ```mermaid
 flowchart TD
-    A[git ez merge / rebase] --> B[Run native Git]
+    A[git ez merge / rebase / cherry-pick] --> B[Run native Git]
     B --> C{Unresolved conflicts?}
     C -- No --> D[Final checks and audit]
     C -- Yes --> E[LLM proposes a resolution]
@@ -110,6 +111,7 @@ git ez probe > /tmp/ai-compatibility.json
 # Rebase the current branch onto main, or merge feature into the current branch:
 git ez rebase main
 git ez merge feature
+git ez cherry-pick <commit>
 
 # Review each agent proposal before staging:
 git ez merge feature --interactive
@@ -141,7 +143,8 @@ prompt; resolutions already staged by native rerere continue without agent revie
 
 To resume an active operation started with git-ez or native Git, resolve the current
 conflict manually and stage it with `git add`, then run `git ez rebase --continue`
-or `git ez merge --continue`. Git handles that first continuation. Assistance resumes
+or `git ez merge --continue` (also `git ez cherry-pick --continue` for a single commit).
+Git handles that first continuation. Assistance resumes
 only if a rebase demonstrably reaches a new conflict; ambiguous stops remain manual.
 Repeat `--interactive` and other applicable options when resuming: no git-ez session
 state is persisted. See the [continuation reference](docs/workflows.md#continuing-an-active-operation).
@@ -156,16 +159,21 @@ are not forwarded. See the [manual](docs/man/git-ez.1) and
 | --- | --- |
 | Rebase | `--onto`, `--keep-base`, `--fork-point`, `--autosquash`, empty-commit policies, cherry-pick reapplication, and forced replay |
 | Merge | Fast-forward policies, commit messages, shortlogs, cleanup, and incoming-tip signature verification |
-| Both | Commit signing, signoff, rerere autoupdate, proposal review, `--repo`, and `--check` |
+| Cherry-pick | One non-merge commit, including root commits and commits from unrelated histories |
+| All | Commit signing, signoff, rerere autoupdate, proposal review, `--repo`, and `--check` |
 
 - New integrations require one explicit target and a checked-out local branch.
-  Detached HEAD, bare repositories, unrelated histories, interactive rebase editing,
+  Detached HEAD, bare repositories, unrelated histories for rebase/merge,
+  interactive rebase editing,
   rebasing merge commits, merge `--squash` / `--no-commit`, octopus merges, and arbitrary
   strategy options are unsupported. `--continue` accepts an active operation in place
-  of a target.
+  of a target. Cherry-pick ranges, multiple commits, merge commits, `--no-commit`,
+  and `--ff` are unsupported. Empty picks stop for native Git inspection, skipping
+  or an explicit empty commit.
 - New integrations and assisted resolution run Git noninteractively with `diff3`
   markers. New rebases use the merge backend; update-refs and rebase-merges are
-  disabled. Autostash is disabled for both operations. Autosquash requires an explicit option, and sequencer-backed rebases
+  disabled. Autostash is disabled for rebase and merge; cherry-pick has no autostash.
+  Autosquash requires an explicit option, and sequencer-backed rebases
   override the instruction format.
   Pinned replay selection can change the upstream argument seen by pre-rebase
   hooks. Hooks and signing failures are not bypassed.

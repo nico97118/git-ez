@@ -123,6 +123,16 @@ class Git:
     def merge_active(self) -> bool:
         return self._has_marker("MERGE_HEAD")
 
+    def sequencer_active(self) -> bool:
+        return self._has_marker("sequencer")
+
+    def integration_active(self, operation: str) -> bool:
+        if operation == "rebase":
+            return self.rebase_active()
+        if operation == "cherry-pick":
+            return self._has_marker("CHERRY_PICK_HEAD") or self.sequencer_active()
+        return self.merge_active()
+
     def rebase_active(self) -> bool:
         return any(self._has_marker(name) for name in ("rebase-merge", "rebase-apply"))
 

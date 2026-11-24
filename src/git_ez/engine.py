@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 git-ez contributors
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Local Git rebase/merge with traceable AI conflict resolution."""
+"""Local Git rebase/merge/cherry-pick with traceable AI conflict resolution."""
 
 import hashlib
 import json
@@ -55,8 +55,8 @@ class Engine:
         interactive: bool = False,
     ) -> Audit:
         """Integrate into the current branch; preserve local state and evidence on failure."""
-        if operation not in ("rebase", "merge"):
-            raise EzError("Operation must be rebase or merge")
+        if operation not in ("rebase", "merge", "cherry-pick"):
+            raise EzError("Operation must be rebase, merge or cherry-pick")
         if onto is not None and operation != "rebase":
             raise EzError("--onto is only supported for rebase")
         if rebase_options is not None and operation != "rebase":
@@ -87,7 +87,10 @@ class Engine:
             target_ref = self._input_ref(target, branch)
             onto_oid = git.commit_oid(onto) if onto is not None else None
             onto_ref = self._input_ref(onto, branch) if onto is not None else None
-            if operation != "rebase" or not options.keep_base:
+            if operation == "cherry-pick":
+                if len(git.text("rev-list", "--parents", "-n", "1", target_oid).split()) > 2:
+                    raise EzError("Cherry-picking merge commits is unsupported; use native Git")
+            elif operation != "rebase" or not options.keep_base:
                 git.run("merge-base", before_oid, target_oid)
             plan = None
             if operation == "rebase":
@@ -168,11 +171,13 @@ class Engine:
         interactive: bool = False,
     ) -> Audit | int:
         """Delegate manual work to Git; adopt only a positively identified new conflict."""
-        if operation not in ("rebase", "merge"):
-            raise EzError("Operation must be rebase or merge")
+        if operation not in ("rebase", "merge", "cherry-pick"):
+            raise EzError("Operation must be rebase, merge or cherry-pick")
         git = self.git
         with checkout_lock(git):
-            active = git.rebase_active() if operation == "rebase" else git.merge_active()
+            active = git.integration_active(operation)
+            if operation == "cherry-pick" and git.sequencer_active():
+                raise EzError("Cherry-pick sequences require native Git continuation")
             if not active:
                 raise EzError(f"No {operation} in progress")
             position = git.rebase_position() if operation == "rebase" else None
@@ -184,12 +189,14 @@ class Engine:
                         for name in ("head-name", "orig-head", "onto")
                     )
             validation_context = identity
-            if operation == "merge" and validation:
+            if operation in ("merge", "cherry-pick") and validation:
                 with suppress(EzError, OSError, ValueError):
                     validation_context = (
                         git.text("symbolic-ref", "HEAD"),
                         git.commit_oid("HEAD"),
-                        git.commit_oid("MERGE_HEAD"),
+                        git.commit_oid(
+                            "CHERRY_PICK_HEAD" if operation == "cherry-pick" else "MERGE_HEAD"
+                        ),
                     )
             result = git.continue_native(operation)
             if result == 0 and validation:
@@ -213,7 +220,7 @@ class Engine:
                 audit.completed(git.commit_oid("HEAD"))
                 self._execute_run(audit, validation)
                 return audit
-            if result == 0 or operation == "merge":
+            if result == 0 or operation in ("merge", "cherry-pick"):
                 return result
             following = git.rebase_position()
             if (
@@ -544,7 +551,9 @@ class Engine:
                 audit,
                 command,
                 sequence_editor=sequence_editor,
-                expected_stop=expected_stop if args[0] in ("rebase", "merge", "-c") else None,
+                expected_stop=expected_stop
+                if args[0] in ("rebase", "merge", "cherry-pick", "-c")
+                else None,
                 inherited_fds=inherited_fds,
             )
 
@@ -645,6 +654,8 @@ class Engine:
                             )
                         audit.annotate(rebase_sequence=evidence)
                         audit.save()
+            elif operation == "cherry-pick":
+                result = step("cherry-pick", *commit_options.flags(), audit.inputs.target.oid)
             else:
                 # Let Git fast-forward or create a merge commit, as git merge normally would.
                 merge_ff = audit.view["merge_ff"]
@@ -712,7 +723,14 @@ class Engine:
                 and git.text("rev-parse", "MERGE_HEAD") != audit.view["target_oid"]
             ):
                 raise EzError("Merge target changed before Git continuation")
-            if operation == "merge" and commit_options.flags(verify=False):
+            if operation == "cherry-pick":
+                if git.commit_oid("CHERRY_PICK_HEAD") != audit.inputs.target.oid:
+                    raise EzError("Cherry-pick target changed before Git continuation")
+                self._verify_target(audit)
+                # Single-commit cherry-picks have no sequencer options file. Apply
+                # signing overrides explicitly when committing the staged resolution.
+                result = step("commit", "--no-edit", *commit_options.flags())
+            elif operation == "merge" and commit_options.flags(verify=False):
                 # Keep Git's prepared shortlog and cleanup markers, including
                 # summaries enabled through merge.log rather than CLI options.
                 configured_log = git.run(
@@ -784,6 +802,11 @@ class Engine:
         if git.branch_oid(audit.view["branch"]) != audit.view["result_oid"]:
             raise EzError("Current branch changed during integration")
         self._verify_target(audit)
+        if audit.operation == "cherry-pick":
+            parents = git.text("rev-list", "--parents", "-n", "1", audit.view["result_oid"]).split()
+            if parents[1:] != [audit.inputs.before_oid]:
+                raise EzError("Cherry-pick result is not one commit on the original branch")
+            return
         if git.run(
             "merge-base",
             "--is-ancestor",

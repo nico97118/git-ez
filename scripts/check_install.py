@@ -102,7 +102,7 @@ def main() -> None:
         )
         if not run("git", "ez", "--version").startswith("git-ez "):
             raise RuntimeError("Installed Git extension did not report its version")
-        for args in (("ez", "-h"), ("ez", "rebase", "-h")):
+        for args in (("ez", "-h"), ("ez", "rebase", "-h"), ("ez", "cherry-pick", "-h")):
             if "usage:" not in run("git", *args):
                 raise RuntimeError(f"Missing command-line help: {args}")
         for args in (("ez", "--help"), ("help", "ez")):
@@ -118,7 +118,7 @@ def main() -> None:
         error = fails(2, "git", "ez", "audit", "show", "--path", str(report))
         if "Cannot read resolution journal" not in error.stderr:
             raise RuntimeError("Installed extension accepted an unsupported audit schema")
-        for operation in ("merge", "rebase"):
+        for operation in ("merge", "rebase", "cherry-pick"):
             repository = root / operation
             run("git", "init", "-b", "main", str(repository))
 
@@ -143,10 +143,15 @@ def main() -> None:
             git("add", ".")
             git("commit", "-m", "Main")
             git("checkout", "feature")
+            before = git("rev-parse", "HEAD").strip()
             options = ("--autosquash",) if operation == "rebase" else ()
             if "Status: succeeded" not in git("ez", operation, "main", *options):
                 raise RuntimeError(f"Installed {operation} failed")
-            git("merge-base", "--is-ancestor", "main", "HEAD")
+            if operation == "cherry-pick":
+                if git("rev-parse", "HEAD^").strip() != before:
+                    raise RuntimeError("Installed cherry-pick did not preserve the original parent")
+            else:
+                git("merge-base", "--is-ancestor", "main", "HEAD")
             if git("status", "--porcelain"):
                 raise RuntimeError(f"Installed {operation} left a dirty checkout")
             audits = list((repository / ".git/ez/runs").iterdir())
@@ -213,7 +218,7 @@ def main() -> None:
                 raise RuntimeError("Relocated audit reading modified its historical manifest")
         print(
             "Installed wheel: imports, Git discovery, help, manual, audits, "
-            "merge, autosquash passed"
+            "merge, autosquash, cherry-pick passed"
         )
 
 

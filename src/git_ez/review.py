@@ -19,7 +19,9 @@ from .errors import EzError
 
 
 def review_proposal(
-    directory: Path, decision: Decision, secrets: tuple[str, ...] = ()
+    directory: Path,
+    decision: Decision,
+    secrets: tuple[str, ...] = (),
 ) -> tuple[str, str | None]:
     def display(text: str) -> None:
         filtered = redact_bytes(text.encode("utf-8", errors="backslashreplace"), secrets).decode()
@@ -28,6 +30,8 @@ def review_proposal(
     display(read_regular(directory / "worktree.diff").decode(errors="replace"))
     capture = json.loads(read_regular(directory / "files.json"))
     for record in capture["files"]:
+        if record.get("truncated"):
+            raise EzError("Incomplete proposal capture cannot be approved")
         display(f"File capture: {json.dumps(record, ensure_ascii=True)}")
         # Git diff omits untracked contents; show every captured file as well.
         if record.get("artifact"):
@@ -43,15 +47,16 @@ def review_proposal(
     display(f"Capture errors: {capture['capture_errors']}")
     display(f"Agent rationale, reported checks and uncertainties: {decision.rationale}")
     print(f"Agent confidence: {decision.confidence}")
-    print("Engine checks and final validation have not yet run for this acceptance.")
+    print("Proposal ready for review; final integration verification remains required.")
     try:
         while True:
-            action = input("[a]ccept / [r]evise / [s]top: ").strip().lower()
+            prompt = "[a] Accept / [r] Reject / Reprompt / [q] Quit: "
+            action = input(prompt).strip().lower()
             if action in ("a", "accept"):
                 return "accept", None
-            if action in ("s", "stop"):
+            if action in ("q", "quit", "s", "stop"):
                 return "stop", None
-            if action in ("r", "revise"):
+            if action in ("r", "revise", "retry", "reject"):
                 feedback = input("Revision feedback: ").strip()
                 if feedback:
                     return "revise", feedback
@@ -85,6 +90,7 @@ def capture_proposal(
                 size=path.stat().st_size,
                 recorded_bytes=len(content[:limit]),
                 truncated=len(content) > limit,
+                mode=path.stat().st_mode,
             )
         records.append(record)
     audit.write_json(f"{prefix}/files.json", {"files": records, "capture_errors": []})

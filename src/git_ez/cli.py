@@ -279,6 +279,8 @@ def main(argv: list[str] | None = None) -> int:
                 "Resolution journal could not be saved; inspect the retained files.",
                 file=sys.stderr,
             )
+        if args.interactive and audit.view["status"] == "interrupted":
+            return 130
         return 0 if audit.view["status"] == "succeeded" and audit.published else 1
     except (EzError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"git-ez: {exc}", file=sys.stderr)

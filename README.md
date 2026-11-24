@@ -125,10 +125,17 @@ arguments, executed without a shell at the repository root. The agent may run it
 during resolution; the engine runs it after integration. Its dependencies must
 be available, and generated test files must be ignored or cleaned up.
 
-With `--interactive`, choose accept, revise with feedback, or stop for each agent
-proposal. Engine checks still apply after acceptance. No conflicts means no model
-call or review prompt; resolutions already staged by native rerere are continued
-without agent review.
+With `--interactive`, review one global proposal per conflicting Git step: accept,
+reject with feedback, or quit. Each rejection starts again from the original
+tracked conflict baseline with prior proposal evidence and feedback.
+Quit or Ctrl+C restores the original unresolved files and index so
+you can continue with native Git. Restoration covers files tracked at the conflict
+stop, the index and Git operation metadata. Existing Git blobs are reused; only
+tracked contents that differ from the index need a temporary copy. Nontracked and
+ignored files are neither backed up nor cleaned up: their check/model side effects
+can remain after Quit or a retry. Avoid concurrent edits during review. Engine
+checks still apply after acceptance. No conflicts means no model call or review
+prompt; resolutions already staged by native rerere continue without agent review.
 
 ## Supported scope and limitations
 
@@ -172,8 +179,8 @@ repository's common Git directory. `git ez audit show` displays the saved journa
 Git provides commit history and repository diffs. Audit files may contain sensitive
 code and output. See the [audit guide](docs/audit.md) for artifacts and failure handling.
 
-Failure or interruption preserves the actual local state without automatic
-rollback. Inspect the report and `git status`, then use native Git to continue or
+Noninteractive failure or interruption preserves the actual local state. In
+interactive mode, leaving an unapproved proposal restores the original conflict. Inspect the report and `git status`, then use native Git to continue or
 abort an active merge or rebase. If integration completed and final validation
 failed, there is no active operation to continue or abort; inspect the resulting
 commits and validation output. Audit failures can also fail an otherwise completed

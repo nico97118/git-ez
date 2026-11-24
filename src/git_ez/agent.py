@@ -36,7 +36,7 @@ class Resolver(Protocol):
 
     In interactive mode round_number identifies a unique attempt. The latest
     audit.view["reviews"] entry supplies the conflict stop and user feedback;
-    revisions must start from the current files. Noninteractive calls are unchanged.
+    revisions start from the original conflict baseline. Noninteractive calls are unchanged.
     """
 
     def run(

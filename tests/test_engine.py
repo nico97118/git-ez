@@ -2182,15 +2182,15 @@ def test_interactive_review_preserves_or_applies_proposals(repo, mocker, operati
     success = choice in ("accept", "revise")
     assert (audit.view["status"] == "succeeded") == success, audit.view
     assert bool(repo.git.run("ls-files", "-u").stdout) != success
-    assert repo.file.read_text() == "combined\n"
+    assert repo.file.read_text() == ("combined\n" if success else observed[0][0])
     reviews = audit.view["reviews"]
     assert len(reviews) == (3 if choice == "revise" else 1)
     for proposal in reviews:
         assert (audit.directory / proposal["artifacts"] / "files.json").is_file()
     if choice == "revise":
         assert observed[1:] == [
-            ("combined\n", "add a test"),
-            ("combined\n", "keep both intentions"),
+            (observed[0][0], "add a test"),
+            (observed[0][0], "keep both intentions"),
         ]
 
 
@@ -2320,7 +2320,7 @@ def test_interactive_failed_revision_links_latest_session(
         assert repo.git.rebase_active()
     else:
         assert repo.git.text("rev-parse", "MERGE_HEAD") == repo.parent_oid
-    assert repo.file.read_text() == "combined\n"
+    assert "<<<<<<< HEAD" in repo.file.read_text()
 
 
 @pytest.mark.parametrize("operation", ["merge", "rebase"])
@@ -2621,6 +2621,355 @@ def test_executed_child_does_not_keep_checkout_locked(repo):
         child.communicate("exit\n", timeout=30)
 
 
+def conflict_fingerprint(repo):
+    """Observe native state without treating an object ID alone as restoration proof."""
+    metadata = Path(repo.git.text("rev-parse", "--absolute-git-dir"))
+    control = {}
+    for name in ("rebase-merge", "MERGE_HEAD", "MERGE_MSG", "MERGE_AUTOSTASH", "REBASE_HEAD"):
+        path = metadata / name
+        if path.is_dir():
+            control[name] = {
+                str(p.relative_to(path)): p.read_bytes() for p in path.rglob("*") if p.is_file()
+            }
+        elif path.exists():
+            control[name] = path.read_bytes()
+    paths = set(repo.git.run("ls-files", "-z").stdout.decode().rstrip("\0").split("\0"))
+    return (
+        repo.git.run("status", "--porcelain=v2", "--untracked-files=no").stdout,
+        repo.git.run("ls-files", "--stage", "-z").stdout,
+        {
+            name: ((repo.root / name).read_bytes(), (repo.root / name).stat().st_mode)
+            for name in paths
+            if (repo.root / name).is_file()
+        },
+        control,
+    )
+
+
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+@pytest.mark.parametrize("kind", ["normal", "delete", "rename", "multiple"])
+def test_interactive_quit_restores_native_conflict_and_can_continue(repo, mocker, operation, kind):
+    options = {}
+    target = "main"
+    if kind == "delete":
+        repo.git.run("checkout", "main")
+        repo.git.run("rm", "file.txt")
+        repo.git.run("commit", "-m", "remove parent file")
+        repo.git.run("checkout", "feature")
+    elif kind == "rename":
+        repo.git.run("mv", "file.txt", "renamed.txt")
+        if operation == "merge":
+            (repo.root / "renamed.txt").write_text("base\n")
+        repo.git.run("commit", "-am", "rename source file")
+        repo.git.run("checkout", "main")
+        repo.git.run("rm", "file.txt")
+        repo.git.run("commit", "-m", "delete renamed file on parent")
+        repo.git.run("checkout", "feature")
+        if operation == "rebase":
+            target = repo.source_oid
+            options["onto"] = "main"
+    elif kind == "multiple":
+        (repo.root / "second.txt").write_text("source second\n")
+        repo.git.run("add", ".")
+        repo.git.run("commit", "-m", "source second file")
+        repo.git.run("checkout", "main")
+        (repo.root / "second.txt").write_text("parent second\n")
+        repo.git.run("add", ".")
+        repo.git.run("commit", "-m", "parent second file")
+        repo.git.run("checkout", "feature")
+    baseline = []
+    original = repo.resolver.run
+
+    def resolve(git, audit, number, paths, check):
+        baseline.append(conflict_fingerprint(repo))
+        result = original(git, audit, number, paths, check)
+        (repo.root / "temporary").mkdir(exist_ok=True)
+        (repo.root / "temporary" / "artifact").write_text("generated")
+        return result
+
+    repo.resolver.run = resolve
+    mocker.patch("builtins.input", return_value="q")
+    audit = integrate(repo, operation, target=target, interactive=True, **options)
+    assert audit.view["status"] == "failed", audit.view
+    assert conflict_fingerprint(repo) == baseline[0]
+    assert (repo.root / "temporary/artifact").read_text() == "generated"
+    if kind == "rename":
+        assert "renamed.txt" in repo.git.conflicts()
+    assert audit.view["reviews"][-1]["restoration"] == "original_conflict_restored"
+    assert audit.view["conflicts"][-1]["application"] == "unmerged"
+    for name in repo.git.conflicts():
+        (repo.root / name).write_text("manual resolution\n")
+        repo.git.run("add", "--", name)
+    if operation == "rebase":
+        # A later rename/add commit can conflict too: resolve it natively as needed.
+        result = repo.git.run("rebase", "--continue", check=False)
+        while result.returncode and repo.git.conflicts():
+            for name in repo.git.conflicts():
+                (repo.root / name).write_text("manual resolution\n")
+                repo.git.run("add", "--", name)
+            result = repo.git.run("rebase", "--continue", check=False)
+        assert result.returncode == 0, result.stderr
+    else:
+        repo.git.run("commit", "--no-edit")
+    assert not repo.git.operation_active()
+
+
+def test_interactive_restoration_failure_is_reported_and_backup_retained(repo, mocker):
+    import shutil
+
+    from git_ez.conflict_state import ConflictState
+
+    original = ConflictState.restore
+    backup = []
+
+    def restore(state):
+        if backup:
+            mocker.patch("git_ez.conflict_state.reconcile", side_effect=OSError("disk failure"))
+        backup.append(state.directory)
+        return original(state)
+
+    mocker.patch.object(ConflictState, "restore", restore)
+    mocker.patch("builtins.input", return_value="q")
+    audit = integrate(repo, interactive=True)
+    assert audit.view["status"] == "failed"
+    assert "Conflict restoration failed" in audit.view["error"]
+    assert (backup[0] / "index").exists()
+    shutil.rmtree(backup[0])
+
+
+def test_interactive_global_merge_approval_covers_all_files(repo, mocker, capsys):
+    (repo.root / "second.txt").write_text("source addition\n")
+    repo.git.run("add", ".")
+    repo.git.run("commit", "-m", "source addition")
+    repo.git.run("checkout", "main")
+    (repo.root / "second.txt").write_text("parent addition\n")
+    repo.git.run("add", ".")
+    repo.git.run("commit", "-m", "parent addition")
+    repo.git.run("checkout", "feature")
+    prompt = mocker.patch("builtins.input", return_value="a")
+    audit = integrate(repo, "merge", interactive=True)
+    assert audit.view["status"] == "succeeded", audit.view
+    assert len(audit.view["reviews"]) == 1
+    assert len(audit.view["reviews"][0]["conflict_ids"]) == 2
+    prompt.assert_called_once()
+    output = capsys.readouterr().out
+    assert "file.txt" in output and "second.txt" in output
+
+
+def test_interactive_quit_restores_modes_links_and_ignores_repeated_sigint(repo, mocker):
+    import signal
+
+    from git_ez.conflict_state import reconcile
+
+    outside = repo.root.parent / "outside"
+    outside.write_text("unrelated")
+    link = repo.root / "tracked-link"
+    repo.git.run("checkout", "main")
+    link.symlink_to(outside)
+    repo.git.run("add", "tracked-link")
+    repo.git.run("commit", "-m", "add tracked link")
+    repo.git.run("checkout", "feature")
+    original = repo.resolver.run
+    initial = []
+
+    def resolve(git, audit, number, paths, check):
+        initial.append(repo.file.read_bytes())
+        result = original(git, audit, number, paths, check)
+        repo.file.chmod(0o755)
+        link.unlink()
+        link.write_text("replaced link")
+        return result
+
+    def restore(*args, **kwargs):
+        os.kill(os.getpid(), signal.SIGINT)
+        return reconcile(*args, **kwargs)
+
+    repo.resolver.run = resolve
+    mocker.patch("git_ez.conflict_state.reconcile", side_effect=restore)
+    mocker.patch("builtins.input", return_value="q")
+    audit = integrate(repo, interactive=True)
+    assert audit.view["status"] == "failed", audit.view
+    assert repo.file.read_bytes() == initial[0]
+    assert repo.file.stat().st_mode & 0o777 == 0o644
+    assert link.is_symlink()
+    assert outside.read_text() == "unrelated"
+
+
+@pytest.mark.parametrize("interactive", [False, True])
+def test_cli_interruption_exit_status_preserves_noninteractive_policy(repo, mocker, interactive):
+    repo.git.run("config", "ez.model", "test")
+    engine = Engine(repo.root, repo.config, repo.resolver)
+    mocker.patch("git_ez.cli.Engine", return_value=engine)
+    mocker.patch.object(repo.resolver, "run", side_effect=KeyboardInterrupt)
+    arguments = ["rebase", "main", "--repo", str(repo.root)]
+    if interactive:
+        arguments.append("--interactive")
+    assert main(arguments) == (130 if interactive else 1)
+    assert repo.git.conflicts()
+    assert repo.git.rebase_active()
+
+
+def test_interactive_sigint_during_child_startup_waits_before_restoration(repo, mocker):
+    import signal
+
+    from git_ez.processes import run_process
+
+    native_popen = subprocess.Popen
+    original = repo.resolver.run
+    baseline = []
+    children = []
+
+    def spawn(*args, **kwargs):
+        child = native_popen(*args, **kwargs)
+        children.append(child)
+        os.kill(os.getpid(), signal.SIGINT)
+        return child
+
+    def resolve(git, audit, number, paths, check):
+        baseline.append(conflict_fingerprint(repo))
+        result = original(git, audit, number, paths, check)
+        with patch("git_ez.processes.subprocess.Popen", side_effect=spawn):
+            run_process(
+                (sys.executable, "-c", "import time; time.sleep(30)"),
+                cwd=repo.root,
+                env=dict(os.environ),
+                timeout=30,
+            )
+        return result
+
+    repo.resolver.run = resolve
+    audit = integrate(repo, interactive=True)
+    assert audit.view["status"] == "interrupted", audit.view
+    assert children[0].poll() is not None
+    assert conflict_fingerprint(repo) == baseline[0]
+
+
+def test_interactive_uncertain_child_cleanup_retains_backup_without_false_restoration(repo):
+    import shutil
+
+    from git_ez.processes import ChildCleanupError
+
+    original = repo.resolver.run
+
+    def resolve(git, audit, number, paths, check):
+        original(git, audit, number, paths, check)
+        raise ChildCleanupError("Cannot confirm child process group termination")
+
+    repo.resolver.run = resolve
+    audit = integrate(repo, interactive=True)
+    assert audit.view["status"] == "failed"
+    error = audit.view["error"]
+    assert "conflict was not restored" in error
+    backup = Path(error.split("Backup retained at ", 1)[1].split(":", 1)[0])
+    try:
+        assert (backup / "index").exists()
+        assert "<<<<<<< HEAD" in (backup / "worktree/file.txt").read_text()
+        assert repo.file.read_text() == "combined\n"
+        assert repo.git.conflicts()
+        assert "restoration" not in audit.view["reviews"][-1]
+    finally:
+        shutil.rmtree(backup)
+
+
+def test_interactive_quit_after_multiple_rejections_restores_one_original_baseline(repo, mocker):
+    original = repo.resolver.run
+    baselines = []
+
+    def resolve(git, audit, number, paths, check):
+        baselines.append(conflict_fingerprint(repo))
+        result = original(git, audit, number, paths, check)
+        (repo.root / f"attempt-{number}").write_text("provisional artifact")
+        return result
+
+    repo.resolver.run = resolve
+    mocker.patch("builtins.input", side_effect=["r", "first feedback", "r", "second feedback", "q"])
+    audit = integrate(repo, interactive=True)
+    assert audit.view["status"] == "failed"
+    assert len(baselines) == len(audit.view["reviews"]) == 3
+    assert all((repo.root / f"attempt-{number}").exists() for number in (1, 2, 3))
+    assert all(before == baselines[0] for before in baselines)
+    assert conflict_fingerprint(repo) == baselines[0]
+    assert [item["decision"] for item in audit.view["reviews"]] == ["revise", "revise", "stop"]
+    assert all(
+        item["restoration"] == "original_conflict_restored" for item in audit.view["reviews"]
+    )
+
+
+@pytest.mark.parametrize("dirty", [False, True])
+def test_conflict_snapshot_reuses_git_blobs_and_never_copies_nontracked_trees(repo, dirty):
+    from git_ez.conflict_state import ConflictState
+
+    support = repo.root / "support.bin"
+    original = b"\0tracked binary\n" * 65536
+    repo.git.run("checkout", "main")
+    support.write_bytes(original)
+    repo.git.run("add", "support.bin")
+    repo.git.run("commit", "-m", "add binary support")
+    repo.git.run("checkout", "feature")
+    assert repo.git.run("rebase", "main", check=False).returncode
+    if dirty:
+        original = b"working contents differ from index\n"
+        support.write_bytes(original)
+    ignored = repo.root / ".venv"
+    ignored.mkdir()
+    (ignored / ".git").mkdir()
+    os.mkfifo(ignored / "fifo")
+    (repo.root / ".git/info/exclude").write_text(".venv/\n")
+    notes = repo.root / "notes"
+    notes.write_text("before")
+    generated = ignored / "generated"
+    generated.write_text("before")
+    index = Path(repo.git.text("rev-parse", "--path-format=absolute", "--git-path", "index"))
+    original_index = index.read_bytes()
+    marked = repo.file.read_bytes()
+    state = ConflictState(repo.git)
+    try:
+        assert not (state.directory / "worktree/.venv").exists()
+        assert not (state.directory / "worktree/notes").exists()
+        assert (state.directory / "worktree/support.bin").exists() == dirty
+        assert (state.directory / "worktree/file.txt").read_bytes() == marked
+        support.write_bytes(b"changed")
+        repo.file.write_text("proposal\n")
+        notes.write_text("after")
+        generated.write_text("after")
+        (repo.root / "new-nontracked").write_text("created")
+        state.restore()
+        assert index.read_bytes() == original_index
+        assert support.read_bytes() == original
+        assert repo.file.read_bytes() == marked
+        assert notes.read_text() == generated.read_text() == "after"
+        assert (repo.root / "new-nontracked").read_text() == "created"
+        outside = repo.root.parent / "outside"
+        outside.write_text("external contents")
+        support.unlink()
+        support.symlink_to(outside)
+        state.restore()
+        assert not support.is_symlink()
+        assert support.read_bytes() == original
+        assert outside.read_text() == "external contents"
+    finally:
+        state.close()
+
+
+def test_conflict_restore_preserves_nontracked_data_blocking_a_tracked_path(repo):
+    from git_ez.conflict_state import ConflictState
+
+    assert repo.git.run("rebase", "main", check=False).returncode
+    state = ConflictState(repo.git)
+    try:
+        repo.file.unlink()
+        repo.file.mkdir()
+        notes = repo.file / "nontracked-notes"
+        notes.write_text("keep me")
+        with pytest.raises(EzError, match="Conflict restoration failed"):
+            state.restore()
+        assert state.retained
+        assert notes.read_text() == "keep me"
+        assert (state.directory / "index").exists()
+    finally:
+        state.close()
+
+
 @pytest.mark.parametrize("operation", ["rebase", "merge"])
 @pytest.mark.parametrize("interactive", [False, True])
 @pytest.mark.parametrize("kind", ["unstaged", "staged", "untracked"])
@@ -2654,7 +3003,7 @@ def test_autostash_configuration_never_bypasses_clean_checkout_precondition(
 
 
 @pytest.mark.parametrize("operation", ["rebase", "merge"])
-@pytest.mark.parametrize("action", ["accept", "automatic"])
+@pytest.mark.parametrize("action", ["accept", "quit", "automatic"])
 def test_native_git_autostash_is_explicitly_disabled_without_changing_configuration(
     repo, mocker, operation, action
 ):

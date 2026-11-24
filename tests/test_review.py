@@ -83,3 +83,20 @@ def test_review_refuses_unsafe_capture_reads(tmp_path, mocker, unsafe):
     with pytest.raises((OSError, ValueError)):
         review_proposal(root, Decision("resolve", 0.9))
     prompt.assert_not_called()
+
+
+def test_failed_check_never_offers_or_accepts_approval(tmp_path, mocker, capsys):
+    (tmp_path / "worktree.diff").write_text("latest proposed diff")
+    (tmp_path / "files.json").write_text(json.dumps({"files": [], "capture_errors": []}))
+    read = mocker.patch("builtins.input", side_effect=["a", "q"])
+    assert review_proposal(
+        tmp_path,
+        Decision("proposal", 0.95),
+        validation_failed=True,
+        diagnostic="failed check diagnostic",
+    ) == ("stop", None)
+    assert all("Accept" not in call.args[0] for call in read.call_args_list)
+    output = capsys.readouterr().out
+    assert "latest proposed diff" in output
+    assert "failed check diagnostic" in output
+    assert "cannot be accepted" in output

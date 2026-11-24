@@ -554,7 +554,8 @@ def test_interactive_revisions_reach_runtime_and_keep_separate_sessions(repo, mo
             [tool("finish", rationale="First proposal; no tests run", confidence=0.95)],
             [
                 command(
-                    "from pathlib import Path; assert Path('file.txt').read_text() == 'first\\n'; "
+                    "from pathlib import Path; "
+                    "assert '<<<<<<< HEAD' in Path('file.txt').read_text(); "
                     "Path('file.txt').write_text('combined\\n')"
                 )
             ],
@@ -717,3 +718,66 @@ def test_shell_invocations_keep_results_streams_and_timing(repo, mode):
     assert model_start["messages"]
     model_end = next(e for e in events if e["event"] == "model_result")
     assert model_end["duration_seconds"] >= 0
+
+
+def test_interactive_sdk_shell_sigint_restores_conflict(repo, mocker):
+    import os
+
+    model = ScriptedModel(
+        turns=[
+            [
+                command(
+                    "import os, signal, time; from pathlib import Path; "
+                    "Path('file.txt').write_text('provisional'); "
+                    f"os.kill({os.getpid()}, signal.SIGINT); time.sleep(2); "
+                    "Path('late-artifact').write_text('unsafe')"
+                )
+            ]
+        ],
+        profile={"max_input_tokens": 32768, "tool_calling": True},
+    )
+    mocker.patch("git_ez.agent_runtime.create_chat_model", return_value=model)
+    prompt = mocker.patch("builtins.input")
+    audit = Engine(repo.root, repo.config).run("main", interactive=True)
+    assert audit.view["status"] == "interrupted", audit.view
+    assert "<<<<<<< HEAD" in (repo.root / "file.txt").read_text()
+    assert repo.git.conflicts()
+    assert repo.git.rebase_active()
+    assert not (repo.root / "late-artifact").exists()
+    prompt.assert_not_called()
+
+
+def test_interactive_sdk_cleanup_failure_stops_the_graph_and_retains_backup(repo, mocker):
+    import shutil
+
+    from git_ez.processes import ChildCleanupError
+
+    model = ScriptedModel(
+        turns=[
+            [command("resolve")],
+            [tool("finish", rationale="Must not be reached", confidence=0.95)],
+        ],
+        profile={"max_input_tokens": 32768, "tool_calling": True},
+    )
+
+    def cleanup_failed(*args, **kwargs):
+        (repo.root / "file.txt").write_text("unapproved proposal\n")
+        raise ChildCleanupError("Cannot confirm child termination")
+
+    mocker.patch("git_ez.agent_runtime.create_chat_model", return_value=model)
+    execute = mocker.patch("git_ez.agent_runtime.run_process", side_effect=cleanup_failed)
+    prompt = mocker.patch("builtins.input", return_value="a")
+    audit = Engine(repo.root, repo.config).run("main", interactive=True)
+    backup = Path(audit.view["error"].split("Backup retained at ", 1)[1].split(":", 1)[0])
+    try:
+        assert audit.view["status"] == "failed", audit.view
+        assert "conflict was not restored" in audit.view["error"]
+        assert model.position == 1
+        execute.assert_called_once()
+        prompt.assert_not_called()
+        assert (repo.root / "file.txt").read_text() == "unapproved proposal\n"
+        assert repo.git.conflicts()
+        assert (backup / "index").exists()
+        assert "restoration" not in audit.view["reviews"][-1]
+    finally:
+        shutil.rmtree(backup)

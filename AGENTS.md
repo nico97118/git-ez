@@ -13,6 +13,7 @@ resolution and an inspectable audit of changes, decisions, and reasons.
 - Use native Git configuration under `ez.*`, respecting Git scopes and includes.
 - Operate on the user's current checkout and branch. Do not add automatic fetch,
   push, backup branches, or worktree creation.
+- Require a clean checkout and disable native autostash for both rebase and merge.
 - Invoke the LLM only when conflicts require resolution.
 - Keep the supported command subset explicit in the README and manual. Do not
   imply that arbitrary native Git flags are forwarded or that every Git workflow
@@ -32,6 +33,8 @@ consequence and clarify the intended change before implementing it.
 - `options.py`: explicitly supported native Git options and argument conversion.
 - `sequence_editor.py`: bounded capture of native autosquash instructions without editing them.
 - `git.py`, `engine.py`, `checks.py`: Git execution, integration lifecycle, and guards.
+- `conflict_state.py`, `processes.py`: interactive conflict restoration and child-process cleanup.
+- `review.py`: global terminal proposal review and proposal capture.
 - `locking.py`: interprocess execution lock scoped to the current checkout.
 - `conflicts.py`: conflict evidence and resolution decisions.
 - `agent.py`, `agent_runtime.py`, `llm.py`: resolver contract, agent runtime, providers.

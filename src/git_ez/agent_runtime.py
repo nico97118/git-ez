@@ -5,6 +5,7 @@
 
 import json
 import shlex
+import subprocess
 from collections.abc import Callable, Mapping
 from importlib.metadata import version
 from pathlib import Path
@@ -44,6 +45,7 @@ from .conflicts import Decision, LowConfidence
 from .errors import AuditError, EzError
 from .git import Git, git_environment
 from .llm import create_chat_model
+from .processes import ChildCleanupError, run_process
 
 
 def agent_environment(config: Config) -> dict[str, str]:
@@ -212,6 +214,7 @@ class JournalShell(LocalShellBackend):
         self.log = log
         self.output_limit = output_limit
         self.streams: dict[str, Any] = {}
+        self.interactive = bool(log.audit.view.get("interactive"))
 
     def _combine_output(self, stdout: str | None, stderr: str | None) -> tuple[str, bool]:
         # The pinned SDK exposes separate streams only at this combination hook.
@@ -237,7 +240,35 @@ class JournalShell(LocalShellBackend):
             timeout=timeout,
         )
         try:
-            result = super().execute(command, timeout=timeout)
+            if self.interactive:
+                try:
+                    completed = run_process(
+                        ("/bin/sh", "-c", command),
+                        cwd=Path(self.cwd),
+                        env=self._env,
+                        timeout=timeout if timeout is not None else self._default_timeout,
+                        stdin=subprocess.DEVNULL,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    output, truncated = self._combine_output(
+                        (exc.stdout or b"").decode(errors="replace"),
+                        (exc.stderr or b"").decode(errors="replace"),
+                    )
+                    result = ExecuteResponse(
+                        output=f"Error: Command timed out\nOutput before the timeout:\n{output}",
+                        exit_code=124,
+                        truncated=truncated,
+                    )
+                else:
+                    output, truncated = self._combine_output(
+                        completed.stdout.decode(errors="replace"),
+                        completed.stderr.decode(errors="replace"),
+                    )
+                    result = ExecuteResponse(
+                        output=output, exit_code=completed.returncode, truncated=truncated
+                    )
+            else:
+                result = super().execute(command, timeout=timeout)
         except BaseException as exc:
             self.log.capture_event(
                 "command_finished",
@@ -328,7 +359,7 @@ class IntegrationMiddleware(AgentMiddleware[Any, Any, Any]):
                 )
             try:
                 result = handler(request)
-            except (LowConfidence, GitStateChanged, AuditError):
+            except (LowConfidence, GitStateChanged, AuditError, ChildCleanupError):
                 raise
             except (EzError, OSError, UnicodeError) as exc:
                 result = self.log.feedback(call, safe_error(exc))
@@ -455,9 +486,21 @@ def run_agent(
             review = audit.view["reviews"][-1]
             mission["review_round"] = review["round"]
             mission["user_feedback"] = review["feedback"]
+            mission["previous_proposals"] = [
+                {
+                    "artifacts": str(audit.directory / item["artifacts"]),
+                    "feedback": item.get("feedback"),
+                    "user_feedback": item.get("user_feedback"),
+                    "resolution": item.get("resolution"),
+                    "validation_diagnostic": item.get("validation_diagnostic"),
+                }
+                for item in audit.view["reviews"][:-1]
+                if item["round"] == review["round"]
+            ]
             mission["revision_instruction"] = (
-                "Revise the current worktree proposal using user_feedback; do not restore "
-                "the initial conflict markers. Explain checks performed and uncertainties."
+                "Resolve from the restored tracked conflict baseline using user_feedback and "
+                "the previous proposal evidence. Nontracked and ignored files are not restored "
+                "between attempts. Explain checks performed and uncertainties."
             )
         if "onto_oid" in audit.view:
             mission["onto_sha"] = audit.view["onto_oid"]

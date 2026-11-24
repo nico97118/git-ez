@@ -73,7 +73,11 @@ For existing scripts, replace `git ez probe --output report.json` with
 `git ez probe > report.json`.
 
 Exit codes: `0` = successful local integration, displayed report, or compatible probe;
-`1` = failed run/probe; `2` = configuration, CLI, or precondition error.
+`1` = failed run/probe; `2` = configuration, CLI, or precondition error; `130` = interrupted interactive integration.
+
+Both operations explicitly disable native autostash, even when rebase.autoStash
+or merge.autoStash is configured. Commit or stash local changes with native Git
+before starting git-ez; it does not manage a stash for you.
 
 ### Interactive proposal review
 
@@ -81,20 +85,31 @@ Use `git ez merge <target> --interactive` or `git ez rebase <target> --interacti
 to review each harness proposal before the engine stages it. This reviews conflict
 resolutions; it does not open Git's interactive rebase sequence editor.
 
-The terminal shows the diff, captured file contents (including additions), capture
-limits, and the agent's rationale with reported checks and uncertainties. Final
-validation runs later. Choose **accept**, **revise** (then enter feedback), or
-**stop**. Revisions start from the current proposal and require another explicit
-approval. Empty or invalid input never accepts; EOF and interruption stop the run.
-Engine confidence, file, reference and operation checks still apply after approval.
-Changes during review invalidate approval. Each attempt, feedback and decision is
-retained in the audit; acceptance and actual application are recorded separately.
+The terminal automatically shows the global diff, captured file contents (including
+additions), and the agent's rationale. With `--check`, the engine validates before
+review and feeds failures back to the harness for up to `ez.validationAttempts`
+attempts (default 3). A failing check permits only retry with feedback or quit.
+Choose **accept**, **reject/reprompt** (then enter feedback), or **quit**. Revisions
+start from the original conflict baseline with a fresh automatic retry budget.
+Empty or invalid input never accepts; EOF quits and Ctrl+C interrupts (status 130).
+Engine confidence, file, reference and operation checks still apply. Changes during
+review invalidate approval. Each attempt, feedback and decision is retained in the
+audit; acceptance and application are recorded separately. Final validation also
+runs after integration.
 
-Stopping preserves proposed files, the unresolved index and the active Git operation.
-Inspect the report and use native `git merge` / `git rebase` continuation or abort
-commands as appropriate. No automatic rollback occurs. Without conflicts there is
-no prompt or model call. Resolutions already staged by native rerere autoupdate
-keep their existing path and do not receive harness proposal review.
+Quit restores original unresolved files, file modes and index stages while keeping
+the native Git operation intact. Resolve manually, stage
+the files, and run `git rebase --continue` or `git commit`. No git-ez recovery command
+is needed. Restoration covers only files tracked in the original conflict index,
+the index itself and native operation metadata. Existing Git blobs are reused;
+exact tracked working contents that differ from the index are saved separately.
+Nontracked and ignored files are neither backed up nor removed, including files
+created by a proposal or check. Their effects can persist across retries and Quit.
+A nontracked file blocking restoration causes an explicit error rather than being
+removed. Avoid concurrent edits. Restoration errors retain a private backup for
+manual recovery. See the [manual](man/git-ez.1) for interruption limits.
+Without conflicts there is no prompt or model call. Resolutions already staged by
+native rerere autoupdate keep their existing path without harness review.
 
 ## Supported Git workflow
 
@@ -105,7 +120,7 @@ its own small command-line interface; it does not forward arbitrary options to
 | Contract | Behavior |
 | --- | --- |
 | Target | One explicit revision is required, even when the branch has an upstream. It must already be available locally. |
-| Repository | A clean checkout on a local branch, with no active Git operation. Detached HEAD and bare repositories are unsupported. |
+| Repository | A clean checkout on a local branch with no active Git operation. Autostash is disabled. Detached HEAD and bare repositories are unsupported. |
 | Rebase | Replay the current branch using Git's merge backend. Use `--onto` for a separate new base or `--keep-base` to retain the unique common ancestor. Autostash, update-refs, and rebasing merge commits are disabled. |
 | Merge | Integrate one pinned target with `--no-edit`; Git's fast-forward policy still applies. |
 | Interaction | Git runs noninteractively with `diff3` conflict markers. Hooks and signing failures are not bypassed. |

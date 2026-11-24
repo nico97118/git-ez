@@ -5,6 +5,7 @@
 
 import hashlib
 import json
+import stat
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -17,14 +18,17 @@ from uuid import uuid4
 
 from .agent import AgentResolver, Resolver
 from .audit import Audit, Record, Validation, now, safe_error
+from .audit_safety import redact_bytes
 from .audit_storage import read_regular as read_evidence
 from .checks import WorktreeChecks
 from .config import Config
+from .conflict_state import ConflictState, uninterrupted
 from .conflicts import Conflict, Decision, LowConfidence, text_diff
 from .errors import AuditError, EzError
 from .git import Git, Stage, git_environment
 from .locking import checkout_lock
 from .options import CommitOptions, RebaseOptions
+from .processes import ChildCleanupError, interrupt_children, run_process
 from .review import capture_proposal, review_proposal
 from .sequence_editor import editor_command, read_regular
 
@@ -287,6 +291,8 @@ class Engine:
             raise EzError("A local branch must be checked out")
         if git.operation_active():
             raise EzError("A Git operation is already in progress")
+        if git.conflicts():
+            raise EzError("Unmerged index entries require manual resolution")
         if git.run("status", "--porcelain", "--untracked-files=all").stdout:
             raise EzError("Repository must be clean before integration")
         git.run("var", "GIT_AUTHOR_IDENT")
@@ -513,7 +519,12 @@ class Engine:
             merge_ff = audit.view["merge_ff"]
             flags = (f"--{merge_ff}",) if merge_ff is not None else ()
             result = step(
-                "merge", "--no-edit", *flags, *commit_options.flags(), audit.view["target_oid"]
+                "merge",
+                "--no-autostash",
+                "--no-edit",
+                *flags,
+                *commit_options.flags(),
+                audit.view["target_oid"],
             )
         rounds = 0
         while result.returncode:
@@ -812,12 +823,59 @@ class Engine:
         round_number: int,
         validation: tuple[str, ...],
     ) -> None:
+        if not audit.view.get("interactive"):
+            self._resolve_conflicts(git, audit, stages, round_number, validation)
+            return
+        state = ConflictState(git)
+        conflict_count = len(audit.view["conflicts"])
+        review_count = len(audit.view.get("reviews", []))
+        state.retained = True
+        with interrupt_children():
+            try:
+                self._resolve_conflicts(git, audit, stages, round_number, validation, state)
+                state.retained = False
+            except ChildCleanupError as exc:
+                state.retained = True
+                raise EzError(
+                    f"Child cleanup failed; conflict was not restored. Backup retained at "
+                    f"{state.directory}: {exc}"
+                ) from exc
+            except BaseException:
+                with uninterrupted():
+                    state.restore()
+                    state.retained = False
+                for index in range(conflict_count, len(audit.view["conflicts"])):
+                    audit.record("conflicts", index).update(
+                        restoration="original_conflict_restored", application="unmerged"
+                    )
+                for index in range(review_count, len(audit.view.get("reviews", []))):
+                    review = audit.record("reviews", index)
+                    review.update(restoration="original_conflict_restored")
+                    if review.get("application") == "staged":
+                        review.update(application="restored_unmerged")
+                audit.attempt("conflict restoration metadata", audit.save)
+                raise
+            finally:
+                # Delete only after approval or a completed restoration.
+                if not state.retained:
+                    state.close()
+
+    def _resolve_conflicts(
+        self,
+        git: Git,
+        audit: Audit,
+        stages: dict[str, dict[int, Stage]],
+        round_number: int,
+        validation: tuple[str, ...],
+        state: ConflictState | None = None,
+    ) -> None:
         snapshots = [self.snapshot(git, audit, name, versions) for name, versions in stages.items()]
         head = git.text("rev-parse", "HEAD")
         branch = git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.decode().strip() or None
         checks = WorktreeChecks(self.config)
         decision: Decision | None = None
         proposal: Record | None = None
+        approved: dict[str, tuple[int, str] | None] | None = None
         session_count = len(audit.view.get("sessions", []))
         saved = primary_error = False
         status = "failed"
@@ -825,7 +883,9 @@ class Engine:
         try:
             baseline = checks.baseline(git)
             if audit.view.get("interactive"):
-                decision, _ = self._review(git, audit, round_number, list(stages), validation)
+                decision, approved = self._review(
+                    git, audit, round_number, list(stages), validation, state
+                )
             else:
                 proposal = audit.add_record(
                     "reviews",
@@ -844,7 +904,7 @@ class Engine:
             if decision.confidence < self.config.min_confidence:
                 raise LowConfidence("Agent confidence below threshold; worktree preserved")
             checks.guard(git, audit, head, branch)
-            checks.verify(git, list(stages), baseline)
+            checks.verify(git, list(approved) if approved is not None else list(stages), baseline)
             if proposal is not None:
                 self._capture_attempt(git, audit, proposal, decision)
                 self._capture_changes(git, audit, proposal, list(stages), baseline)
@@ -852,7 +912,19 @@ class Engine:
                 self._save_resolution(git, audit, record, conflict, decision)
             audit.save()
             saved = True
-            self._step(git, audit, ("add", "-A", "--", "."))
+            current = checks.baseline(git)
+            selected = sorted(
+                set(stages)
+                | {
+                    name
+                    for name in current.keys() | baseline.keys()
+                    if current.get(name) != baseline.get(name)
+                }
+            )
+            if approved is None:
+                self._step(git, audit, ("add", "-A", "--", *selected))
+            else:
+                self._stage_approved(git, audit, approved)
             status = "applied"
             for record, _ in snapshots:
                 record.update(status=status, application="staged")
@@ -905,6 +977,63 @@ class Engine:
             if error is not None and not primary_error:
                 raise AuditError("Cannot retain conflict decisions") from error
 
+    def _stage_approved(
+        self, git: Git, audit: Audit, approved: dict[str, tuple[int, str] | None]
+    ) -> None:
+        """Stage the complete reviewed proposal while preserving the caller's index hints."""
+        paths = list(approved)
+        checks = WorktreeChecks(self.config)
+        if checks.fingerprints(git, paths) != approved:
+            raise EzError("Approved worktree contents changed before staging")
+        assumed, skipped = set(), set()
+        for entry in git.run("ls-files", "-v", "-z", "--", *paths).stdout.split(b"\0"):
+            if not entry:
+                continue
+            tag, name = entry[:1].decode("ascii"), entry[2:].decode("utf-8")
+            if tag.islower():
+                assumed.add(name)
+            if tag.upper() == "S":
+                skipped.add(name)
+        try:
+            for flag, names in (("assume-unchanged", assumed), ("skip-worktree", skipped)):
+                if names:
+                    git.run("update-index", f"--no-{flag}", "--", *sorted(names))
+            self._step(git, audit, ("add", "-A", "--", *paths))
+            indexed = {}
+            for entry in git.run("ls-files", "--stage", "-z", "--", *paths).stdout.split(b"\0"):
+                if not entry:
+                    continue
+                header, raw_name = entry.split(b"\t", 1)
+                mode, oid, stage = header.decode("ascii").split()
+                name = raw_name.decode("utf-8")
+                if stage != "0":
+                    raise EzError(f"Approved resolution still has unmerged index entries: {name}")
+                indexed[name] = (mode, oid)
+            for name, expected in approved.items():
+                if expected is None:
+                    if name in indexed:
+                        raise EzError(f"Approved deletion was not staged: {name}")
+                elif (
+                    name not in indexed
+                    or git.text("hash-object", f"--path={name}", "--", name) != indexed[name][1]
+                ):
+                    raise EzError(f"Approved content was not staged: {name}")
+                elif indexed[name][0] != ("100755" if expected[0] & stat.S_IXUSR else "100644"):
+                    raise EzError(
+                        f"Approved executable mode was not staged: {name}; "
+                        "inspect core.fileMode and resolve manually"
+                    )
+            if checks.fingerprints(git, paths) != approved:
+                raise EzError("Approved worktree contents changed during staging")
+        finally:
+            if assumed or skipped:
+                remaining = set(
+                    git.run("ls-files", "-z", "--", *paths).stdout.decode("utf-8").split("\0")
+                )
+                for flag, names in (("assume-unchanged", assumed), ("skip-worktree", skipped)):
+                    if selected := names & remaining:
+                        git.run("update-index", f"--{flag}", "--", *sorted(selected))
+
     def _review(
         self,
         git: Git,
@@ -912,13 +1041,23 @@ class Engine:
         round_number: int,
         paths: list[str],
         validation: tuple[str, ...],
-    ) -> tuple[Decision, Path]:
+        state: ConflictState | None = None,
+    ) -> tuple[Decision, dict[str, tuple[int, str] | None]]:
         feedback = None
         head = git.text("rev-parse", "HEAD")
         branch = git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.decode().strip() or None
         checks = WorktreeChecks(self.config)
         before_agent = checks.baseline(git)
+        original_index = git.run("ls-files", "--stage", "-z").stdout
+        automatic_attempt = 0
         while True:
+            if state is not None:
+                state.restore()
+            automatic_attempt += 1
+            if feedback is not None:
+                feedback = redact_bytes(
+                    feedback.encode(), (self.config.resolved_api_key(),)
+                ).decode()
             reviews = audit.view.get("reviews", [])
             number = len(reviews) + 1
             proposal_data: dict[str, Any] = {
@@ -941,10 +1080,54 @@ class Engine:
                 raw = self.resolver.run(git, audit, number, paths, validation)
                 parsed = Decision.parse(raw)
                 proposal.update(resolution=asdict(parsed))
+                checks.guard(git, audit, head, branch)
+                checks.verify(git, paths, before_agent)
+                validation_failed = False
+                diagnostic = None
+                if validation:
+                    try:
+                        self.validate(git, audit, validation)
+                    except ChildCleanupError:
+                        raise
+                    except EzError as exc:
+                        validation_failed = True
+                        diagnostic = str(exc)
+                        output = self._validation_output
+                        if output is None:
+                            diagnostic += "\nValidation output unavailable."
+                        else:
+                            for stream in output:
+                                diagnostic += "\n" + stream[: self.config.tool_output_bytes].decode(
+                                    errors="replace"
+                                )
+                                if len(stream) > self.config.tool_output_bytes:
+                                    diagnostic += "\n[Validation diagnostic truncated]"
+                    if diagnostic is not None:
+                        diagnostic = redact_bytes(
+                            diagnostic.encode(), (self.config.resolved_api_key(),)
+                        ).decode()
+                    proposal.update(validation=dict(audit.view["validation"]))
+                    proposal.update(validation_diagnostic=diagnostic)
+                checks.guard(git, audit, head, branch)
+                if git.run("ls-files", "--stage", "-z").stdout != original_index:
+                    raise EzError("Index changed before approval; integration stopped")
+                if state is not None:
+                    state.verify_control()
                 self._capture_attempt(git, audit, proposal, parsed)
                 selected = self._capture_changes(git, audit, proposal, paths, before_agent)
+                if state is not None:
+                    selected = sorted(set(selected) | set(state.changed_paths()))
+                    capture_proposal(audit, git, directory, self.config.max_file_bytes, selected)
                 proposal.update(status="proposed")
                 audit.save()
+                if validation_failed and automatic_attempt < self.config.validation_attempts:
+                    proposal.update(status="check_failed", decision="automatic_retry")
+                    feedback = f"Previous check failed. Correct the resolution:\n{diagnostic}"
+                    continue
+                if not validation_failed:
+                    checks.verify(git, selected, before_agent)
+                reviewed = checks.fingerprints(git, selected)
+                reviewed_changes = state.changed_paths() if state is not None else []
                 review_baseline = checks.baseline(git)
                 index = git.run("ls-files", "--stage", "-z").stdout
                 recorded = (
@@ -952,19 +1135,27 @@ class Engine:
                     read_evidence(directory / "worktree.diff"),
                 )
                 action, feedback = review_proposal(
-                    directory, parsed, (self.config.resolved_api_key(),)
+                    directory,
+                    parsed,
+                    (self.config.resolved_api_key(),),
+                    validation_failed=validation_failed,
+                    diagnostic=diagnostic,
                 )
                 proposal.update(decision=action)
                 proposal.update(user_feedback=feedback)
                 audit.save()
                 if action == "stop":
-                    raise EzError("Review stopped; proposed files and Git operation preserved")
+                    raise EzError("Review stopped; original unresolved conflict restored")
                 checks.guard(git, audit, head, branch)
                 if git.run("ls-files", "--stage", "-z").stdout != index:
                     raise EzError("Index changed during review; integration stopped")
                 comparison = directory / "after-review"
                 capture_proposal(audit, git, comparison, self.config.max_file_bytes, selected)
-                if checks.baseline(git) != review_baseline:
+                if checks.fingerprints(git, selected) != reviewed:
+                    raise EzError("Worktree changed during review; review no longer applies")
+                if checks.baseline(git) != review_baseline or (
+                    state is not None and state.changed_paths() != reviewed_changes
+                ):
                     raise EzError("Worktree changed during review; review no longer applies")
                 if recorded != (
                     read_evidence(directory / "files.json"),
@@ -978,8 +1169,11 @@ class Engine:
                     != read_evidence(comparison / "worktree.diff")
                 ):
                     raise EzError("Worktree changed during review; review no longer applies")
-                if action == "accept":
-                    return parsed, audit.directory / "sessions" / f"{number:04d}"
+                if state is not None:
+                    state.verify_control()
+                if action == "accept" and not validation_failed:
+                    return parsed, reviewed
+                automatic_attempt = 0
             except (EzError, OSError, ValueError, KeyboardInterrupt) as exc:
                 primary_error = True
                 proposal.update(
@@ -1023,6 +1217,7 @@ class Engine:
                     )
 
     def validate(self, git: Git, audit: Audit, command: tuple[str, ...]) -> None:
+        self._validation_output: tuple[bytes, bytes] | None = None
         validation = Validation(command=list(command), status="running")
         audit.annotate(validation=validation)
         try:
@@ -1033,20 +1228,23 @@ class Engine:
             raise
         failure: EzError | None = None
         try:
-            result = subprocess.run(
+            runner = run_process if audit.view.get("interactive") else subprocess.run
+            arguments: dict[str, Any] = (
+                {} if audit.view.get("interactive") else {"capture_output": True, "check": False}
+            )
+            result = runner(
                 command,
                 cwd=git.path,
                 env=git_environment(),
-                capture_output=True,
                 timeout=self.config.timeout,
-                check=False,
+                **arguments,
             )
         except subprocess.TimeoutExpired as exc:
             validation["status"] = "timed_out"
             stdout, stderr = exc.stdout or b"", exc.stderr or b""
             failure = EzError("Validation command timed out")
             failure.__cause__ = exc
-        except (OSError, KeyboardInterrupt) as exc:
+        except (OSError, KeyboardInterrupt, ChildCleanupError) as exc:
             validation["status"] = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
             audit.annotate(validation=validation)
             raise
@@ -1056,6 +1254,7 @@ class Engine:
             validation["returncode"] = result.returncode
             if result.returncode:
                 failure = EzError(f"Validation failed with code {result.returncode}")
+        self._validation_output = stdout, stderr
         audit.annotate(validation=validation)
         audit.attempt(
             "validation stdout",

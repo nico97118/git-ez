@@ -31,8 +31,10 @@ when conflicts require resolution. Preserve an audit of changes, decisions,
 and reasons. No branches or worktrees are created; no fetch or push is
 performed.
 .PP
-A checked-out branch, clean checkout, and no active Git operation are
-required.
+A checked-out branch, clean checkout and no active Git operation are required.
+Commit or stash local changes with native Git before running git-ez. Autostash
+is unsupported: both operations pass --no-autostash, overriding rebase.autoStash
+and merge.autoStash without changing the saved configuration.
 The target is required and pinned at startup. Only simple rebase and merge are
 supported; arbitrary Git options are not forwarded. Interactive rebase,
 rebasing merge commits, merge --squash, --no-commit, octopus
@@ -52,8 +54,9 @@ its presence does not indicate an active run. Do not delete it during a run.
 Git operations and local changes are preserved for inspection and native
 recovery.
 .PP
-Rebase uses the merge backend with autostash, update-refs, and rebase-merges
-disabled. Merge uses --no-edit and respects Git's fast-forward policy. Git
+Rebase uses the merge backend with update-refs and rebase-merges disabled.
+Autostash is explicitly disabled for both operations. Merge uses --no-edit and
+respects Git's fast-forward policy. Git
 runs
 noninteractively with diff3 conflict markers. Hooks and signing are respected.
 Caller configuration is otherwise retained, except repository-redirection
@@ -317,6 +320,12 @@ Confidence threshold; default: 0.8
 .B ez.maxFileBytes
 Maximum proposal size and per-file review capture; default: 128 KiB
 .TP
+.B ez.validationAttempts
+Maximum automatic resolution/check attempts per interactive review cycle;
+default: 3.
+Human rejection or retry starts a fresh budget. Noninteractive policy is
+unchanged.
+.TP
 .B ez.maxRounds
 Maximum number of conflict stops; default: 100
 .TP
@@ -413,11 +422,15 @@ Published integration success or a compatible probe. For show: a readable
 journal, including a recorded failed or unfinished run.
 .TP
 .B 1
-Failed/interrupted admitted run, failed terminal publication, or failed probe.
+Failed admitted run, noninteractive interruption, failed publication, or failed
+probe.
 .TP
 .B 2
 Configuration, command-line, pre-admission, or delivery error. For show: no
 readable journal is available. Cached Markdown is not a fallback.
+.TP
+.B 130
+Interrupted interactive integration run (SIGINT).
 .SH EXAMPLES
 .nf
 git config --global ez.model exact-model-id
@@ -429,23 +442,71 @@ git ez rebase main --check python -B -m pytest
 .fi
 .SH INTERACTIVE PROPOSAL REVIEW
 .B --interactive
-is supported for merge and rebase. Review each harness proposal before engine
-staging: accept, revise with feedback, or stop. This is not Git's interactive
-rebase sequence editor. Revisions retain current proposed files and require
-fresh
-approval. Invalid input, EOF and interruption never accept.
+is supported for merge and rebase. One global approval covers all files in the
+current conflicting Git step. The complete diff and captured additions appear
+automatically. Choose accept, reject/reprompt with feedback, or quit. This is
+not
+Git's interactive rebase sequence editor. Empty input never accepts; EOF stops
+and Ctrl+C interrupts with exit status 130.
 .PP
-The display includes diffs, captured contents and capture limits, rationale and
-agent-reported checks and uncertainties. Final validation runs later. Approval
-still requires engine checks; changes during review invalidate approval.
-Each proposal, feedback and decision is retained in the audit separately from
-application. Stop preserves files, the index and the active operation for
-native
-Git inspection, continuation or abort. No rollback is performed.
+With --check, the engine runs validation against the entire provisional
+proposal
+before review. Failed checks feed diagnostics back to the harness, bounded by
+ez.validationAttempts. After exhaustion only retry with feedback or quit is
+available; acceptance is prohibited. Every attempt begins from the original
+conflict, with the previous proposal and diagnostics available as audit
+evidence.
+A user-directed cycle receives a fresh automatic budget. Final validation also
+runs after integration, as in noninteractive mode.
 .PP
-No conflicts means no prompt or model call. Resolutions already staged by
-rerere
-autoupdate do not pass through harness review.
+On acceptance, all reviewed paths are staged and their index blobs are checked
+using native Git clean filters. For those paths only, assume-unchanged and
+skip-worktree hints are temporarily cleared, then restored on surviving index
+entries. The index executable bit must also match each approved file. If
+core.fileMode=false causes Git to ignore an approved permission change, git-ez
+reports the mismatch and restores the conflict instead of continuing. A staging
+mismatch stops integration before Git continuation.
+.PP
+Quit and interruption restore the original tracked file content, modes and
+unmerged
+index, and preserve native merge/rebase metadata. They do not abort or reset
+the operation. Resolve manually, git add the files,
+and use native git rebase --continue or git commit. Each later conflict
+requires
+separate approval. Model commands and checks are terminated before
+restoration.
+Repeated SIGINT is ignored during restoration. A restoration failure is
+reported
+explicitly and the private temporary backup is retained for manual recovery.
+If child termination cannot be confirmed, restoration is not attempted and the
+backup is retained instead.
+.PP
+Interactive restoration covers paths tracked in the original conflict index.
+Regular tracked contents already represented by their stage-zero Git blob are
+restored from that blob; only other tracked contents, including exact conflict
+markers, require a private temporary copy. The index and native operation
+metadata are saved separately. No bundle, branch, stash or full worktree copy is
+created. Unrelated nontracked directories are not traversed.
+.PP
+Nontracked and ignored files are neither backed up nor removed. Model/check
+changes to these files, including newly created files, may persist after a
+retry, Quit or SIGINT. Checks must manage their own outputs outside the tracked set.
+If a nontracked file or directory blocks restoration of a tracked path, report
+an error and retain the backup rather than discarding the nontracked data.
+Tracked submodules and special filesystem files are unsupported. Avoid
+concurrent edits.
+Commands still run with host privileges: this is not an operating-system
+sandbox.
+SIGKILL, host crashes, escaped/daemonized child processes and external writes
+are
+outside this cleanup guarantee. There is no resumable git-ez session.
+.PP
+Engine confidence, file, reference and operation checks still apply. Changes
+during review invalidate approval. Each proposal, feedback and decision is
+retained in the audit separately from application. Noninteractive failures
+retain
+the existing best-effort behavior. No conflicts means no prompt or model call;
+native rerere autoupdate resolutions do not pass through harness review.
 .SH SEE ALSO
 .BR git (1),
 .BR git-config (1),

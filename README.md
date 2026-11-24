@@ -95,7 +95,8 @@ See the [configuration guide](docs/configuration.md), the
 
 ## Usage
 
-Start on a local branch with a clean checkout and no active Git operation.
+Start a new integration on a local branch with a clean checkout and no active Git
+operation.
 Commit or stash local changes yourself before running git-ez. Native autostash is
 disabled for both rebase and merge, even when enabled in Git configuration.
 The target must already exist locally; git-ez pins its revision when the run starts.
@@ -130,13 +131,20 @@ reject with feedback, or quit. A configured check runs before review, with up to
 `ez.validationAttempts` automatic attempts (default 3); a failing check blocks
 acceptance. Each rejection starts again from the original conflict with a fresh
 retry budget. Quit or Ctrl+C restores the original unresolved files and index so
-you can continue with native Git. Restoration covers files tracked at the conflict
-stop, the index and Git operation metadata. Existing Git blobs are reused; only
+you can resolve manually and continue with git-ez or native Git. Restoration covers
+files tracked at the conflict stop, the index and Git operation metadata. Existing Git blobs are reused; only
 tracked contents that differ from the index need a temporary copy. Nontracked and
 ignored files are neither backed up nor cleaned up: their check/model side effects
 can remain after Quit or a retry. Avoid concurrent edits during review. Engine
 checks still apply after acceptance. No conflicts means no model call or review
 prompt; resolutions already staged by native rerere continue without agent review.
+
+To resume an active operation started with git-ez or native Git, resolve the current
+conflict manually and stage it with `git add`, then run `git ez rebase --continue`
+or `git ez merge --continue`. Git handles that first continuation. Assistance resumes
+only if a rebase demonstrably reaches a new conflict; ambiguous stops remain manual.
+Repeat `--interactive` and other applicable options when resuming: no git-ez session
+state is persisted. See the [continuation reference](docs/workflows.md#continuing-an-active-operation).
 
 ## Supported scope and limitations
 
@@ -150,13 +158,14 @@ are not forwarded. See the [manual](docs/man/git-ez.1) and
 | Merge | Fast-forward policies, commit messages, shortlogs, cleanup, and incoming-tip signature verification |
 | Both | Commit signing, signoff, rerere autoupdate, proposal review, `--repo`, and `--check` |
 
-- One explicit target and a checked-out local branch are required. Detached HEAD,
-  bare repositories, unrelated histories, interactive rebase editing, rebasing
-  merge commits, merge `--squash` / `--no-commit`, octopus merges, and arbitrary
-  strategy options are unsupported. git-ez cannot attach to an existing operation.
-- Git runs noninteractively with `diff3` markers. Rebase uses the merge backend;
-  update-refs and rebase-merges are disabled. Autostash is disabled for both
-  operations. Autosquash requires an explicit option, and sequencer-backed rebases
+- New integrations require one explicit target and a checked-out local branch.
+  Detached HEAD, bare repositories, unrelated histories, interactive rebase editing,
+  rebasing merge commits, merge `--squash` / `--no-commit`, octopus merges, and arbitrary
+  strategy options are unsupported. `--continue` accepts an active operation in place
+  of a target.
+- New integrations and assisted resolution run Git noninteractively with `diff3`
+  markers. New rebases use the merge backend; update-refs and rebase-merges are
+  disabled. Autostash is disabled for both operations. Autosquash requires an explicit option, and sequencer-backed rebases
   override the instruction format.
   Pinned replay selection can change the upstream argument seen by pre-rebase
   hooks. Hooks and signing failures are not bypassed.
@@ -181,14 +190,16 @@ Git provides commit history and repository diffs. Audit files may contain sensit
 code and output. See the [audit guide](docs/audit.md) for artifacts and failure handling.
 
 Noninteractive failure or interruption preserves the actual local state. In
-interactive mode, leaving an unapproved proposal restores the original conflict. Inspect the report and `git status`, then use native Git to continue or
-abort an active merge or rebase. If integration completed and final validation
-failed, there is no active operation to continue or abort; inspect the resulting
+interactive mode, leaving an unapproved proposal restores the original conflict.
+Inspect the report and `git status`, then resolve and stage manually before using
+git-ez or native Git to continue; use native Git to abort. If integration completed
+and final validation failed, there is no active operation to continue or abort; inspect the resulting
 commits and validation output. Audit failures can also fail an otherwise completed
 integration. There is no agent session resume or crash recovery: checkpoints are
 in memory, and durable audit files are not a complete graph history.
 
-For integrations, exit `0` requires published success; `1` means a failed or
+Native continuation preserves Git’s exit status unless assistance or `--check` runs.
+For assisted integrations, exit `0` requires published success; `1` means a failed or
 interrupted run or failed terminal publication; `2` means a configuration, CLI or
 precondition error. Probes use `0` for compatibility and `1` for failure.
 For `audit show`, `0` means the saved journal was readable and `2` means it could not be

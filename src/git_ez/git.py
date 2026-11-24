@@ -120,8 +120,58 @@ class Git:
             return False
         return True
 
+    def merge_active(self) -> bool:
+        return self._has_marker("MERGE_HEAD")
+
     def rebase_active(self) -> bool:
         return any(self._has_marker(name) for name in ("rebase-merge", "rebase-apply"))
+
+    def rebase_metadata(self, backend: str, name: str) -> str:
+        from .sequence_editor import read_regular
+
+        path = Path(
+            self.text("rev-parse", "--path-format=absolute", "--git-path", f"{backend}/{name}")
+        )
+        return read_regular(path, 4096).decode("utf-8").strip()
+
+    def rebase_position(self) -> tuple[str, int, str] | None:
+        """Identify a replay stop conservatively across both native backends."""
+        from .sequence_editor import read_regular
+
+        for backend, counter, commit in (
+            ("rebase-merge", "msgnum", "stopped-sha"),
+            ("rebase-apply", "next", "original-commit"),
+        ):
+            if not self._has_marker(backend):
+                continue
+            try:
+                step = int(self.rebase_metadata(backend, counter))
+                oid = self.commit_oid(self.rebase_metadata(backend, commit))
+                if oid != self.commit_oid("REBASE_HEAD"):
+                    return None
+                if backend == "rebase-merge":
+                    path = Path(
+                        self.text(
+                            "rev-parse", "--path-format=absolute", "--git-path", f"{backend}/done"
+                        )
+                    )
+                    instruction = read_regular(path, 1_000_000).splitlines()[-1].split()
+                    if instruction[0] not in (b"pick", b"reword", b"squash", b"fixup"):
+                        return None
+                    if not oid.startswith(instruction[1].decode("ascii")):
+                        return None
+                return backend, step, oid
+            except (EzError, OSError, ValueError, IndexError, UnicodeError):
+                return None
+        return None
+
+    def continue_native(self, operation: str) -> int:
+        """Let Git own the first continuation, including editors and diagnostics."""
+        return subprocess.call(
+            ["git", operation, "--continue"],
+            cwd=self.path,
+            env={key: value for key, value in os.environ.items() if key not in REPOSITORY_ENV},
+        )
 
     def commit_oid(self, revision: str) -> str:
         return self.text("rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}")

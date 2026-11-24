@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, TypeVar, overload
 
 from . import __version__
+from .audit_report import safe_text
+from .audit_safety import redact_bytes
 from .config import Config
 from .engine import Engine
 from .errors import EzError
@@ -222,10 +224,24 @@ def _continuation_hint(engine: Engine, args: argparse.Namespace) -> None:
         command.extend(("--repo", str(args.repo)))
     if args.check:
         command.extend(("--check", *args.check))
+    # Native continuation may be interrupted before model configuration is loaded.
+    key = (
+        engine.git.run("config", "--get", "ez.apiKey", check=False)
+        .stdout.decode()
+        .removesuffix("\n")
+    )
+    key_env = (
+        engine.git.run("config", "--get", "ez.apiKeyEnv", check=False)
+        .stdout.decode()
+        .removesuffix("\n")
+    )
+    credentials = Config(api_key=key or None, api_key_env=key_env or "OPENAI_API_KEY")
+    secrets = (engine.config.resolved_api_key(), credentials.resolved_api_key())
+    command = [redact_bytes(argument.encode(), secrets).decode() for argument in command]
     print(
         f"{args.command.capitalize()} interrupted.\n\n"
         "Resolve the current conflict manually and stage the resolution, then resume with:\n\n"
-        f"  {shlex.join(command)}\n\nOr use native Git in the repository:\n\n"
+        f"  {safe_text(shlex.join(command))}\n\nOr use native Git in the repository:\n\n"
         f"  git {args.command} --continue",
         file=sys.stderr,
     )
@@ -308,8 +324,6 @@ def main(argv: list[str] | None = None) -> int:
                 rerere_autoupdate=args.rerere_autoupdate,
                 interactive=args.interactive,
             )
-        from .audit_report import safe_text
-
         print(f"Audit: {safe_text(audit.directory.name)}")
         print(f"Inspect: git ez audit show {safe_text(audit.directory.name)}")
         print(f"Status: {audit.view['status']}")

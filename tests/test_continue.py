@@ -371,3 +371,44 @@ def test_completed_native_integration_is_retained_when_journal_initialization_fa
     )
     assert "Integrated: True" in capfd.readouterr().out
     assert not repo.git.operation_active()
+
+
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+@pytest.mark.parametrize("key_source", ["config", "environment"])
+@pytest.mark.parametrize("native", [False, True])
+def test_interruption_hint_redacts_check_credentials_before_shell_quoting(
+    repo, operation, key_source, native, mocker, monkeypatch, capsys
+):
+    secret = "synthetic review's credential"
+    if not native:
+        repo.git.run("config", "ez.model", "test")
+    if key_source == "config":
+        repo.git.run("config", "ez.apiKey", secret)
+    else:
+        repo.git.run("config", "ez.apiKeyEnv", "GIT_EZ_TEST_KEY")
+        monkeypatch.setenv("GIT_EZ_TEST_KEY", secret)
+    if native:
+        start(repo, operation)
+        mocker.patch.object(Git, "continue_native", side_effect=KeyboardInterrupt)
+    else:
+        mocker.patch("git_ez.engine.AgentResolver", return_value=repo.resolver)
+        mocker.patch.object(repo.resolver, "run", side_effect=KeyboardInterrupt)
+    assert main(
+        [
+            operation,
+            "--continue" if native else "main",
+            "--repo",
+            str(repo.root),
+            "--check",
+            "validation-tool",
+            "--token",
+            secret,
+        ]
+    ) == (130 if native else 1)
+    output = capsys.readouterr()
+    assert "<redacted>" in output.err
+    assert "synthetic" not in output.err
+    assert "credential" not in output.err
+    assert "git ez " + operation + " --continue" in output.err
+    assert "--check validation-tool --token" in output.err
+    assert repo.git.operation_active()

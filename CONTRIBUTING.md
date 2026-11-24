@@ -127,6 +127,13 @@ checks are only required when executable behavior changes.
 
 ## Test suites and coverage
 
+Tests are grouped by behavior: native Git policies have dedicated modules, while
+`test_engine.py` covers core orchestration and repository guards. Interactive review,
+conflict restoration, validation, and checkout locking each have their own module.
+Shared fixtures live in `tests/conftest.py`, the deterministic resolver in
+`tests/fakes.py`, and the integration helper in `tests/helpers.py`. Keep scenario-specific
+helpers beside their tests, and do not import fixtures from another test module.
+
 Every test has exactly one `unit` or `integration` marker; collection rejects missing
 or overlapping categories. Unit tests isolate behavior without Git subprocesses,
 model runtimes, or network services. Integration tests exercise real Git, SDKs,

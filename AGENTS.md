@@ -147,7 +147,7 @@ uv sync --locked
 Start with the smallest relevant test selection for the changed behavior, for example:
 
 ```sh
-uv run --locked pytest tests/test_engine.py -k merge
+uv run --locked pytest tests/test_merge.py
 ```
 
 Select tests from the affected behavior and its callers, not only the edited file.

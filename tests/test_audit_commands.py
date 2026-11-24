@@ -18,7 +18,6 @@ from git_ez.audit_cli import consult
 from git_ez.cli import main
 from git_ez.engine import Engine
 from git_ez.errors import EzError
-from tests.test_engine import repo as repo
 
 pytestmark = pytest.mark.integration
 

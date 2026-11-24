@@ -13,6 +13,11 @@ installed distribution metadata. The installed transitive dependencies were also
 reviewed through their metadata and selected license files. This is not a complete
 review of every bundled native component or redistribution obligation.
 
+The test-only dependencies pytest-xdist and execnet declare MIT licensing in their
+distribution metadata and license files. These terms are compatible with GPLv3.
+They belong to the test dependency group and are not runtime requirements of the
+git-ez wheel.
+
 ### Open item: regex
 
 The locked regex distribution declares `Apache-2.0 AND CNRI-Python`. Its LICENSE.txt

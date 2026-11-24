@@ -9,9 +9,6 @@ from git_ez.cli import main, parser
 from git_ez.engine import Engine
 from git_ez.errors import EzError
 from git_ez.git import Git
-from tests.test_engine import repo as integration_repo
-
-repo = integration_repo
 
 pytestmark = pytest.mark.integration
 

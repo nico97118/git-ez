@@ -21,7 +21,7 @@ from .audit_safety import redact_bytes
 from .audit_storage import read_regular as read_evidence
 from .checks import WorktreeChecks
 from .config import Config
-from .conflict_state import ConflictState
+from .conflict_state import ConflictState, uninterrupted
 from .conflicts import Conflict, Decision, LowConfidence, text_diff
 from .errors import AuditError, EzError
 from .git import Git, Stage, git_environment
@@ -828,32 +828,36 @@ class Engine:
         state = ConflictState(git)
         conflict_count = len(audit.view["conflicts"])
         review_count = len(audit.view.get("reviews", []))
-        try:
-            with interrupt_children():
+        state.retained = True
+        with interrupt_children():
+            try:
                 self._resolve_conflicts(git, audit, stages, round_number, validation, state)
-        except ChildCleanupError as exc:
-            state.retained = True
-            raise EzError(
-                f"Child cleanup failed; conflict was not restored. Backup retained at "
-                f"{state.directory}: {exc}"
-            ) from exc
-        except BaseException:
-            state.restore()
-            for index in range(conflict_count, len(audit.view["conflicts"])):
-                audit.record("conflicts", index).update(
-                    restoration="original_conflict_restored", application="unmerged"
-                )
-            for index in range(review_count, len(audit.view.get("reviews", []))):
-                review = audit.record("reviews", index)
-                review.update(restoration="original_conflict_restored")
-                if review.get("application") == "staged":
-                    review.update(application="restored_unmerged")
-            audit.attempt("conflict restoration metadata", audit.save)
-            raise
-        finally:
-            # On failure restore() retains its backup if cleanup cannot complete.
-            if not state.retained:
-                state.close()
+                state.retained = False
+            except ChildCleanupError as exc:
+                state.retained = True
+                raise EzError(
+                    f"Child cleanup failed; conflict was not restored. Backup retained at "
+                    f"{state.directory}: {exc}"
+                ) from exc
+            except BaseException:
+                with uninterrupted():
+                    state.restore()
+                    state.retained = False
+                for index in range(conflict_count, len(audit.view["conflicts"])):
+                    audit.record("conflicts", index).update(
+                        restoration="original_conflict_restored", application="unmerged"
+                    )
+                for index in range(review_count, len(audit.view.get("reviews", []))):
+                    review = audit.record("reviews", index)
+                    review.update(restoration="original_conflict_restored")
+                    if review.get("application") == "staged":
+                        review.update(application="restored_unmerged")
+                audit.attempt("conflict restoration metadata", audit.save)
+                raise
+            finally:
+                # Delete only after approval or a completed restoration.
+                if not state.retained:
+                    state.close()
 
     def _resolve_conflicts(
         self,

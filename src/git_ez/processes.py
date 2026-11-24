@@ -49,6 +49,8 @@ def interrupt_children() -> Iterator[None]:
     _cancellation = cancellation
 
     def stop(signum: int, frame: object) -> None:
+        # Keep repeated interrupts ignored until the owner finishes restoration.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         cancellation.set()
         with uninterrupted():
             for child in list(_active):

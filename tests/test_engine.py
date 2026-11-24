@@ -3430,3 +3430,43 @@ def test_quit_keeps_native_split_index_readable_after_check_refresh(repo, mocker
     repo.git.run("add", "file.txt")
     repo.git.run("rebase", "--continue")
     assert not (repo.root / ".git/rebase-merge").exists()
+
+
+@pytest.mark.parametrize("decision", ["interrupt", "q"])
+def test_repeated_sigint_at_restore_entry_preserves_the_conflict(repo, mocker, decision):
+    import signal
+
+    from git_ez.conflict_state import ConflictState
+
+    previous_handler = signal.getsignal(signal.SIGINT)
+    restore = ConflictState.restore
+    states = []
+    count = 0
+    baselines = []
+
+    def interrupted_restore(state):
+        nonlocal count
+        count += 1
+        states.append(state)
+        if count == 1:
+            baselines.append(conflict_fingerprint(repo))
+        if count == 2:
+            # Deliver the repeated SIGINT before restore installs its temporary mask.
+            os.kill(os.getpid(), signal.SIGINT)
+        return restore(state)
+
+    def interrupt_review(prompt):
+        if decision == "interrupt":
+            os.kill(os.getpid(), signal.SIGINT)
+        return "q"
+
+    mocker.patch.object(ConflictState, "restore", interrupted_restore)
+    mocker.patch("builtins.input", side_effect=interrupt_review)
+    audit = Engine(repo.root, repo.config, repo.resolver).run("main", interactive=True)
+    assert audit.view["status"] == ("interrupted" if decision == "interrupt" else "failed")
+    assert "<<<<<<< HEAD" in repo.file.read_text()
+    assert not states[-1].directory.exists()
+    assert repo.git.conflicts()
+
+    assert conflict_fingerprint(repo) == baselines[0]
+    assert signal.getsignal(signal.SIGINT) == previous_handler

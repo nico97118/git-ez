@@ -87,7 +87,8 @@ class ConflictState:
             self.object_format = git.text("rev-parse", "--show-object-format")
             self.files: dict[str, SavedFile | None] = {}
             indexed: dict[str, str | None] = {}
-            for entry in git.run("ls-files", "--stage", "-z").stdout.split(b"\0"):
+            self.index_entries = git.run("ls-files", "--stage", "-z").stdout
+            for entry in self.index_entries.split(b"\0"):
                 if not entry:
                     continue
                 header, raw_name = entry.split(b"\t", 1)
@@ -119,6 +120,10 @@ class ConflictState:
                 else:
                     raise EzError(f"Cannot snapshot nonregular tracked file: {name}")
             shutil.copy2(self.index, self.directory / "index")
+            shared = git.text("rev-parse", "--shared-index-path")
+            self.shared_index = (git.path / shared).resolve() if shared else None
+            if self.shared_index is not None:
+                shutil.copy2(self.shared_index, self.directory / "shared-index")
             self.metadata = Path(git.text("rev-parse", "--absolute-git-dir"))
             self.control_names = (
                 "rebase-merge",
@@ -252,20 +257,28 @@ class ConflictState:
                         shutil.copy2(saved, target)
                     else:
                         remove(target)
-                descriptor, name = tempfile.mkstemp(prefix="index.ez-", dir=self.index.parent)
-                os.close(descriptor)
-                temporary = Path(name)
-                try:
-                    shutil.copy2(self.directory / "index", temporary)
-                    os.replace(temporary, self.index)
-                finally:
-                    temporary.unlink(missing_ok=True)
+                # Restore the dependency before publishing an index that references it.
+                if self.shared_index is not None:
+                    self._restore_index_file("shared-index", self.shared_index)
+                self._restore_index_file("index", self.index)
+                if self.git.run("ls-files", "--stage", "-z").stdout != self.index_entries:
+                    raise EzError("Restored Git index entries differ from the conflict snapshot")
         except Exception as exc:
             # Keep the private backup for manual recovery if restoration fails.
             self.retained = True
             raise EzError(
                 f"Conflict restoration failed; backup retained at {self.directory}: {exc}"
             ) from exc
+
+    def _restore_index_file(self, saved: str, target: Path) -> None:
+        descriptor, name = tempfile.mkstemp(prefix="index.ez-", dir=target.parent)
+        os.close(descriptor)
+        temporary = Path(name)
+        try:
+            shutil.copy2(self.directory / saved, temporary)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def close(self) -> None:
         with uninterrupted():

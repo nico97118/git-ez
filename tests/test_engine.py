@@ -3349,3 +3349,84 @@ def test_autostash_configuration_cannot_hide_final_validation_side_effects(
         prompt.assert_called_once()
     else:
         prompt.assert_not_called()
+
+
+def test_split_index_snapshot_survives_native_shared_index_replacement(repo):
+    from git_ez.conflict_state import ConflictState
+
+    repo.git.run("checkout", "main")
+    support = repo.root / "support.txt"
+    support.write_text("support\n")
+    repo.git.run("add", "support.txt")
+    repo.git.run("commit", "-m", "add support")
+    repo.git.run("checkout", "feature")
+    repo.git.run("config", "core.splitIndex", "true")
+    repo.git.run("config", "splitIndex.sharedIndexExpire", "now")
+    repo.git.run("config", "splitIndex.maxPercentChange", "0")
+    assert repo.git.run("rebase", "main", check=False).returncode
+    repo.git.run("update-index", "--split-index")
+    initial_shared = repo.git.text("rev-parse", "--shared-index-path")
+    baseline = conflict_fingerprint(repo)
+    initial_stages = repo.git.run("ls-files", "--stage", "-z").stdout
+    state = ConflictState(repo.git)
+    try:
+        repo.file.write_text("proposed\n")
+        info = support.stat()
+        os.utime(support, ns=(info.st_atime_ns, info.st_mtime_ns + 5_000_000_000))
+        repo.git.run("update-index", "--refresh", "--", "support.txt", check=False)
+        repo.git.run("update-index", "--split-index")
+        current_shared = repo.git.text("rev-parse", "--shared-index-path")
+        original_path = Path(initial_shared)
+        if not original_path.is_absolute():
+            original_path = repo.root / original_path
+        assert current_shared != initial_shared
+        assert not original_path.exists()
+        assert repo.git.run("ls-files", "--stage", "-z").stdout == initial_stages
+        state.restore()
+        restored = repo.git.run("ls-files", "--stage", "-z", check=False)
+        assert restored.returncode == 0
+        assert restored.stdout == initial_stages
+        assert conflict_fingerprint(repo) == baseline
+    finally:
+        state.close()
+
+
+def test_quit_keeps_native_split_index_readable_after_check_refresh(repo, mocker):
+    support = repo.root / "support.txt"
+    repo.git.run("checkout", "main")
+    support.write_text("support\n")
+    repo.git.run("add", "support.txt")
+    repo.git.run("commit", "-m", "add support")
+    repo.git.run("checkout", "feature")
+    repo.git.run("config", "core.splitIndex", "true")
+    repo.git.run("config", "splitIndex.sharedIndexExpire", "now")
+    repo.git.run("config", "splitIndex.maxPercentChange", "0")
+    baselines = []
+    original = repo.resolver.run
+
+    def resolve(git, audit, number, paths, check):
+        baselines.append(conflict_fingerprint(repo))
+        return original(git, audit, number, paths, check)
+
+    repo.resolver.run = resolve
+    command = (
+        sys.executable,
+        "-c",
+        "import os, subprocess; from pathlib import Path; p=Path('support.txt'); "
+        "s=p.stat(); os.utime(p, ns=(s.st_atime_ns,s.st_mtime_ns+5000000000)); "
+        "subprocess.run(['git','update-index','--refresh','--','support.txt'], "
+        "capture_output=True); "
+        "subprocess.run(['git','update-index','--split-index'],check=True)",
+    )
+    mocker.patch("builtins.input", return_value="q")
+    audit = Engine(repo.root, repo.config, repo.resolver).run(
+        "main", interactive=True, validation=command
+    )
+    result = repo.git.run("status", "--porcelain=v2", check=False)
+    assert result.returncode == 0
+    assert audit.view["reviews"][-1]["restoration"] == "original_conflict_restored"
+    assert conflict_fingerprint(repo) == baselines[0]
+    repo.file.write_text("manual resolution\n")
+    repo.git.run("add", "file.txt")
+    repo.git.run("rebase", "--continue")
+    assert not (repo.root / ".git/rebase-merge").exists()

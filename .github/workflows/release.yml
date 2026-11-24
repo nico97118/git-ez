@@ -1,0 +1,284 @@
+name: Release
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Build and test without creating a tag or publishing
+        type: boolean
+        default: true
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.event.pull_request.merge_commit_sha || github.sha }}
+  cancel-in-progress: false
+jobs:
+  plan:
+    permissions:
+      contents: read
+      actions: read
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.event.pull_request.head.ref, 'codex/release-v'))
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      version: ${{ steps.plan.outputs.version }}
+      wheelhouses: ${{ steps.plan.outputs.wheelhouses }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.11.2'
+          python-version: '3.12'
+          enable-cache: false
+      - name: Validate the release request and approval configuration
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH: ${{ github.event_name == 'pull_request' || !inputs.dry-run }}
+          REDISTRIBUTION_APPROVED: ${{ vars.WHEELHOUSE_REDISTRIBUTION_APPROVED }}
+        run: |
+          if [ "$PUBLISH" = true ] && [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo 'Publication must run from main' >&2
+            exit 1
+          fi
+          uv run --no-project python scripts/release.py plan >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          if [ "$PUBLISH" = true ]; then
+            approved=$(gh api "repos/$GITHUB_REPOSITORY/environments/release" \
+              --jq 'any(.protection_rules[]; .type == "required_reviewers" and (.reviewers | length > 0))')
+            if [ "$approved" != true ]; then
+              echo 'Configure required reviewers on the release environment before publishing.' >&2
+              exit 1
+            fi
+          fi
+          python - <<'PY'
+          import os
+          from scripts.release import read_request
+          request = read_request()
+          if request['wheelhouses'] != 'none' and os.environ['REDISTRIBUTION_APPROVED'] != 'true':
+              raise SystemExit('Resolve docs/licensing.md and set WHEELHOUSE_REDISTRIBUTION_APPROVED=true before distributing wheelhouses, including Actions artifacts')
+          PY
+  checks:
+    needs: plan
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+      full: true
+  distributions:
+    needs: plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.11.2'
+          python-version: '3.12'
+          enable-cache: false
+      - run: sudo apt-get update && sudo apt-get install --yes man-db
+      - run: uv sync --locked --no-default-groups
+      - run: uv build
+      - run: uv run --locked --no-default-groups python scripts/check_install.py dist/git_ez_ai-*.whl --test-source .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+  wheelhouses:
+    needs: [plan, distributions]
+    if: needs.plan.outputs.wheelhouses == 'all'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: linux-glibc2.39-x86_64-py312
+          - os: macos-15
+            target: macos15-arm64-py312
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.11.2'
+          python-version: '3.12'
+          enable-cache: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-distributions
+          path: dist/
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes man-db
+      - name: Collect and build the locked runtime wheels
+        env:
+          TARGET: ${{ matrix.target }}
+        run: uv run --no-project python scripts/wheelhouse.py dist/git_ez_ai-*.whl --output bundles --target "$TARGET"
+      - name: Install offline from the extracted archive and exercise the extension
+        run: |
+          mkdir extracted
+          tar -xzf bundles/*.tar.gz -C extracted
+          uv run --no-project python scripts/check_install.py extracted/*/wheels/git_ez_ai-*.whl --wheelhouse extracted/* --test-source .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheelhouse-${{ matrix.target }}
+          path: bundles/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+  freebsd-build:
+    needs: [plan, distributions]
+    if: needs.plan.outputs.wheelhouses != 'none'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-distributions
+          path: dist/
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: '15.1'
+          arch: x86_64
+          mem: 8192
+          sync: rsync
+          copyback: true
+          prepare: pkg install -y git uv python312 py312-sqlite3 rust pkgconf
+          run: |
+            set -eu
+            export CARGO_BUILD_JOBS=2 UV_CONCURRENT_BUILDS=2
+            /usr/local/bin/python3.12 scripts/wheelhouse.py dist/git_ez_ai-*.whl --output bundles --target freebsd15.1-amd64-py312
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheelhouse-freebsd15.1-amd64-py312
+          path: bundles/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+  freebsd-verify:
+    needs: [plan, freebsd-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheelhouse-freebsd15.1-amd64-py312
+          path: bundles/
+      - name: Verify in a separate VM without installing Rust or build dependencies
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: '15.1'
+          arch: x86_64
+          mem: 8192
+          sync: rsync
+          prepare: pkg install -y git uv python312 py312-sqlite3
+          run: |
+            set -eu
+            mkdir extracted
+            tar -xzf bundles/*.tar.gz -C extracted
+            /usr/local/bin/python3.12 scripts/check_install.py extracted/*/wheels/git_ez_ai-*.whl --wheelhouse extracted/* --test-source .
+  assemble:
+    needs: [plan, checks, distributions, wheelhouses, freebsd-verify]
+    if: >-
+      always() && !cancelled() && needs.plan.result == 'success' &&
+      needs.checks.result == 'success' && needs.distributions.result == 'success' &&
+      ((needs.plan.outputs.wheelhouses == 'none' && needs.wheelhouses.result == 'skipped' && needs.freebsd-verify.result == 'skipped') ||
+       (needs.plan.outputs.wheelhouses == 'freebsd' && needs.wheelhouses.result == 'skipped' && needs.freebsd-verify.result == 'success') ||
+       (needs.plan.outputs.wheelhouses == 'all' && needs.wheelhouses.result == 'success' && needs.freebsd-verify.result == 'success'))
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-distributions
+          path: assets/
+      - uses: actions/download-artifact@v8
+        if: needs.plan.outputs.wheelhouses != 'none'
+        with:
+          pattern: wheelhouse-*
+          merge-multiple: true
+          path: assets/
+      - name: Check the exact asset inventory and record checksums
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          WHEELHOUSES: ${{ needs.plan.outputs.wheelhouses }}
+          RELEASE_SHA: ${{ needs.plan.outputs.sha }}
+        run: python -m scripts.release_assets assemble assets
+      - uses: actions/upload-artifact@v7
+        id: upload
+        with:
+          name: release-bundle
+          path: assets/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Explain the pending approval
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          RELEASE_SHA: ${{ needs.plan.outputs.sha }}
+          PUBLISH: ${{ needs.plan.outputs.publish }}
+        run: |
+          {
+            echo "## Release v$VERSION"
+            echo "Commit: $RELEASE_SHA"
+            echo "Publication requested: $PUBLISH"
+            echo 'Download release-bundle and inspect the reports before approving the release environment.'
+            echo 'These exact files will be published; publication does not rebuild them.'
+            cat assets/SHA256SUMS
+          } >> "$GITHUB_STEP_SUMMARY"
+  publish:
+    needs: [plan, assemble]
+    if: >-
+      always() && !cancelled() && needs.assemble.result == 'success' &&
+      needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.assemble.outputs.artifact-id }}
+          path: assets/
+      - name: Publish the approved files without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          WHEELHOUSES: ${{ needs.plan.outputs.wheelhouses }}
+          RELEASE_SHA: ${{ needs.plan.outputs.sha }}
+          REDISTRIBUTION_APPROVED: ${{ vars.WHEELHOUSE_REDISTRIBUTION_APPROVED }}
+        run: python -m scripts.release_assets publish assets

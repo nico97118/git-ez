@@ -1,0 +1,86 @@
+name: Prepare release
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version change (current is useful for the first release)
+        type: choice
+        options: [current, patch, minor, major, explicit]
+        default: patch
+        required: true
+      version:
+        description: Explicit version, only when bump is explicit (e.g. 0.2.0rc1)
+        type: string
+      wheelhouses:
+        description: Wheelhouses (require the documented redistribution review)
+        type: choice
+        options: [none, freebsd, all]
+        default: none
+        required: true
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.11.2'
+          python-version: '3.12'
+          enable-cache: false
+      - name: Check that no release preparation is already open
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr list --limit 1000 --state open --base main --json headRefName > "$RUNNER_TEMP/open-prs.json"
+          python - "$RUNNER_TEMP/open-prs.json" <<'PY'
+          import json, sys
+          prs = json.load(open(sys.argv[1]))
+          if any(pr['headRefName'].startswith('codex/release-v') for pr in prs):
+              raise SystemExit('Merge or close the existing release preparation before starting another')
+          PY
+      - name: Prepare the version, request and release notes
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          VERSION: ${{ inputs.version }}
+          WHEELHOUSES: ${{ inputs.wheelhouses }}
+          REDISTRIBUTION_APPROVED: ${{ vars.WHEELHOUSE_REDISTRIBUTION_APPROVED }}
+        run: |
+          if [ "$WHEELHOUSES" != none ] && [ "$REDISTRIBUTION_APPROVED" != true ]; then
+            echo 'Resolve and document the review in docs/licensing.md before enabling wheelhouse redistribution.' >&2
+            exit 1
+          fi
+          uv run --no-project python scripts/release.py prepare \
+            --bump "$BUMP" --version "$VERSION" --wheelhouses "$WHEELHOUSES" >> "$GITHUB_OUTPUT"
+      - name: Open the preparation pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          branch="codex/release-v$VERSION"
+          git switch -c "$branch"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add pyproject.toml uv.lock .github/release-request.json .github/release-notes.md
+          git diff --cached --quiet && { echo 'Release preparation has no changes' >&2; exit 1; }
+          git commit -m "chore(release): prepare v$VERSION"
+          git push origin "$branch"
+          cp .github/release-notes.md "$RUNNER_TEMP/release-pr.md"
+          cat >> "$RUNNER_TEMP/release-pr.md" <<'EOF'
+
+          Merge this PR to build and test the exact merge commit. Publication then waits
+          for approval of the protected `release` environment. No tag is created before approval.
+          Review the requested wheelhouse targets in `.github/release-request.json`.
+          EOF
+          gh pr create --base main --head "$branch" --title "chore(release): prepare v$VERSION" \
+            --body-file "$RUNNER_TEMP/release-pr.md" >> "$GITHUB_STEP_SUMMARY"

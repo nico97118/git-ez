@@ -182,7 +182,7 @@ temporary repositories; the audit does not duplicate Git history.
 The pytest suite covers real temporary Git repositories, SDKs, TLS, and the agent graph.
 Installed-command tests use a deterministic local OpenAI-compatible HTTP server.
 No automated test calls a remote model. CI covers Python 3.11 through 3.14 on
-Linux and macOS. A single `ci.yml` workflow runs four independent jobs or job
+Linux and macOS. The `ci.yml` workflow runs four independent jobs or job
 families: `quality` (Ruff lint, formatting, and mypy on Ubuntu with Python 3.11),
 `tests` and `packages` for Linux/macOS, and `freebsd` for FreeBSD 15.1 amd64/Python
 3.12. The FreeBSD job shares one VM and dependency cache for the complete test
@@ -212,11 +212,13 @@ Branches other than `main` therefore receive automatic checks through pull reque
 Full runs execute every Monday at 04:17 UTC on the default branch, on pushes of tags
 matching `v*`, and through **Run workflow** (`workflow_dispatch`) on a selected ref.
 Use a manual full run before merging changes that need broader compatibility checks.
-Version tags trigger validation but do not publish a package; check the tag's full
-run before publishing its release. Publishing a GitHub release does not trigger a
-duplicate run.
+Version tag pushes trigger validation. The release workflows described below reuse
+`ci.yml` with an exact commit and the full matrix, independently of tag events.
+Tags created by their `GITHUB_TOKEN` do not start duplicate push workflows.
 A newer run cancels an older run for the same workflow, event type, and pull request
-or Git reference; push and pull-request runs do not cancel each other.
+or Git reference; push and pull-request runs do not cancel each other. Reusable
+full-matrix release checks are scoped to the exact commit and do not cancel older
+release checks.
 
 ## Packaging checks
 
@@ -263,3 +265,132 @@ lowercase English imperative and no trailing period. For example:
 Keep each commit working and reviewable, and describe the resulting behavior and
 relevant validation in the pull request. See [AGENTS.md](AGENTS.md) for the full
 commit conventions and validation requirements.
+
+## Preparing and publishing a release
+
+Versioning and publication are separate steps. `pyproject.toml` is the source of
+truth; the CLI reads the installed distribution metadata. Preparation uses
+`uv version --no-sync` to update the project and lockfile without upgrading
+runtime dependencies. A pull request keeps version changes reviewable and works
+with protected `main`; the automation does not bypass branch protection.
+
+### One-time GitHub configuration
+
+- Allow GitHub Actions to create pull requests in the repository's Actions settings.
+  The preparation workflow requests `contents: write` and `pull-requests: write`.
+- Create an environment named **release** with at least one **required reviewer**.
+  The workflow checks this configuration before a publishing run; merely naming
+  an environment in YAML does not enforce approval. To approve your own requests,
+  leave **Prevent self-review** disabled. Availability of required reviewers for
+  private repositories depends on the GitHub plan. See
+  [GitHub's environment reference](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments).
+- Leave `WHEELHOUSE_REDISTRIBUTION_APPROVED` unset initially. Before enabling it,
+  resolve and record the outstanding dependency review in [Licensing](docs/licensing.md),
+  including applicable third-party notices and bundled native components. Only then
+  set the repository Actions variable to `true`. Until then, wheelhouse requests
+  fail before building or uploading bundles, including dry runs. Individual git-ez
+  distributions remain available without this variable.
+
+No personal access token or PyPI credential is required. These workflows publish
+GitHub Releases only; they do not upload to PyPI or modify repository settings.
+
+### Request a release
+
+On `main`, run **Actions → Prepare release → Run workflow**. Choose `current`
+(for the first publication of the existing version), `patch`, `minor`, `major`,
+or `explicit`. An explicit version must be newer than the current project version;
+use canonical Python versions such as `0.2.0` or `0.2.0rc1`. Prereleases are marked
+as GitHub prereleases and do not become the latest stable release. Automatic
+inference from Conventional Commits is not implemented.
+
+Choose wheelhouses `none`, `freebsd`, or `all`. The workflow opens a
+`codex/release-v<VERSION>` branch and PR containing the version, locked dependencies,
+`.github/release-request.json`, and editable `.github/release-notes.md`. Review the
+notes and selection before merging. Only one preparation PR may be open at a time.
+If branch rules require CI checks, approve any GitHub workflow approval request on
+the bot-created PR. If necessary, run **checks** manually on that branch. See
+[GitHub's workflow triggering rules](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).
+
+Merging the preparation PR starts **Release** on its exact merge commit. It runs
+the full Linux/macOS Python 3.11–3.14 matrix, quality checks, and the experimental
+FreeBSD job. The release wheel is built once in a dedicated job; its installed CLI
+is also tested outside the checkout. Wheelhouses reuse that same wheel. Any required
+failure prevents the final bundle and publication, including a selected FreeBSD
+wheelhouse failure. Ordinary `main` CI may also run after the merge.
+
+Once successful, inspect **release-bundle**, its `release.json` and `SHA256SUMS`,
+and the workflow's reports. Use **Review deployments → Approve and deploy** to
+publish. Only this final job has release-writing permissions. It creates the tag
+on the tested commit, uploads the exact approved files to a draft, verifies the
+uploaded inventory, and publishes it. It never rebuilds after approval. Tag rules
+must permit this action. A failure can leave a tag or draft available for inspection;
+there is no automatic rollback. Re-running failed jobs can resume a draft for the
+same commit; a published release or a tag pointing elsewhere is never overwritten.
+Publication jobs are serialized, and an older candidate is refused if a newer
+stable release has already been published.
+
+For validation without publication, run **Release** manually with **dry-run**
+checked. It reads the checked-out release request, runs the same builds and tests,
+and uploads the final bundle, without a tag or an approval request. For a retry
+that may publish, select `main` and uncheck **dry-run**. Re-running the original
+failed run is preferable when `main` has advanced, because it retains the original
+commit. Download run artifacts before their 14-day expiry if approval or recovery
+will take longer. Published GitHub Release assets are separate from Actions artifacts.
+
+### Wheelhouse targets and checks
+
+The initial wheelhouse matrix intentionally uses CPython **3.12** only:
+
+| Selection | Build and installation target |
+| --- | --- |
+| `freebsd` | FreeBSD 15.1 amd64 |
+| `all` | FreeBSD above, Ubuntu 24.04 x86_64 (glibc 2.39), macOS 15 arm64 |
+
+These names identify tested targets, not a promise of compatibility with all
+Linux distributions, older systems, Intel macOS, other Python minors, or ARM64
+FreeBSD. Python, Git >= 2.38, and required system shared libraries remain external.
+FreeBSD requires the system Python SQLite module. The archive does not bundle a
+Python interpreter, Git, a model server, test tools, or a compiler.
+
+`scripts/wheelhouse.py` exports runtime-only requirements from `uv.lock`, retaining
+source hashes. It uses isolated, build-only `pip==25.3` through uv to download or
+build wheels because uv does not provide a wheelhouse collection command. No
+runtime dependency or lock version is added for that tool. Build backend/toolchain
+versions can affect locally compiled wheels; this is not a bit-reproducible build
+claim. The archive contains the wheel files, hashed target-specific requirements,
+lockfile, source requirements, declared license metadata, and installation guidance.
+Third-party license files remain inside their wheels.
+
+Verification extracts the archive and runs `scripts/check_install.py --wheelhouse`
+with `--offline --no-index --no-build --no-cache --require-hashes`. This phase
+installs runtime dependencies exclusively from the bundle and exercises imports,
+Git discovery, help/man pages, audits, and integration operations. CLI tests with
+a local model server then run against the installed wheel; their locked test-only
+dependencies are installed separately with network access and constrained to avoid
+changing the installed runtime. No external LLM is contacted. Linux/macOS verify
+in a fresh Python environment on the build runner. FreeBSD verifies in a separate
+VM job that installs Git, uv, Python and SQLite, without installing Rust or the
+build-only packages. `--no-build` forbids dependency builds even when the base
+system already provides a compiler. Shared-library loading failures block release;
+additional system-library requirements must be documented rather than concealed.
+
+After extracting a matching archive, install from its root with:
+
+```sh
+uv tool install --offline --no-index --no-build --no-cache \
+  --find-links ./wheels --constraint ./requirements.txt git-ez-ai==<VERSION>
+```
+
+Select an already-installed compatible interpreter with `--python` if needed.
+For local checks, after `uv build`, use:
+
+```sh
+uv run --locked python scripts/wheelhouse.py dist/git_ez_ai-*.whl \
+  --output dist/wheelhouses --target <SYSTEM-ARCH-PYTHON>
+# Extract the archive, then substitute its directory below:
+uv run --locked python scripts/check_install.py <DIR>/wheels/git_ez_ai-<VERSION>-py3-none-any.whl \
+  --wheelhouse <DIR> --test-source .
+```
+
+Building may download and compile dependencies. The offline verification applies
+to runtime installation, not the preceding build or separate test-tool setup.

@@ -18,8 +18,19 @@ from pathlib import Path
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("wheel", type=Path)
+    parser.add_argument(
+        "--wheelhouse",
+        type=Path,
+        help="Install exclusively from a wheelhouse with hashed requirements and an empty cache",
+    )
+    parser.add_argument(
+        "--test-source",
+        type=Path,
+        help="Also run CLI integration tests against the installed wheel using locked test tools",
+    )
     args = parser.parse_args()
     wheel = args.wheel.resolve(strict=True)
+    test_source = args.test_source.resolve(strict=True) if args.test_source is not None else None
     with tempfile.TemporaryDirectory(prefix="git-ez-install-") as temporary:
         root = Path(temporary).resolve(strict=True)
         environment = root / "environment"
@@ -35,8 +46,46 @@ def main() -> None:
             cwd=root,
         )
         python = environment / "bin/python"
+        install = ["uv", "pip", "install", "--python", str(python)]
+        if args.wheelhouse is None:
+            if test_source is not None:
+                runtime_requirements = root / "runtime-requirements.txt"
+                subprocess.run(
+                    [
+                        "uv",
+                        "export",
+                        "--project",
+                        str(test_source),
+                        "--locked",
+                        "--no-default-groups",
+                        "--no-emit-project",
+                        "--no-hashes",
+                        "--output-file",
+                        str(runtime_requirements),
+                    ],
+                    check=True,
+                )
+                install.extend(["--constraint", str(runtime_requirements)])
+            install.append(str(wheel))
+        else:
+            wheelhouse = args.wheelhouse.resolve(strict=True)
+            if wheel != wheelhouse / "wheels" / wheel.name:
+                raise ValueError("The tested wheel must belong to the wheelhouse")
+            install.extend(
+                [
+                    "--offline",
+                    "--no-index",
+                    "--no-build",
+                    "--no-cache",
+                    "--require-hashes",
+                    "--find-links",
+                    str(wheelhouse / "wheels"),
+                    "--requirement",
+                    str(wheelhouse / "requirements.txt"),
+                ]
+            )
         subprocess.run(
-            ["uv", "pip", "install", "--python", str(python), str(wheel)],
+            install,
             check=True,
             cwd=root,
         )
@@ -222,6 +271,66 @@ def main() -> None:
                 run("git", "ez", "audit", "show", "--path", str(archive))
             if (archived_success / "run.json").read_bytes() != manifest:
                 raise RuntimeError("Relocated audit reading modified its historical manifest")
+        if test_source is not None:
+            source = test_source
+            requirements = root / "test-requirements.txt"
+            constraints = root / "installed-constraints.txt"
+            subprocess.run(
+                [
+                    "uv",
+                    "export",
+                    "--project",
+                    str(source),
+                    "--locked",
+                    "--only-group",
+                    "test",
+                    "--no-emit-project",
+                    "--output-file",
+                    str(requirements),
+                ],
+                check=True,
+            )
+            frozen = subprocess.run(
+                ["uv", "pip", "freeze", "--python", str(python)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            constraints.write_text(frozen.stdout)
+            subprocess.run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--python",
+                    str(python),
+                    "--constraint",
+                    str(constraints),
+                    "--requirement",
+                    str(requirements),
+                ],
+                check=True,
+                cwd=root,
+            )
+            # Make test helpers importable, without exposing the checkout's src/ package.
+            test_env = dict(env, PYTHONPATH=str(source))
+            subprocess.run(
+                [
+                    str(python),
+                    "-m",
+                    "pytest",
+                    str(source / "tests/test_cli.py"),
+                    "-c",
+                    str(source / "pyproject.toml"),
+                    "-o",
+                    "pythonpath=",
+                    "--import-mode=importlib",
+                    "-v",
+                ],
+                check=True,
+                cwd=root,
+                env=test_env,
+            )
         print(
             "Installed wheel: imports, Git discovery, help, manual, audits, "
             "merge, autosquash, cherry-pick passed"

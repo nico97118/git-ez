@@ -2619,3 +2619,90 @@ def test_executed_child_does_not_keep_checkout_locked(repo):
             assert child.poll() is None
     finally:
         child.communicate("exit\n", timeout=30)
+
+
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+@pytest.mark.parametrize("interactive", [False, True])
+@pytest.mark.parametrize("kind", ["unstaged", "staged", "untracked"])
+def test_autostash_configuration_never_bypasses_clean_checkout_precondition(
+    repo, mocker, operation, interactive, kind
+):
+    repo.git.run("config", f"{operation}.autoStash", "true")
+    if kind == "untracked":
+        (repo.root / "user-notes").write_text("private notes\n")
+    else:
+        repo.file.write_text("local changes\n")
+        if kind == "staged":
+            repo.git.run("add", "file.txt")
+    before = repo.git.run("status", "--porcelain=v2", "--untracked-files=all").stdout
+    index = repo.git.run("ls-files", "--stage", "-z").stdout
+    prompt = mocker.patch("builtins.input")
+    with pytest.raises(EzError, match="Repository must be clean"):
+        integrate(repo, operation, interactive=interactive)
+    assert repo.git.run("status", "--porcelain=v2", "--untracked-files=all").stdout == before
+    assert repo.git.run("ls-files", "--stage", "-z").stdout == index
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert not repo.git.operation_active()
+    assert not repo.git.run("stash", "list").stdout
+    assert not (repo.root / ".git/ez/runs").exists()
+    assert repo.resolver.calls == []
+    prompt.assert_not_called()
+    if kind == "untracked":
+        assert (repo.root / "user-notes").read_text() == "private notes\n"
+    else:
+        assert repo.file.read_text() == "local changes\n"
+
+
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+@pytest.mark.parametrize("action", ["accept", "automatic"])
+def test_native_git_autostash_is_explicitly_disabled_without_changing_configuration(
+    repo, mocker, operation, action
+):
+    repo.git.run("config", f"{operation}.autoStash", "true")
+    run = Git.run
+    initial = []
+
+    def observe(git, *args, **kwargs):
+        if args[0] == operation and "--continue" not in args:
+            initial.append(args)
+        return run(git, *args, **kwargs)
+
+    mocker.patch.object(Git, "run", observe)
+    mocker.patch("builtins.input", return_value="q" if action == "quit" else "a")
+    audit = integrate(repo, operation, interactive=action != "automatic")
+    assert audit.view["status"] == ("failed" if action == "quit" else "succeeded"), audit.view
+    assert len(initial) == 1 and "--no-autostash" in initial[0]
+    assert repo.git.text("config", "--bool", "--get", f"{operation}.autoStash") == "true"
+    assert not repo.git.run("stash", "list").stdout
+    marker = "rebase-merge/autostash" if operation == "rebase" else "MERGE_AUTOSTASH"
+    assert not Path(
+        repo.git.text("rev-parse", "--path-format=absolute", "--git-path", marker)
+    ).exists()
+
+
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+@pytest.mark.parametrize("interactive", [False])
+def test_autostash_configuration_cannot_hide_final_validation_side_effects(
+    repo, mocker, operation, interactive
+):
+    repo.git.run("config", f"{operation}.autoStash", "true")
+    (repo.root / ".git/info/exclude").write_text("check-counter\n")
+    command = (
+        sys.executable,
+        "-c",
+        "from pathlib import Path; p=Path('check-counter'); "
+        "n=int(p.read_text())+1 if p.exists() else 1; p.write_text(str(n)); "
+        "Path('file.txt').write_text('checked-'+str(n)+'\\n')",
+    )
+    prompt = mocker.patch("builtins.input", return_value="a")
+    audit = integrate(repo, operation, interactive=interactive, validation=command)
+    assert audit.view["status"] == "failed", audit.view
+    assert audit.view["integrated"]
+    assert "Repository must be clean" in audit.view["error"]
+    assert repo.git.text("show", "HEAD:file.txt") == ("checked-1" if interactive else "combined")
+    assert repo.file.read_text() == ("checked-2\n" if interactive else "checked-1\n")
+    assert not repo.git.operation_active()
+    if interactive:
+        prompt.assert_called_once()
+    else:
+        prompt.assert_not_called()

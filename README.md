@@ -95,8 +95,10 @@ See the [configuration guide](docs/configuration.md), the
 
 ## Usage
 
-Start on a local branch with a clean checkout and no active Git operation. The
-target must already exist locally; git-ez pins its revision when the run starts.
+Start on a local branch with a clean checkout and no active Git operation.
+Commit or stash local changes yourself before running git-ez. Native autostash is
+disabled for both rebase and merge, even when enabled in Git configuration.
+The target must already exist locally; git-ez pins its revision when the run starts.
 
 ```bash
 # Check model/tool compatibility without exposing the repository or shell tools:
@@ -145,8 +147,9 @@ are not forwarded. See the [manual](docs/man/git-ez.1) and
   merge commits, merge `--squash` / `--no-commit`, octopus merges, and arbitrary
   strategy options are unsupported. git-ez cannot attach to an existing operation.
 - Git runs noninteractively with `diff3` markers. Rebase uses the merge backend;
-  autostash, update-refs, and rebase-merges are disabled. Autosquash requires an
-  explicit option, and sequencer-backed rebases override the instruction format.
+  update-refs and rebase-merges are disabled. Autostash is disabled for both
+  operations. Autosquash requires an explicit option, and sequencer-backed rebases
+  override the instruction format.
   Pinned replay selection can change the upstream argument seen by pre-rebase
   hooks. Hooks and signing failures are not bypassed.
 - Regular UTF-8 conflicts are supported, including textual deletions and renames.

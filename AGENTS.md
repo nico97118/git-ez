@@ -13,6 +13,7 @@ resolution and an inspectable audit of changes, decisions, and reasons.
 - Use native Git configuration under `ez.*`, respecting Git scopes and includes.
 - Operate on the user's current checkout and branch. Do not add automatic fetch,
   push, backup branches, or worktree creation.
+- Require a clean checkout and disable native autostash for both rebase and merge.
 - Invoke the LLM only when conflicts require resolution.
 - Keep the supported command subset explicit in the README and manual. Do not
   imply that arbitrary native Git flags are forwarded or that every Git workflow

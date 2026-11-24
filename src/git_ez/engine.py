@@ -287,6 +287,8 @@ class Engine:
             raise EzError("A local branch must be checked out")
         if git.operation_active():
             raise EzError("A Git operation is already in progress")
+        if git.conflicts():
+            raise EzError("Unmerged index entries require manual resolution")
         if git.run("status", "--porcelain", "--untracked-files=all").stdout:
             raise EzError("Repository must be clean before integration")
         git.run("var", "GIT_AUTHOR_IDENT")
@@ -513,7 +515,12 @@ class Engine:
             merge_ff = audit.view["merge_ff"]
             flags = (f"--{merge_ff}",) if merge_ff is not None else ()
             result = step(
-                "merge", "--no-edit", *flags, *commit_options.flags(), audit.view["target_oid"]
+                "merge",
+                "--no-autostash",
+                "--no-edit",
+                *flags,
+                *commit_options.flags(),
+                audit.view["target_oid"],
             )
         rounds = 0
         while result.returncode:

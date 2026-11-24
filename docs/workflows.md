@@ -75,6 +75,10 @@ For existing scripts, replace `git ez probe --output report.json` with
 Exit codes: `0` = successful local integration, displayed report, or compatible probe;
 `1` = failed run/probe; `2` = configuration, CLI, or precondition error.
 
+Both operations explicitly disable native autostash, even when rebase.autoStash
+or merge.autoStash is configured. Commit or stash local changes with native Git
+before starting git-ez; it does not manage a stash for you.
+
 ### Interactive proposal review
 
 Use `git ez merge <target> --interactive` or `git ez rebase <target> --interactive`
@@ -105,7 +109,7 @@ its own small command-line interface; it does not forward arbitrary options to
 | Contract | Behavior |
 | --- | --- |
 | Target | One explicit revision is required, even when the branch has an upstream. It must already be available locally. |
-| Repository | A clean checkout on a local branch, with no active Git operation. Detached HEAD and bare repositories are unsupported. |
+| Repository | A clean checkout on a local branch with no active Git operation. Autostash is disabled. Detached HEAD and bare repositories are unsupported. |
 | Rebase | Replay the current branch using Git's merge backend. Use `--onto` for a separate new base or `--keep-base` to retain the unique common ancestor. Autostash, update-refs, and rebasing merge commits are disabled. |
 | Merge | Integrate one pinned target with `--no-edit`; Git's fast-forward policy still applies. |
 | Interaction | Git runs noninteractively with `diff3` conflict markers. Hooks and signing failures are not bypassed. |

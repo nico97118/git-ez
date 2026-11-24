@@ -382,9 +382,10 @@ an automatic retry. A wholly native continuation needs no model configuration an
 creates no new resolution journal, unless --check requests final validation.
 .PP
 Only --interactive, --repo and --check may accompany --continue. Repeat these
-options explicitly; no CLI options or git-ez session state are persisted. Git retains
-the operation's native settings. --check requires valid git-ez configuration and
-runs after completion, including a wholly native continuation; it also participates
+options explicitly; git-ez does not restore options from prior runs or persist
+session recovery state. Assistance and requested validation retain their normal
+audit journals. Git retains the operation's native settings. --check requires valid
+git-ez configuration and runs after completion, including a wholly native continuation; it also participates
 in assisted resolution when needed. Once assistance resumes, the normal resolution,
 review, validation, audit and exit-status policies apply. --abort and --skip remain
 native Git commands. Interruption hints include the applicable current options

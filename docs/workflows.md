@@ -140,9 +140,11 @@ needed. `--check` runs final validation after completion, including a wholly nat
 continuation, and also participates in assisted resolution when needed. It requires
 valid git-ez configuration. Other integration options and a target cannot
 be combined with `--continue`; Git retains the active operation's native settings.
-No CLI arguments or recovery state are saved. Continuation does not require model
-configuration or create a new resolution journal unless assistance or `--check` runs. Prior
-journals remain available independently. `--abort` and `--skip` remain native Git commands.
+git-ez does not restore CLI options from prior runs or save session recovery state.
+Assistance and requested validation retain their normal audit journals. Continuation
+does not require model configuration or create a new resolution journal unless
+assistance or `--check` runs. Prior journals remain available independently.
+`--abort` and `--skip` remain native Git commands.
 
 ## Supported Git workflow
 

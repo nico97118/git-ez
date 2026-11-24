@@ -1039,9 +1039,11 @@ class Engine:
         checks = WorktreeChecks(self.config)
         before_agent = checks.baseline(git)
         original_index = git.run("ls-files", "--stage", "-z").stdout
+        automatic_attempt = 0
         while True:
             if state is not None:
                 state.restore()
+            automatic_attempt += 1
             if feedback is not None:
                 feedback = redact_bytes(
                     feedback.encode(), (self.config.resolved_api_key(),)
@@ -1070,6 +1072,33 @@ class Engine:
                 proposal.update(resolution=asdict(parsed))
                 checks.guard(git, audit, head, branch)
                 checks.verify(git, paths, before_agent)
+                validation_failed = False
+                diagnostic = None
+                if validation:
+                    try:
+                        self.validate(git, audit, validation)
+                    except ChildCleanupError:
+                        raise
+                    except EzError as exc:
+                        validation_failed = True
+                        diagnostic = str(exc)
+                        output = self._validation_output
+                        if output is None:
+                            diagnostic += "\nValidation output unavailable."
+                        else:
+                            for stream in output:
+                                diagnostic += "\n" + stream[: self.config.tool_output_bytes].decode(
+                                    errors="replace"
+                                )
+                                if len(stream) > self.config.tool_output_bytes:
+                                    diagnostic += "\n[Validation diagnostic truncated]"
+                    if diagnostic is not None:
+                        diagnostic = redact_bytes(
+                            diagnostic.encode(), (self.config.resolved_api_key(),)
+                        ).decode()
+                    proposal.update(validation=dict(audit.view["validation"]))
+                    proposal.update(validation_diagnostic=diagnostic)
+                checks.guard(git, audit, head, branch)
                 if git.run("ls-files", "--stage", "-z").stdout != original_index:
                     raise EzError("Index changed before approval; integration stopped")
                 if state is not None:
@@ -1081,7 +1110,12 @@ class Engine:
                     capture_proposal(audit, git, directory, self.config.max_file_bytes, selected)
                 proposal.update(status="proposed")
                 audit.save()
-                checks.verify(git, selected, before_agent)
+                if validation_failed and automatic_attempt < self.config.validation_attempts:
+                    proposal.update(status="check_failed", decision="automatic_retry")
+                    feedback = f"Previous check failed. Correct the resolution:\n{diagnostic}"
+                    continue
+                if not validation_failed:
+                    checks.verify(git, selected, before_agent)
                 reviewed = checks.fingerprints(git, selected)
                 reviewed_changes = state.changed_paths() if state is not None else []
                 review_baseline = checks.baseline(git)
@@ -1094,6 +1128,8 @@ class Engine:
                     directory,
                     parsed,
                     (self.config.resolved_api_key(),),
+                    validation_failed=validation_failed,
+                    diagnostic=diagnostic,
                 )
                 proposal.update(decision=action)
                 proposal.update(user_feedback=feedback)
@@ -1125,8 +1161,9 @@ class Engine:
                     raise EzError("Worktree changed during review; review no longer applies")
                 if state is not None:
                     state.verify_control()
-                if action == "accept":
+                if action == "accept" and not validation_failed:
                     return parsed, reviewed
+                automatic_attempt = 0
             except (EzError, OSError, ValueError, KeyboardInterrupt) as exc:
                 primary_error = True
                 proposal.update(
@@ -1170,6 +1207,7 @@ class Engine:
                     )
 
     def validate(self, git: Git, audit: Audit, command: tuple[str, ...]) -> None:
+        self._validation_output: tuple[bytes, bytes] | None = None
         validation = Validation(command=list(command), status="running")
         audit.annotate(validation=validation)
         try:
@@ -1206,6 +1244,7 @@ class Engine:
             validation["returncode"] = result.returncode
             if result.returncode:
                 failure = EzError(f"Validation failed with code {result.returncode}")
+        self._validation_output = stdout, stderr
         audit.annotate(validation=validation)
         audit.attempt(
             "validation stdout",

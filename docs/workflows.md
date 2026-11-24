@@ -85,13 +85,16 @@ Use `git ez merge <target> --interactive` or `git ez rebase <target> --interacti
 to review each harness proposal before the engine stages it. This reviews conflict
 resolutions; it does not open Git's interactive rebase sequence editor.
 
-The terminal automatically shows the global diff, captured contents (including
-additions), and the agent's rationale. Choose **accept**, **reject/reprompt** with
-feedback, or **quit**. Revisions start from the original tracked conflict baseline
-with the previous proposal available as evidence. Empty or invalid input never
-accepts; EOF quits and Ctrl+C interrupts (status 130). Engine confidence, file,
-reference and operation checks still apply. Changes during review invalidate
-approval. Each attempt and decision is retained in the audit. Final validation
+The terminal automatically shows the global diff, captured file contents (including
+additions), and the agent's rationale. With `--check`, the engine validates before
+review and feeds failures back to the harness for up to `ez.validationAttempts`
+attempts (default 3). A failing check permits only retry with feedback or quit.
+Choose **accept**, **reject/reprompt** (then enter feedback), or **quit**. Revisions
+start from the original conflict baseline with a fresh automatic retry budget.
+Empty or invalid input never accepts; EOF quits and Ctrl+C interrupts (status 130).
+Engine confidence, file, reference and operation checks still apply. Changes during
+review invalidate approval. Each attempt, feedback and decision is retained in the
+audit; acceptance and application are recorded separately. Final validation also
 runs after integration.
 
 Quit restores original unresolved files, file modes and index stages while keeping

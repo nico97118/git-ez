@@ -320,6 +320,12 @@ Confidence threshold; default: 0.8
 .B ez.maxFileBytes
 Maximum proposal size and per-file review capture; default: 128 KiB
 .TP
+.B ez.validationAttempts
+Maximum automatic resolution/check attempts per interactive review cycle;
+default: 3.
+Human rejection or retry starts a fresh budget. Noninteractive policy is
+unchanged.
+.TP
 .B ez.maxRounds
 Maximum number of conflict stops; default: 100
 .TP
@@ -443,8 +449,14 @@ not
 Git's interactive rebase sequence editor. Empty input never accepts; EOF stops
 and Ctrl+C interrupts with exit status 130.
 .PP
-Each revision starts from the original tracked conflict baseline, with the
-previous proposal and user feedback available to the harness. Final validation
+With --check, the engine runs validation against the entire provisional
+proposal
+before review. Failed checks feed diagnostics back to the harness, bounded by
+ez.validationAttempts. After exhaustion only retry with feedback or quit is
+available; acceptance is prohibited. Every attempt begins from the original
+conflict, with the previous proposal and diagnostics available as audit
+evidence.
+A user-directed cycle receives a fresh automatic budget. Final validation also
 runs after integration, as in noninteractive mode.
 .PP
 On acceptance, all reviewed paths are staged and their index blobs are checked

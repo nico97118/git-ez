@@ -2416,10 +2416,10 @@ class Resolver(FakeResolver):
 preflight = Engine._check_repository
 validate = Engine.validate
 finalize = Audit.finalize
-def checked(self):
+def checked(self, **kwargs):
     if phase == 'preflight':
         pause()
-    return preflight(self)
+    return preflight(self, **kwargs)
 def validated(self, *args):
     pause()
     return validate(self, *args)
@@ -2427,7 +2427,7 @@ def finalized(self):
     if phase == 'finalization':
         pause()
     return finalize(self)
-def reviewed(*args):
+def reviewed(*args, **kwargs):
     pause()
     return 'accept', None
 
@@ -2714,6 +2714,98 @@ def test_interactive_quit_restores_native_conflict_and_can_continue(repo, mocker
     assert not repo.git.operation_active()
 
 
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+@pytest.mark.parametrize("eventual_success", [True, False])
+def test_interactive_check_correction_and_fresh_feedback_budget(
+    repo, mocker, capsys, operation, eventual_success
+):
+    from dataclasses import replace
+
+    repo.config = replace(repo.config, validation_attempts=2, api_key="synthetic-validation-secret")
+    original = repo.resolver.run
+    baselines = []
+    feedback = []
+
+    def resolve(git, audit, number, paths, check):
+        baselines.append(conflict_fingerprint(repo))
+        feedback.append(audit.view["reviews"][-1]["feedback"])
+        result = original(git, audit, number, paths, check)
+        repo.file.write_text("good\n" if eventual_success and number == 2 else "bad\n")
+        return result
+
+    repo.resolver.run = resolve
+    # The check creates, deletes and modifies files outside the conflict set.
+    (repo.root / ".git" / "info" / "exclude").write_text("ignored*\n")
+    (repo.root / "ignored-existing").write_text("keep me")
+    command = (
+        sys.executable,
+        "-c",
+        "from pathlib import Path; "
+        "Path('ignored-existing').unlink(missing_ok=True); "
+        "Path('ignored-new').write_text('generated'); "
+        "print('validation diagnostic synthetic-validation-secret'); "
+        "raise SystemExit(0 if Path('file.txt').read_text() == 'good\\n' else 1)",
+    )
+    answers = iter(["a"] if eventual_success else ["a", "r", "preserve compatibility", "q"])
+    prompt_count = []
+
+    def read(prompt):
+        prompt_count.append(prompt)
+        return next(answers)
+
+    mocker.patch("builtins.input", side_effect=read)
+    audit = integrate(repo, operation, interactive=True, validation=command)
+    output = capsys.readouterr().out
+    assert all(baseline == baselines[0] for baseline in baselines)
+    assert "synthetic-validation-secret" not in str(feedback)
+    assert "synthetic-validation-secret" not in output
+    assert not (repo.root / "ignored-existing").exists()
+    assert (repo.root / "ignored-new").read_text() == "generated"
+    if eventual_success:
+        assert audit.view["status"] == "succeeded", audit.view
+        assert audit.view["reviews"][-1]["decision"] == "accept"
+        assert len(baselines) == 2
+        assert "ignored-new" not in output
+    else:
+        assert audit.view["status"] == "failed"
+        assert len(baselines) == 4
+        assert "preserve compatibility" in feedback
+        assert "cannot be accepted" in output
+        assert "validation diagnostic" in output
+        assert conflict_fingerprint(repo) == baselines[0]
+        assert len(prompt_count) == 4
+
+
+@pytest.mark.parametrize("phase", ["resolver", "check"])
+def test_interactive_sigint_waits_for_mutating_child_and_restores(repo, mocker, phase):
+    from git_ez.processes import run_process
+
+    original = repo.resolver.run
+    baseline = []
+    command = (
+        sys.executable,
+        "-c",
+        "import os, signal, time; from pathlib import Path; "
+        "Path('file.txt').write_text('child mutation'); "
+        "os.kill(os.getppid(), signal.SIGINT); time.sleep(1); "
+        "Path('late-artifact').write_text('unsafe')",
+    )
+
+    def resolve(git, audit, number, paths, check):
+        baseline.append(conflict_fingerprint(repo))
+        result = original(git, audit, number, paths, check)
+        if phase == "resolver":
+            run_process(command, cwd=repo.root, env=dict(os.environ), timeout=5)
+        return result
+
+    repo.resolver.run = resolve
+    prompt = mocker.patch("builtins.input", return_value="a")
+    audit = integrate(repo, interactive=True, validation=command if phase == "check" else ())
+    assert audit.view["status"] == "interrupted", audit.view
+    assert conflict_fingerprint(repo) == baseline[0]
+    prompt.assert_not_called()
+
+
 def test_interactive_restoration_failure_is_reported_and_backup_retained(repo, mocker):
     import shutil
 
@@ -2793,6 +2885,54 @@ def test_interactive_quit_restores_modes_links_and_ignores_repeated_sigint(repo,
     assert repo.file.stat().st_mode & 0o777 == 0o644
     assert link.is_symlink()
     assert outside.read_text() == "unrelated"
+
+
+def test_interactive_rejects_check_that_changes_git_operation_metadata(repo, mocker):
+    prompt = mocker.patch("builtins.input", return_value="a")
+    command = (
+        sys.executable,
+        "-c",
+        "from pathlib import Path; "
+        "Path('.git/rebase-merge/git-rebase-todo').write_text('invalid command')",
+    )
+    audit = integrate(repo, interactive=True, validation=command)
+    assert audit.view["status"] == "failed"
+    assert "Git operation metadata changed" in audit.view["error"]
+    assert "invalid command" not in (repo.root / ".git/rebase-merge/git-rebase-todo").read_text()
+    assert repo.git.conflicts()
+    prompt.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
+def test_interactive_quit_restores_check_side_effects_on_clean_tracked_files(
+    repo, mocker, operation
+):
+    repo.git.run("checkout", "main")
+    (repo.root / "support.txt").write_text("original support\n")
+    (repo.root / "removed.txt").write_text("original removed\n")
+    repo.git.run("add", ".")
+    repo.git.run("commit", "-m", "add supporting files")
+    repo.git.run("checkout", "feature")
+    baseline = []
+    original = repo.resolver.run
+
+    def resolve(git, audit, number, paths, check):
+        baseline.append(conflict_fingerprint(repo))
+        return original(git, audit, number, paths, check)
+
+    repo.resolver.run = resolve
+    mocker.patch("builtins.input", return_value="q")
+    command = (
+        sys.executable,
+        "-c",
+        "from pathlib import Path; "
+        "Path('support.txt').write_text('modified'); Path('removed.txt').unlink(); "
+        "Path('created.txt').write_text('created')",
+    )
+    audit = integrate(repo, operation, interactive=True, validation=command)
+    assert audit.view["status"] == "failed", audit.view
+    assert conflict_fingerprint(repo) == baseline[0]
+    assert (repo.root / "created.txt").read_text() == "created"
 
 
 @pytest.mark.parametrize("interactive", [False, True])
@@ -2970,6 +3110,62 @@ def test_conflict_restore_preserves_nontracked_data_blocking_a_tracked_path(repo
         state.close()
 
 
+def test_interactive_check_cleanup_failure_never_retries_or_restores_with_live_child(repo, mocker):
+    import shutil
+
+    from git_ez.conflict_state import ConflictState
+    from git_ez.processes import ChildCleanupError
+
+    children = []
+    restored_while_alive = []
+    restore = ConflictState.restore
+
+    def runner(command, **kwargs):
+        child = subprocess.Popen(
+            (sys.executable, "-c", "import sys; print('ready', flush=True); sys.stdin.read(1)"),
+            cwd=repo.root,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        children.append(child)
+        assert child.stdout.readline() == b"ready\n"
+        raise ChildCleanupError("Child group remains active")
+
+    def observe_restore(state):
+        if children and children[0].poll() is None:
+            restored_while_alive.append(True)
+        return restore(state)
+
+    resolver = mocker.spy(repo.resolver, "run")
+    check = mocker.patch("git_ez.engine.run_process", side_effect=runner)
+    prompt = mocker.patch("builtins.input", return_value="a")
+    mocker.patch.object(ConflictState, "restore", observe_restore)
+    backup = None
+    try:
+        audit = integrate(repo, interactive=True, validation=("check",))
+        assert audit.view["status"] == "failed", audit.view
+        assert "conflict was not restored" in audit.view["error"]
+        backup = Path(audit.view["error"].split("Backup retained at ", 1)[1].split(":", 1)[0])
+        assert (backup / "index").exists()
+        assert "restoration" not in audit.view["reviews"][-1]
+        assert audit.view["validation"]["status"] == "failed"
+        assert not restored_while_alive
+        assert len(children) == 1 and children[0].poll() is None
+        assert repo.file.read_text() == "combined\n"
+        assert repo.git.conflicts()
+        resolver.assert_called_once()
+        check.assert_called_once()
+        prompt.assert_not_called()
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)
+        if backup is not None:
+            shutil.rmtree(backup)
+
+
 @pytest.mark.parametrize("operation", ["rebase", "merge"])
 @pytest.mark.parametrize("flag", ["assume-unchanged", "skip-worktree", "both"])
 @pytest.mark.parametrize("action", ["write", "delete"])
@@ -3128,7 +3324,7 @@ def test_native_git_autostash_is_explicitly_disabled_without_changing_configurat
 
 
 @pytest.mark.parametrize("operation", ["rebase", "merge"])
-@pytest.mark.parametrize("interactive", [False])
+@pytest.mark.parametrize("interactive", [False, True])
 def test_autostash_configuration_cannot_hide_final_validation_side_effects(
     repo, mocker, operation, interactive
 ):

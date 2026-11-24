@@ -126,9 +126,10 @@ during resolution; the engine runs it after integration. Its dependencies must
 be available, and generated test files must be ignored or cleaned up.
 
 With `--interactive`, review one global proposal per conflicting Git step: accept,
-reject with feedback, or quit. Each rejection starts again from the original
-tracked conflict baseline with prior proposal evidence and feedback.
-Quit or Ctrl+C restores the original unresolved files and index so
+reject with feedback, or quit. A configured check runs before review, with up to
+`ez.validationAttempts` automatic attempts (default 3); a failing check blocks
+acceptance. Each rejection starts again from the original conflict with a fresh
+retry budget. Quit or Ctrl+C restores the original unresolved files and index so
 you can continue with native Git. Restoration covers files tracked at the conflict
 stop, the index and Git operation metadata. Existing Git blobs are reused; only
 tracked contents that differ from the index need a temporary copy. Nontracked and

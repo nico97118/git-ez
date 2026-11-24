@@ -27,6 +27,7 @@ GIT_SETTINGS = {
     "min_confidence": "minConfidence",
     "max_file_bytes": "maxFileBytes",
     "max_rounds": "maxRounds",
+    "validation_attempts": "validationAttempts",
     "model_context_tokens": "modelContextTokens",
     "model_max_output_tokens": "modelMaxOutputTokens",
     "agent_max_turns": "agentMaxTurns",
@@ -49,6 +50,7 @@ class Config:
     timeout: float = 120
     min_confidence: float = 0.8
     max_file_bytes: int = 131072
+    validation_attempts: int = 3
     max_rounds: int = 100
     model_context_tokens: int = 32768
     model_max_output_tokens: int = 8192
@@ -164,6 +166,7 @@ class Config:
             ("min_confidence", 0, 1),
             ("max_file_bytes", 1, 10_000_000),
             ("max_rounds", 1, 10000),
+            ("validation_attempts", 1, 1000),
             ("model_context_tokens", 4096, 2_000_000),
             ("model_max_output_tokens", 1, 128000),
             ("agent_max_turns", 1, 1000),
@@ -182,6 +185,7 @@ class Config:
         for name in (
             "max_file_bytes",
             "max_rounds",
+            "validation_attempts",
             "model_context_tokens",
             "model_max_output_tokens",
             "agent_max_turns",

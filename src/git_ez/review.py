@@ -22,6 +22,9 @@ def review_proposal(
     directory: Path,
     decision: Decision,
     secrets: tuple[str, ...] = (),
+    *,
+    validation_failed: bool = False,
+    diagnostic: str | None = None,
 ) -> tuple[str, str | None]:
     def display(text: str) -> None:
         filtered = redact_bytes(text.encode("utf-8", errors="backslashreplace"), secrets).decode()
@@ -47,12 +50,20 @@ def review_proposal(
     display(f"Capture errors: {capture['capture_errors']}")
     display(f"Agent rationale, reported checks and uncertainties: {decision.rationale}")
     print(f"Agent confidence: {decision.confidence}")
-    print("Proposal ready for review; final integration verification remains required.")
+    if validation_failed:
+        display("Check failed; this proposal cannot be accepted.")
+        display(diagnostic or "Validation diagnostic unavailable")
+    else:
+        print("Proposal ready for review; final integration verification remains required.")
     try:
         while True:
-            prompt = "[a] Accept / [r] Reject / Reprompt / [q] Quit: "
+            prompt = (
+                "[r] Retry with feedback / [q] Quit: "
+                if validation_failed
+                else ("[a] Accept / [r] Reject / Reprompt / [q] Quit: ")
+            )
             action = input(prompt).strip().lower()
-            if action in ("a", "accept"):
+            if action in ("a", "accept") and not validation_failed:
                 return "accept", None
             if action in ("q", "quit", "s", "stop"):
                 return "stop", None

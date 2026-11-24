@@ -13,7 +13,6 @@ from git_ez.audit import Audit, load_report
 from git_ez.audit_storage import publish, read_regular
 from git_ez.engine import Engine
 from git_ez.errors import EzError
-from tests.test_engine import repo as repo
 
 
 @pytest.mark.integration

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 git-ez contributors
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Local TLS fixtures shared by the provider and SDK integration tests."""
+"""Shared repository, Git isolation, and local provider fixtures."""
 
 import os
 import ssl
@@ -10,9 +10,14 @@ import threading
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from git_ez.config import Config
+from git_ez.git import Git
+from tests.fakes import FakeResolver
 
 
 def pytest_collection_modifyitems(items):
@@ -190,3 +195,37 @@ def model_server():
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+@pytest.fixture
+def repo(tmp_path: Path):
+    root = tmp_path / "working"
+    root.mkdir()
+    git = Git(root)
+    git.run("init", "-b", "main")
+    git.run("config", "user.name", "Test")
+    git.run("config", "user.email", "test@example.invalid")
+    file = root / "file.txt"
+    file.write_text("base\n")
+    git.run("add", ".")
+    git.run("commit", "-m", "base")
+    base_oid = git.branch_oid("main")
+    git.run("checkout", "-b", "feature")
+    file.write_text("source\n")
+    git.run("commit", "-am", "source change")
+    source_oid = git.branch_oid("feature")
+    git.run("checkout", "main")
+    file.write_text("parent\n")
+    git.run("commit", "-am", "parent change")
+    parent_oid = git.branch_oid("main")
+    git.run("checkout", "feature")
+    return SimpleNamespace(
+        root=root,
+        git=git,
+        file=file,
+        base_oid=base_oid,
+        source_oid=source_oid,
+        parent_oid=parent_oid,
+        resolver=FakeResolver(),
+        config=Config(model="test"),
+    )

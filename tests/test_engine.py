@@ -17,7 +17,6 @@ import pytest
 
 from git_ez.audit import Audit
 from git_ez.cli import main
-from git_ez.config import Config
 from git_ez.engine import Engine
 from git_ez.errors import EzError
 from git_ez.git import Git
@@ -26,40 +25,6 @@ from git_ez.options import CommitOptions, RebaseOptions
 from tests.fakes import FakeResolver
 
 pytestmark = pytest.mark.integration
-
-
-@pytest.fixture
-def repo(tmp_path: Path):
-    root = tmp_path / "working"
-    root.mkdir()
-    git = Git(root)
-    git.run("init", "-b", "main")
-    git.run("config", "user.name", "Test")
-    git.run("config", "user.email", "test@example.invalid")
-    file = root / "file.txt"
-    file.write_text("base\n")
-    git.run("add", ".")
-    git.run("commit", "-m", "base")
-    base_oid = git.branch_oid("main")
-    git.run("checkout", "-b", "feature")
-    file.write_text("source\n")
-    git.run("commit", "-am", "source change")
-    source_oid = git.branch_oid("feature")
-    git.run("checkout", "main")
-    file.write_text("parent\n")
-    git.run("commit", "-am", "parent change")
-    parent_oid = git.branch_oid("main")
-    git.run("checkout", "feature")
-    return SimpleNamespace(
-        root=root,
-        git=git,
-        file=file,
-        base_oid=base_oid,
-        source_oid=source_oid,
-        parent_oid=parent_oid,
-        resolver=FakeResolver(),
-        config=Config(model="test"),
-    )
 
 
 def integrate(repo, operation="rebase", target="main", **kwargs):

@@ -870,6 +870,7 @@ class Engine:
         checks = WorktreeChecks(self.config)
         decision: Decision | None = None
         proposal: Record | None = None
+        approved: dict[str, tuple[int, str] | None] | None = None
         session_count = len(audit.view.get("sessions", []))
         saved = primary_error = False
         status = "failed"
@@ -877,7 +878,7 @@ class Engine:
         try:
             baseline = checks.baseline(git)
             if audit.view.get("interactive"):
-                decision, _ = self._review(
+                decision, approved = self._review(
                     git, audit, round_number, list(stages), validation, state
                 )
             else:
@@ -898,7 +899,7 @@ class Engine:
             if decision.confidence < self.config.min_confidence:
                 raise LowConfidence("Agent confidence below threshold; worktree preserved")
             checks.guard(git, audit, head, branch)
-            checks.verify(git, list(stages), baseline)
+            checks.verify(git, list(approved) if approved is not None else list(stages), baseline)
             if proposal is not None:
                 self._capture_attempt(git, audit, proposal, decision)
                 self._capture_changes(git, audit, proposal, list(stages), baseline)
@@ -906,7 +907,19 @@ class Engine:
                 self._save_resolution(git, audit, record, conflict, decision)
             audit.save()
             saved = True
-            self._step(git, audit, ("add", "-A", "--", "."))
+            current = checks.baseline(git)
+            selected = sorted(
+                set(stages)
+                | {
+                    name
+                    for name in current.keys() | baseline.keys()
+                    if current.get(name) != baseline.get(name)
+                }
+            )
+            if approved is None:
+                self._step(git, audit, ("add", "-A", "--", *selected))
+            else:
+                self._stage_approved(git, audit, approved)
             status = "applied"
             for record, _ in snapshots:
                 record.update(status=status, application="staged")
@@ -959,6 +972,58 @@ class Engine:
             if error is not None and not primary_error:
                 raise AuditError("Cannot retain conflict decisions") from error
 
+    def _stage_approved(
+        self, git: Git, audit: Audit, approved: dict[str, tuple[int, str] | None]
+    ) -> None:
+        """Stage the complete reviewed proposal while preserving the caller's index hints."""
+        paths = list(approved)
+        checks = WorktreeChecks(self.config)
+        if checks.fingerprints(git, paths) != approved:
+            raise EzError("Approved worktree contents changed before staging")
+        assumed, skipped = set(), set()
+        for entry in git.run("ls-files", "-v", "-z", "--", *paths).stdout.split(b"\0"):
+            if not entry:
+                continue
+            tag, name = entry[:1].decode("ascii"), entry[2:].decode("utf-8")
+            if tag.islower():
+                assumed.add(name)
+            if tag.upper() == "S":
+                skipped.add(name)
+        try:
+            for flag, names in (("assume-unchanged", assumed), ("skip-worktree", skipped)):
+                if names:
+                    git.run("update-index", f"--no-{flag}", "--", *sorted(names))
+            self._step(git, audit, ("add", "-A", "--", *paths))
+            indexed = {}
+            for entry in git.run("ls-files", "--stage", "-z", "--", *paths).stdout.split(b"\0"):
+                if not entry:
+                    continue
+                header, raw_name = entry.split(b"\t", 1)
+                _, oid, stage = header.decode("ascii").split()
+                name = raw_name.decode("utf-8")
+                if stage != "0":
+                    raise EzError(f"Approved resolution still has unmerged index entries: {name}")
+                indexed[name] = oid
+            for name, expected in approved.items():
+                if expected is None:
+                    if name in indexed:
+                        raise EzError(f"Approved deletion was not staged: {name}")
+                elif (
+                    name not in indexed
+                    or git.text("hash-object", f"--path={name}", "--", name) != indexed[name]
+                ):
+                    raise EzError(f"Approved content was not staged: {name}")
+            if checks.fingerprints(git, paths) != approved:
+                raise EzError("Approved worktree contents changed during staging")
+        finally:
+            if assumed or skipped:
+                remaining = set(
+                    git.run("ls-files", "-z", "--", *paths).stdout.decode("utf-8").split("\0")
+                )
+                for flag, names in (("assume-unchanged", assumed), ("skip-worktree", skipped)):
+                    if selected := names & remaining:
+                        git.run("update-index", f"--{flag}", "--", *sorted(selected))
+
     def _review(
         self,
         git: Git,
@@ -967,7 +1032,7 @@ class Engine:
         paths: list[str],
         validation: tuple[str, ...],
         state: ConflictState | None = None,
-    ) -> tuple[Decision, Path]:
+    ) -> tuple[Decision, dict[str, tuple[int, str] | None]]:
         feedback = None
         head = git.text("rev-parse", "HEAD")
         branch = git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.decode().strip() or None
@@ -1016,6 +1081,8 @@ class Engine:
                     capture_proposal(audit, git, directory, self.config.max_file_bytes, selected)
                 proposal.update(status="proposed")
                 audit.save()
+                checks.verify(git, selected, before_agent)
+                reviewed = checks.fingerprints(git, selected)
                 reviewed_changes = state.changed_paths() if state is not None else []
                 review_baseline = checks.baseline(git)
                 index = git.run("ls-files", "--stage", "-z").stdout
@@ -1038,6 +1105,8 @@ class Engine:
                     raise EzError("Index changed during review; integration stopped")
                 comparison = directory / "after-review"
                 capture_proposal(audit, git, comparison, self.config.max_file_bytes, selected)
+                if checks.fingerprints(git, selected) != reviewed:
+                    raise EzError("Worktree changed during review; review no longer applies")
                 if checks.baseline(git) != review_baseline or (
                     state is not None and state.changed_paths() != reviewed_changes
                 ):
@@ -1057,7 +1126,7 @@ class Engine:
                 if state is not None:
                     state.verify_control()
                 if action == "accept":
-                    return parsed, audit.directory / "sessions" / f"{number:04d}"
+                    return parsed, reviewed
             except (EzError, OSError, ValueError, KeyboardInterrupt) as exc:
                 primary_error = True
                 proposal.update(

@@ -65,6 +65,10 @@ class WorktreeChecks:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         return stat.S_IMODE(info.st_mode), digest
 
+    def fingerprints(self, git: Git, paths: list[str]) -> dict[str, tuple[int, str] | None]:
+        """Capture exact worktree contents and modes independently of Git index hints."""
+        return {name: self._fingerprint(git, name) for name in paths}
+
     def baseline(self, git: Git) -> dict[str, tuple[int, str] | None]:
         """Fingerprint Git's pending changes before the resolver can edit them."""
         baseline = {}

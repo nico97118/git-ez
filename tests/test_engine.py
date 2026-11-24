@@ -2971,6 +2971,104 @@ def test_conflict_restore_preserves_nontracked_data_blocking_a_tracked_path(repo
 
 
 @pytest.mark.parametrize("operation", ["rebase", "merge"])
+@pytest.mark.parametrize("flag", ["assume-unchanged", "skip-worktree", "both"])
+@pytest.mark.parametrize("action", ["write", "delete"])
+def test_interactive_stages_every_approved_path_despite_preexisting_index_hints(
+    repo, mocker, operation, flag, action
+):
+    support = repo.root / "support.txt"
+    for branch in ("main", "feature"):
+        repo.git.run("checkout", branch)
+        support.write_text("original\n")
+        repo.git.run("add", "support.txt")
+        repo.git.run("commit", "-m", f"add support on {branch}")
+    for hint in ("assume-unchanged", "skip-worktree") if flag == "both" else (flag,):
+        repo.git.run("update-index", f"--{hint}", "support.txt")
+    original = repo.resolver.run
+    initial_flags = []
+
+    def resolve(git, audit, number, paths, check):
+        initial_flags.append(git.text("ls-files", "-v", "--", "support.txt"))
+        result = original(git, audit, number, paths, check)
+        if action == "write":
+            support.write_text("approved supporting resolution\n")
+        else:
+            support.unlink()
+        return result
+
+    repo.resolver.run = resolve
+    hints_at_continuation = []
+    run = Git.run
+
+    def observe(git, *args, **kwargs):
+        if args == (operation, "--continue"):
+            hints_at_continuation.append(git.text("ls-files", "-v", "--", "support.txt"))
+        return run(git, *args, **kwargs)
+
+    mocker.patch.object(Git, "run", observe)
+    prompt = mocker.patch("builtins.input", return_value="a")
+    audit = integrate(repo, operation, interactive=True)
+    assert audit.view["status"] == "succeeded", audit.view
+    expected_flag = {"assume-unchanged": "h", "skip-worktree": "S", "both": "s"}[flag]
+    assert initial_flags == [f"{expected_flag} support.txt"]
+    assert hints_at_continuation == (
+        [f"{expected_flag} support.txt"] if action == "write" else [""]
+    )
+    prompt.assert_called_once()
+    if action == "write":
+        assert repo.git.text("show", "HEAD:support.txt") == "approved supporting resolution"
+        assert support.read_text() == "approved supporting resolution\n"
+    else:
+        assert not repo.git.run("ls-tree", "HEAD", "--", "support.txt").stdout
+        assert not support.exists()
+
+
+def test_interactive_detects_incomplete_staging_before_git_continues(repo, mocker):
+    original = repo.resolver.run
+
+    def resolve(git, audit, number, paths, check):
+        result = original(git, audit, number, paths, check)
+        (repo.root / "support.txt").write_text("approved support\n")
+        return result
+
+    repo.resolver.run = resolve
+    run = Git.run
+    continued = []
+
+    def omit_support(git, *args, **kwargs):
+        if args[:4] == ("add", "-A", "--", "file.txt"):
+            return run(git, "add", "-A", "--", "file.txt", **kwargs)
+        if args == ("rebase", "--continue"):
+            continued.append(True)
+        return run(git, *args, **kwargs)
+
+    mocker.patch.object(Git, "run", omit_support)
+    mocker.patch("builtins.input", return_value="a")
+    audit = integrate(repo, interactive=True)
+    assert audit.view["status"] == "failed", audit.view
+    assert "Approved content was not staged: support.txt" in audit.view["error"]
+    assert not continued
+    assert repo.git.conflicts()
+    assert "<<<<<<< HEAD" in repo.file.read_text()
+    assert repo.git.branch_oid("feature") == repo.source_oid
+    assert audit.view["reviews"][-1]["restoration"] == "original_conflict_restored"
+
+
+def test_interactive_staging_keeps_native_clean_filter_semantics(repo, mocker):
+    repo.git.run("config", "filter.uppercase.clean", "tr a-z A-Z")
+    for branch in ("main", "feature"):
+        repo.git.run("checkout", branch)
+        (repo.root / ".gitattributes").write_text("file.txt filter=uppercase\n")
+        repo.git.run("add", ".gitattributes", "file.txt")
+        repo.git.run("commit", "-m", f"normalize content on {branch}")
+    mocker.patch("builtins.input", return_value="a")
+    audit = integrate(repo, "merge", interactive=True)
+    assert audit.view["status"] == "succeeded", audit.view
+    assert repo.git.text("show", "HEAD:file.txt") == "COMBINED"
+    assert repo.file.read_text() == "combined\n"
+
+
+@pytest.mark.parametrize("operation", ["rebase", "merge"])
 @pytest.mark.parametrize("interactive", [False, True])
 @pytest.mark.parametrize("kind", ["unstaged", "staged", "untracked"])
 def test_autostash_configuration_never_bypasses_clean_checkout_precondition(

@@ -447,6 +447,11 @@ Each revision starts from the original tracked conflict baseline, with the
 previous proposal and user feedback available to the harness. Final validation
 runs after integration, as in noninteractive mode.
 .PP
+On acceptance, all reviewed paths are staged and their index blobs are checked
+using native Git clean filters. For those paths only, assume-unchanged and
+skip-worktree hints are temporarily cleared, then restored on surviving index
+entries. A staging mismatch stops integration before Git continuation.
+.PP
 Quit and interruption restore the original tracked file content, modes and
 unmerged
 index, and preserve native merge/rebase metadata. They do not abort or reset

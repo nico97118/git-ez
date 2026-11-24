@@ -229,3 +229,19 @@ def repo(tmp_path: Path):
         resolver=FakeResolver(),
         config=Config(model="test"),
     )
+
+
+@pytest.fixture
+def ssh_signing(repo, tmp_path):
+    key = tmp_path / "signing-key"
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)],
+        check=True,
+        capture_output=True,
+    )
+    allowed = tmp_path / "allowed-signers"
+    allowed.write_text("test@example.invalid " + key.with_suffix(".pub").read_text())
+    repo.git.run("config", "gpg.format", "ssh")
+    repo.git.run("config", "user.signingkey", str(key))
+    repo.git.run("config", "gpg.ssh.allowedSignersFile", str(allowed))
+    return key

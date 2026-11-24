@@ -92,7 +92,7 @@ Tests use deterministic models and local HTTP/TLS servers; no external LLM is ca
 Start with focused tests for the changed behavior and its affected callers:
 
 ```bash
-uv run --locked pytest tests/test_engine.py -k merge
+uv run --locked pytest tests/test_merge.py
 ```
 
 Include relevant success and failure paths, and integration tests for Git, CLI,

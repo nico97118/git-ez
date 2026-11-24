@@ -412,3 +412,116 @@ def test_interruption_hint_redacts_check_credentials_before_shell_quoting(
     assert "git ez " + operation + " --continue" in output.err
     assert "--check validation-tool --token" in output.err
     assert repo.git.operation_active()
+
+
+def start_amend_series(repo, origin="native", fixup_flag="-C", tmp_path=None):
+    import shlex
+    import sys
+
+    from git_ez.options import RebaseOptions
+
+    repo.file.write_text("amended\n")
+    repo.git.run("commit", "-am", "amend! source change\n\nreplacement title")
+    amended = repo.git.commit_oid("HEAD")
+    if origin == "git-ez":
+        repo.resolver.error = "Stopped for manual work"
+        stopped = Engine(repo.root, repo.config, repo.resolver).run(
+            "main", rebase_options=RebaseOptions(autosquash=True)
+        )
+        assert stopped.view["status"] == "failed"
+        repo.resolver.error = None
+    else:
+        sequence_editor = None
+        if fixup_flag == "-c":
+            editor = tmp_path / "edit_sequence.py"
+            editor.write_text(
+                "import pathlib, sys\n"
+                "p = pathlib.Path(sys.argv[1])\n"
+                "p.write_text(p.read_text().replace('fixup -C ', 'fixup -c '))\n"
+            )
+            sequence_editor = shlex.join([sys.executable, str(editor)])
+        assert (
+            repo.git.run(
+                "rebase",
+                "--interactive",
+                "--autosquash",
+                "main",
+                check=False,
+                sequence_editor=sequence_editor,
+            ).returncode
+            != 0
+        )
+    assert repo.git.conflicts()
+    assert repo.git.commit_oid("REBASE_HEAD") == repo.source_oid
+    return amended
+
+
+@pytest.mark.parametrize(
+    "origin,fixup_flag",
+    [
+        ("git-ez", "-C"),
+        ("native", "-C"),
+        ("native", "-c"),
+    ],
+)
+def test_amend_conflict_after_manual_resolution_resumes_assistance(
+    repo, origin, fixup_flag, tmp_path, mocker
+):
+    amended = start_amend_series(repo, origin, fixup_flag, tmp_path)
+    manual(repo)
+    resolve = repo.resolver.run
+
+    def resolve_only_amend(git, audit, round_number, paths, check):
+        assert git.commit_oid("REBASE_HEAD") == amended
+        assert git.text("show", "HEAD:file.txt") == "manual"
+        assert f"fixup {fixup_flag} {amended}" in git.rebase_metadata("rebase-merge", "done")
+        return resolve(git, audit, round_number, paths, check)
+
+    mocker.patch.object(repo.resolver, "run", side_effect=resolve_only_amend)
+    result = resume(repo)
+    assert not isinstance(result, int)
+    assert result.view["status"] == "succeeded", result.view
+    assert len(repo.resolver.calls) == 1
+    assert repo.resolver.calls[0].theirs == "amended\n"
+    assert len(result.view["conflicts"]) == 1
+    assert repo.file.read_text() == "combined\n"
+    assert repo.git.text("rev-parse", "HEAD^") == repo.parent_oid
+    assert repo.git.text("show", "-s", "--format=%B", "HEAD") == "replacement title"
+    assert not repo.git.operation_active()
+    assert not repo.git.conflicts()
+    assert repo.git.run("status", "--porcelain").stdout == b""
+
+
+def test_current_amend_conflict_remains_manually_owned(repo):
+    amended = start_amend_series(repo)
+    manual(repo)
+    assert repo.git.run("rebase", "--continue", check=False).returncode != 0
+    assert repo.git.commit_oid("REBASE_HEAD") == amended
+    repo.file.write_text("unfinished manual amendment\n")
+    before = repo.git.run("ls-files", "--stage", "-z").stdout, repo.file.read_bytes()
+    result = resume(repo)
+    assert isinstance(result, int) and result != 0
+    assert repo.git.commit_oid("REBASE_HEAD") == amended
+    assert before == (repo.git.run("ls-files", "--stage", "-z").stdout, repo.file.read_bytes())
+    assert repo.git.conflicts()
+    assert not repo.resolver.calls
+
+
+def test_manual_amend_completion_runs_final_check_without_assistance(repo):
+    import sys
+
+    amended = start_amend_series(repo)
+    manual(repo)
+    assert repo.git.run("rebase", "--continue", check=False).returncode != 0
+    assert repo.git.commit_oid("REBASE_HEAD") == amended
+    repo.file.write_text("manual amendment\n")
+    repo.git.run("add", "file.txt")
+    result = resume(repo, validation=(sys.executable, "-c", "print('checked')"))
+    assert not isinstance(result, int)
+    assert result.view["status"] == "succeeded", result.view
+    assert result.view["validation"]["status"] == "passed"
+    assert result.view["integrated"]
+    assert repo.file.read_text() == "manual amendment\n"
+    assert repo.git.text("rev-parse", "HEAD^") == repo.parent_oid
+    assert not repo.git.operation_active()
+    assert not repo.resolver.calls

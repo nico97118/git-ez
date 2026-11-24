@@ -158,7 +158,10 @@ class Git:
                     instruction = read_regular(path, 1_000_000).splitlines()[-1].split()
                     if instruction[0] not in (b"pick", b"reword", b"squash", b"fixup"):
                         return None
-                    if not oid.startswith(instruction[1].decode("ascii")):
+                    commit_index = (
+                        2 if instruction[0] == b"fixup" and instruction[1] in (b"-C", b"-c") else 1
+                    )
+                    if not oid.startswith(instruction[commit_index].decode("ascii")):
                         return None
                 return backend, step, oid
             except (EzError, OSError, ValueError, IndexError, UnicodeError):

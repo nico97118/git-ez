@@ -9,7 +9,7 @@ import stat
 import subprocess
 import tempfile
 from collections.abc import Callable
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
@@ -34,11 +34,12 @@ from .sequence_editor import editor_command, read_regular
 
 
 class Engine:
-    def __init__(self, repository: Path, config: Config, resolver: Resolver | None = None):
+    def __init__(self, repository: Path, config: Config | None, resolver: Resolver | None = None):
         git = Git(repository.resolve())
         self.git = Git(Path(git.text("rev-parse", "--show-toplevel")))
-        self.config = config
-        self.resolver = resolver if resolver is not None else AgentResolver(config)
+        self.config = config if config is not None else Config()
+        self._configured = config is not None
+        self.resolver = resolver if resolver is not None else AgentResolver(self.config)
 
     def run(
         self,
@@ -112,42 +113,161 @@ class Engine:
                     command=list(validation), status="not_run" if validation else "not_requested"
                 )
             )
-            phase = "initialization"
-            try:
-                audit.initialize()
-                phase = "integration"
-                self._integrate(audit, validation)
-                if validation:
-                    phase = "validation"
-                    self.validate(git, audit, validation)
-                phase = "verification"
-                self._verify_result(audit)
-                audit.set_status("succeeded")
-            except (EzError, OSError, ValueError, KeyboardInterrupt) as exc:
-                audit.set_status(
-                    "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
-                    exc,
-                    phase=phase,
-                )
-            except BaseException as exc:
-                # Preserve unexpected exceptions and termination signals for the caller.
-                # Their arbitrary messages may contain credentials; retain only their type.
-                audit.set_status(
-                    "interrupted" if isinstance(exc, SystemExit) else "failed",
-                    exc,
-                    phase=phase,
-                    message=f"Unexpected {type(exc).__name__}",
-                )
-                raise
-            finally:
-                if "rebase_sequence" in audit.view:
-                    sequence_error = audit.attempt(
-                        "sequence guard", lambda: self._verify_sequence_capture(audit)
-                    )
-                    if sequence_error is not None and audit.view["status"] == "succeeded":
-                        audit.set_status("failed", sequence_error, phase="verification")
-                audit.finalize()
+            self._execute_run(audit, validation)
             return audit
+
+    def _execute_run(
+        self,
+        audit: Audit,
+        validation: tuple[str, ...],
+        *,
+        resumed: bool = False,
+    ) -> None:
+        phase = "initialization"
+        try:
+            audit.initialize()
+            if not audit.view["integrated"]:
+                phase = "integration"
+                self._integrate(audit, validation, resumed=resumed)
+            if validation:
+                phase = "validation"
+                self.validate(self.git, audit, validation)
+            phase = "verification"
+            self._verify_result(audit)
+            audit.set_status("succeeded")
+        except (EzError, OSError, ValueError, KeyboardInterrupt) as exc:
+            audit.set_status(
+                "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                exc,
+                phase=phase,
+            )
+        except BaseException as exc:
+            # Preserve unexpected exceptions and termination signals for the caller.
+            # Their arbitrary messages may contain credentials; retain only their type.
+            audit.set_status(
+                "interrupted" if isinstance(exc, SystemExit) else "failed",
+                exc,
+                phase=phase,
+                message=f"Unexpected {type(exc).__name__}",
+            )
+            raise
+        finally:
+            if "rebase_sequence" in audit.view:
+                sequence_error = audit.attempt(
+                    "sequence guard", lambda: self._verify_sequence_capture(audit)
+                )
+                if sequence_error is not None and audit.view["status"] == "succeeded":
+                    audit.set_status("failed", sequence_error, phase="verification")
+            audit.finalize()
+
+    def continue_operation(
+        self,
+        operation: str,
+        validation: tuple[str, ...] = (),
+        *,
+        interactive: bool = False,
+    ) -> Audit | int:
+        """Delegate manual work to Git; adopt only a positively identified new conflict."""
+        if operation not in ("rebase", "merge"):
+            raise EzError("Operation must be rebase or merge")
+        git = self.git
+        with checkout_lock(git):
+            active = git.rebase_active() if operation == "rebase" else git.merge_active()
+            if not active:
+                raise EzError(f"No {operation} in progress")
+            position = git.rebase_position() if operation == "rebase" else None
+            identity = None
+            if position is not None:
+                with suppress(EzError, OSError, ValueError):
+                    identity = tuple(
+                        git.rebase_metadata(position[0], name)
+                        for name in ("head-name", "orig-head", "onto")
+                    )
+            validation_context = identity
+            if operation == "merge" and validation:
+                with suppress(EzError, OSError, ValueError):
+                    validation_context = (
+                        git.text("symbolic-ref", "HEAD"),
+                        git.commit_oid("HEAD"),
+                        git.commit_oid("MERGE_HEAD"),
+                    )
+            result = git.continue_native(operation)
+            if result == 0 and validation:
+                if git.operation_active():
+                    raise EzError("Git stopped before completion; final validation was not run")
+                if validation_context is None:
+                    raise EzError(
+                        "Git completed; original operation metadata unavailable for validation"
+                    )
+                branch = validation_context[0].removeprefix("refs/heads/")
+                if git.text("symbolic-ref", "HEAD") != validation_context[0]:
+                    raise EzError("Git completed; checked-out branch changed before validation")
+                audit = self._prepare_continuation(
+                    branch,
+                    validation_context[1],
+                    validation_context[2],
+                    operation,
+                    validation,
+                    interactive,
+                )
+                audit.completed(git.commit_oid("HEAD"))
+                self._execute_run(audit, validation)
+                return audit
+            if result == 0 or operation == "merge":
+                return result
+            following = git.rebase_position()
+            if (
+                position is None
+                or following is None
+                or identity is None
+                or following[0] != position[0]
+                or following[1] <= position[1]
+                or following[2] == position[2]
+                or not git.conflicts()
+            ):
+                return result
+            try:
+                current_identity = tuple(
+                    git.rebase_metadata(following[0], name)
+                    for name in ("head-name", "orig-head", "onto")
+                )
+            except (EzError, OSError, ValueError):
+                return result
+            if current_identity != identity or not identity[0].startswith("refs/heads/"):
+                return result
+            branch = identity[0].removeprefix("refs/heads/")
+            if git.branch_oid(branch) != identity[1]:
+                return result
+            audit = self._prepare_continuation(
+                branch, identity[1], identity[2], operation, validation, interactive
+            )
+            self._execute_run(audit, validation, resumed=True)
+            return audit
+
+    def _prepare_continuation(
+        self,
+        branch: str,
+        before: str,
+        base: str,
+        operation: str,
+        validation: tuple[str, ...],
+        interactive: bool,
+    ) -> Audit:
+        if not self._configured:
+            self.config = Config.from_git(self.git.path)
+            self.resolver = AgentResolver(self.config)
+            self._configured = True
+        audit = self._prepare_run(branch, before, base, base, None, operation)
+        audit.annotate(
+            continuation=True,
+            interactive=interactive,
+            commit_options=asdict(CommitOptions()),
+            rerere_autoupdate=None,
+            validation=Validation(
+                command=list(validation), status="not_run" if validation else "not_requested"
+            ),
+        )
+        return audit
 
     def _input_ref(
         self, revision: str, branch: str, *, include_current: bool = False
@@ -361,7 +481,9 @@ class Engine:
             raise EzError(f"Native Git command failed ({result.returncode}): {detail}")
         return result
 
-    def _integrate(self, audit: Audit, validation: tuple[str, ...]) -> None:
+    def _integrate(
+        self, audit: Audit, validation: tuple[str, ...], *, resumed: bool = False
+    ) -> None:
         git = self.git
         operation = audit.view["operation"]
         rebase_options = RebaseOptions(**audit.view.get("rebase_options", {}))
@@ -426,106 +548,115 @@ class Engine:
                 inherited_fds=inherited_fds,
             )
 
-        if (
-            self._check_repository() != audit.view["branch"]
-            or git.branch_oid(audit.view["branch"]) != audit.view["before_oid"]
-        ):
-            raise EzError("Current branch changed before integration")
-        self._verify_target(audit)
-        if operation == "rebase":
-            self._pin_rebase_selection(audit)
-            plan = audit.view["rebase_plan"]
-            flags: tuple[str, ...] = ("--onto", plan["base_oid"], "--no-fork-point")
-            if rebase_options.reapply_cherry_picks is None and plan["reapply_cherry_picks"]:
-                flags += ("--reapply-cherry-picks",)
-            sequence_mode = rebase_options.autosquash is True or plan["requires_sequence"]
-            if plan["requires_sequence"] and rebase_options.autosquash is not True:
-                # Avoid a false up-to-date shortcut after combining exclusions,
-                # while retaining Git's per-commit fast-forward behavior.
-                flags += ("--interactive", "--no-autosquash")
-                if rebase_options.empty is None:
-                    flags += ("--empty=drop",)
-            sequence_editor = None
-            prefix: tuple[str, ...] = ()
-            if sequence_mode:
-                sequence = audit.directory / "rebase-todo.txt"
-                sequence_evidence = {
-                    "artifact": sequence.name,
-                    "digest_artifact": sequence.name + ".sha256",
-                    "metadata_artifact": sequence.name + ".capture.json",
-                    "status": "pending",
-                    "limit_bytes": self.config.max_file_bytes,
-                }
-                audit.annotate(rebase_sequence=sequence_evidence)
-                audit.save()
-                # Prevent a configured multiline instruction format from adding
-                # instructions to the internally generated interactive sequence.
-                prefix = ("-c", "rebase.instructionFormat=%s")
-            try:
-                # Secrets travel only in an inherited, unlinked descriptor. They are
-                # never command arguments, environment values, or audit artifacts.
-                with tempfile.TemporaryFile() if sequence_mode else nullcontext(None) as redactions:
-                    if redactions is not None:
-                        redactions.write(json.dumps([self.config.resolved_api_key()]).encode())
-                        redactions.seek(0)
-                        sequence_editor = editor_command(
-                            audit.directory / "rebase-todo.txt",
-                            self.config.max_file_bytes,
-                            redactions.fileno(),
-                        )
-                    result = step(
-                        *prefix,
-                        "rebase",
-                        "--merge",
-                        "--no-autostash",
-                        "--no-update-refs",
-                        "--no-rebase-merges",
-                        *flags,
-                        *rebase_options.flags(),
-                        *commit_options.flags(),
-                        plan["selection_oid"],
-                        sequence_editor=sequence_editor,
-                        inherited_fds=(redactions.fileno(),) if redactions is not None else (),
-                    )
-            finally:
-                if sequence_mode:
-                    evidence = audit.view["rebase_sequence"]
-                    try:
-                        content = read_regular(
-                            audit.directory / evidence["artifact"], self.config.max_file_bytes
-                        )
-                        digest = read_regular(
-                            audit.directory / evidence["digest_artifact"], 64
-                        ).decode("ascii")
-                        if hashlib.sha256(content).hexdigest() != digest:
-                            raise AuditError("Captured sequence changed before Git returned")
-                    except (EzError, OSError, ValueError) as exc:
-                        evidence.update(status="unavailable", error=safe_error(exc))
-                    else:
-                        capture_metadata = json.loads(
-                            read_evidence(audit.directory / evidence["metadata_artifact"])
-                        )
-                        evidence.update(
-                            redacted=capture_metadata["redacted"],
-                            source_sha256=capture_metadata["source_sha256"],
-                            status="captured",
-                            sha256=digest,
-                            size_bytes=len(content),
-                        )
-                    audit.annotate(rebase_sequence=evidence)
-                    audit.save()
+        sequence_mode = False
+        redactions = None
+        if resumed:
+            result = subprocess.CompletedProcess[bytes](["git", operation, "--continue"], 1)
         else:
-            # Let Git fast-forward or create a merge commit, as git merge normally would.
-            merge_ff = audit.view["merge_ff"]
-            flags = (f"--{merge_ff}",) if merge_ff is not None else ()
-            result = step(
-                "merge",
-                "--no-autostash",
-                "--no-edit",
-                *flags,
-                *commit_options.flags(),
-                audit.view["target_oid"],
-            )
+            if (
+                self._check_repository() != audit.view["branch"]
+                or git.branch_oid(audit.view["branch"]) != audit.view["before_oid"]
+            ):
+                raise EzError("Current branch changed before integration")
+            self._verify_target(audit)
+            if operation == "rebase":
+                self._pin_rebase_selection(audit)
+                plan = audit.view["rebase_plan"]
+                flags: tuple[str, ...] = ("--onto", plan["base_oid"], "--no-fork-point")
+                if rebase_options.reapply_cherry_picks is None and plan["reapply_cherry_picks"]:
+                    flags += ("--reapply-cherry-picks",)
+                sequence_mode = rebase_options.autosquash is True or plan["requires_sequence"]
+                if plan["requires_sequence"] and rebase_options.autosquash is not True:
+                    # Avoid a false up-to-date shortcut after combining exclusions,
+                    # while retaining Git's per-commit fast-forward behavior.
+                    flags += ("--interactive", "--no-autosquash")
+                    if rebase_options.empty is None:
+                        flags += ("--empty=drop",)
+                sequence_editor = None
+                prefix: tuple[str, ...] = ()
+                if sequence_mode:
+                    sequence = audit.directory / "rebase-todo.txt"
+                    sequence_evidence = {
+                        "artifact": sequence.name,
+                        "digest_artifact": sequence.name + ".sha256",
+                        "metadata_artifact": sequence.name + ".capture.json",
+                        "status": "pending",
+                        "limit_bytes": self.config.max_file_bytes,
+                    }
+                    audit.annotate(rebase_sequence=sequence_evidence)
+                    audit.save()
+                    # Prevent a configured multiline instruction format from adding
+                    # instructions to the internally generated interactive sequence.
+                    prefix = ("-c", "rebase.instructionFormat=%s")
+                try:
+                    # Secrets travel only in an inherited, unlinked descriptor. They are
+                    # never command arguments, environment values, or audit artifacts.
+                    with (
+                        tempfile.TemporaryFile()
+                        if sequence_mode
+                        else nullcontext(None) as redactions
+                    ):
+                        if redactions is not None:
+                            redactions.write(json.dumps([self.config.resolved_api_key()]).encode())
+                            redactions.seek(0)
+                            sequence_editor = editor_command(
+                                audit.directory / "rebase-todo.txt",
+                                self.config.max_file_bytes,
+                                redactions.fileno(),
+                            )
+                        result = step(
+                            *prefix,
+                            "rebase",
+                            "--merge",
+                            "--no-autostash",
+                            "--no-update-refs",
+                            "--no-rebase-merges",
+                            *flags,
+                            *rebase_options.flags(),
+                            *commit_options.flags(),
+                            plan["selection_oid"],
+                            sequence_editor=sequence_editor,
+                            inherited_fds=(redactions.fileno(),) if redactions is not None else (),
+                        )
+                finally:
+                    if sequence_mode:
+                        evidence = audit.view["rebase_sequence"]
+                        try:
+                            content = read_regular(
+                                audit.directory / evidence["artifact"], self.config.max_file_bytes
+                            )
+                            digest = read_regular(
+                                audit.directory / evidence["digest_artifact"], 64
+                            ).decode("ascii")
+                            if hashlib.sha256(content).hexdigest() != digest:
+                                raise AuditError("Captured sequence changed before Git returned")
+                        except (EzError, OSError, ValueError) as exc:
+                            evidence.update(status="unavailable", error=safe_error(exc))
+                        else:
+                            capture_metadata = json.loads(
+                                read_evidence(audit.directory / evidence["metadata_artifact"])
+                            )
+                            evidence.update(
+                                redacted=capture_metadata["redacted"],
+                                source_sha256=capture_metadata["source_sha256"],
+                                status="captured",
+                                sha256=digest,
+                                size_bytes=len(content),
+                            )
+                        audit.annotate(rebase_sequence=evidence)
+                        audit.save()
+            else:
+                # Let Git fast-forward or create a merge commit, as git merge normally would.
+                merge_ff = audit.view["merge_ff"]
+                flags = (f"--{merge_ff}",) if merge_ff is not None else ()
+                result = step(
+                    "merge",
+                    "--no-autostash",
+                    "--no-edit",
+                    *flags,
+                    *commit_options.flags(),
+                    audit.view["target_oid"],
+                )
         rounds = 0
         while result.returncode:
             stages = git.conflicts()

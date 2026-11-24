@@ -28,7 +28,7 @@ git ez --version
 The target can be a branch, an already-fetched reference, a tag, a SHA, or an expression
 such as `HEAD~2`. It is resolved and pinned at startup. The current repository is used by
 default, including when invoked from a subdirectory. A checked-out branch and a clean
-checkout are required.
+checkout are required for new integrations.
 
 ### Checkout locking
 
@@ -73,7 +73,9 @@ For existing scripts, replace `git ez probe --output report.json` with
 `git ez probe > report.json`.
 
 Exit codes: `0` = successful local integration, displayed report, or compatible probe;
-`1` = failed run/probe; `2` = configuration, CLI, or precondition error; `130` = interrupted interactive integration.
+`1` = failed run/probe; `2` = configuration, CLI, or precondition error;
+`130` = interrupted interactive integration. Native continuation returns Git’s status
+unless assistance or `--check` runs.
 
 Both operations explicitly disable native autostash, even when rebase.autoStash
 or merge.autoStash is configured. Commit or stash local changes with native Git
@@ -99,8 +101,9 @@ runs after integration.
 
 Quit restores original unresolved files, file modes and index stages while keeping
 the native Git operation intact. Resolve manually, stage
-the files, and run `git rebase --continue` or `git commit`. No git-ez recovery command
-is needed. Restoration covers only files tracked in the original conflict index,
+the files, and run `git ez rebase --continue` or `git ez merge --continue`
+(or the corresponding native Git command). Restoration covers only files tracked
+in the original conflict index,
 the index itself and native operation metadata. Existing Git blobs are reused;
 exact tracked working contents that differ from the index are saved separately.
 Nontracked and ignored files are neither backed up nor removed, including files
@@ -111,6 +114,38 @@ manual recovery. See the [manual](man/git-ez.1) for interruption limits.
 Without conflicts there is no prompt or model call. Resolutions already staged by
 native rerere autoupdate keep their existing path without harness review.
 
+## Continuing an active operation
+
+```bash
+git add path/to/resolved-file
+git ez rebase --continue --interactive
+# Or, for a merge:
+git ez merge --continue
+```
+
+Operations started with native Git or git-ez are supported, including linked
+worktrees and both merge and apply rebase backends. Git always receives the first
+`--continue` before git-ez can stage files or call the model. Incomplete resolutions,
+unstaged edits, editor failures and hook failures retain Git's diagnostics and exit
+status. A merge continuation is entirely native.
+
+For rebase, assistance resumes only with unmerged index entries at a demonstrably
+later replay step and a different replayed commit in the same operation. Missing or
+ambiguous metadata leaves the conflict manual. A later `exec`, edit or other stop
+without a positively identified new replay conflict does not trigger assistance.
+The existing resolution, review, validation and audit cycle then handles new conflicts.
+
+Each invocation is independent: repeat `--interactive`, `--repo` and `--check` as
+needed. `--check` runs final validation after completion, including a wholly native
+continuation, and also participates in assisted resolution when needed. It requires
+valid git-ez configuration. Other integration options and a target cannot
+be combined with `--continue`; Git retains the active operation's native settings.
+git-ez does not restore CLI options from prior runs or save session recovery state.
+Assistance and requested validation retain their normal audit journals. Continuation
+does not require model configuration or create a new resolution journal unless
+assistance or `--check` runs. Prior journals remain available independently.
+`--abort` and `--skip` remain native Git commands.
+
 ## Supported Git workflow
 
 Use git-ez for a simple integration into the currently checked-out branch. It exposes
@@ -119,17 +154,17 @@ its own small command-line interface; it does not forward arbitrary options to
 
 | Contract | Behavior |
 | --- | --- |
-| Target | One explicit revision is required, even when the branch has an upstream. It must already be available locally. |
-| Repository | A clean checkout on a local branch with no active Git operation. Autostash is disabled. Detached HEAD and bare repositories are unsupported. |
+| Target | For new integrations, one explicit revision is required, even when the branch has an upstream. It must already be available locally. |
+| Repository | New integrations require a clean checkout on a local branch with no active Git operation. Autostash is disabled. Detached HEAD and bare repositories are unsupported. |
 | Rebase | Replay the current branch using Git's merge backend. Use `--onto` for a separate new base or `--keep-base` to retain the unique common ancestor. Autostash, update-refs, and rebasing merge commits are disabled. |
 | Merge | Integrate one pinned target with `--no-edit`; Git's fast-forward policy still applies. |
 | Interaction | Git runs noninteractively with `diff3` conflict markers. Hooks and signing failures are not bypassed. |
-| Model | Valid `ez.*` model configuration is required before integration, even if no conflicts occur. No model call is made when Git resolves the operation without assistance. |
-| Recovery | Failed runs preserve local state. Inspect the audit and use native Git to continue or abort an active operation. |
+| Model | Valid `ez.*` model configuration is required before a new integration, even if no conflicts occur. No model call is made when Git resolves the operation without assistance. |
+| Recovery | Failed runs preserve local state. Resolve and stage manually, then use `--continue`; abort with native Git. |
 
 Interactive editing of a rebase, `--rebase-merges`, merge `--squash`,
 `--no-commit`, octopus merges, and arbitrary strategy options are outside this interface.
-For these workflows, use Git directly. git-ez cannot attach to an operation that was
+For these workflows, use Git directly. git-ez can continue a supported operation that was
 already started with Git.
 
 ### Rebase base and replay selection

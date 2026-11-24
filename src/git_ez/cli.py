@@ -5,12 +5,15 @@
 
 import argparse
 import json
+import shlex
 import sys
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, TypeVar, overload
 
 from . import __version__
+from .audit_report import safe_text
+from .audit_safety import redact_bytes
 from .config import Config
 from .engine import Engine
 from .errors import EzError
@@ -54,6 +57,24 @@ class GitArgumentParser(argparse.ArgumentParser):
             if getattr(parsed, "command", None) not in ("rebase", "merge"):
                 self.error("--check is only supported for rebase and merge")
             parsed.check = validation
+        if getattr(parsed, "command", None) in ("rebase", "merge"):
+            continuing = parsed.continue_operation
+            if continuing and parsed.target is not None:
+                self.error("--continue cannot be combined with a target")
+            if not continuing and parsed.target is None:
+                self.error("a target or --continue is required")
+            if continuing:
+                allowed = {
+                    "command",
+                    "target",
+                    "continue_operation",
+                    "interactive",
+                    "repo",
+                    "check",
+                }
+                for name, value in vars(parsed).items():
+                    if name not in allowed and value is not None:
+                        self.error(f"--continue cannot be combined with --{name.replace('_', '-')}")
         return parsed
 
 
@@ -70,7 +91,15 @@ def parser() -> argparse.ArgumentParser:
         run.add_argument(
             "--interactive", action="store_true", help="Review each agent proposal before staging"
         )
-        run.add_argument("target", help="Git revision to integrate into the current branch")
+        run.add_argument(
+            "target", nargs="?", help="Git revision to integrate into the current branch"
+        )
+        run.add_argument(
+            "--continue",
+            dest="continue_operation",
+            action="store_true",
+            help="Let Git continue manual work; assist only at a new rebase conflict",
+        )
         run.add_argument(
             "--gpg-sign",
             "-S",
@@ -93,7 +122,7 @@ def parser() -> argparse.ArgumentParser:
             run.add_argument(
                 "--keep-base",
                 action=argparse.BooleanOptionalAction,
-                default=False,
+                default=None,
                 help="Replay on the unique common ancestor instead of the upstream tip",
             )
             run.add_argument(
@@ -184,6 +213,40 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
+def _continuation_hint(engine: Engine, args: argparse.Namespace) -> None:
+    active = engine.git.rebase_active() if args.command == "rebase" else engine.git.merge_active()
+    if not active:
+        return
+    command = ["git", "ez", args.command, "--continue"]
+    if args.interactive:
+        command.append("--interactive")
+    if args.repo != Path("."):
+        command.extend(("--repo", str(args.repo)))
+    if args.check:
+        command.extend(("--check", *args.check))
+    # Native continuation may be interrupted before model configuration is loaded.
+    key = (
+        engine.git.run("config", "--get", "ez.apiKey", check=False)
+        .stdout.decode()
+        .removesuffix("\n")
+    )
+    key_env = (
+        engine.git.run("config", "--get", "ez.apiKeyEnv", check=False)
+        .stdout.decode()
+        .removesuffix("\n")
+    )
+    credentials = Config(api_key=key or None, api_key_env=key_env or "OPENAI_API_KEY")
+    secrets = (engine.config.resolved_api_key(), credentials.resolved_api_key())
+    command = [redact_bytes(argument.encode(), secrets).decode() for argument in command]
+    print(
+        f"{args.command.capitalize()} interrupted.\n\n"
+        "Resolve the current conflict manually and stage the resolution, then resume with:\n\n"
+        f"  {safe_text(shlex.join(command))}\n\nOr use native Git in the repository:\n\n"
+        f"  git {args.command} --continue",
+        file=sys.stderr,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
@@ -228,33 +291,39 @@ def main(argv: list[str] | None = None) -> int:
             log=getattr(args, "log", None),
             cleanup=getattr(args, "cleanup", None),
         )
-        config = Config.from_git(args.repo)
+        config = None if args.continue_operation else Config.from_git(args.repo)
         engine = Engine(args.repo, config)
-        audit = engine.run(
-            args.target,
-            args.command,
-            validation=tuple(args.check or ()),
-            merge_ff=getattr(args, "merge_ff", None),
-            onto=getattr(args, "onto", None),
-            rebase_options=(
-                RebaseOptions(
-                    empty=args.empty,
-                    keep_empty=args.keep_empty,
-                    reapply_cherry_picks=args.reapply_cherry_picks,
-                    force_rebase=args.force_rebase,
-                    autosquash=args.autosquash,
-                    keep_base=args.keep_base,
-                    fork_point=args.fork_point,
-                )
-                if args.command == "rebase"
-                else None
-            ),
-            commit_options=commit_options,
-            rerere_autoupdate=args.rerere_autoupdate,
-            interactive=args.interactive,
-        )
-        from .audit_report import safe_text
-
+        if args.continue_operation:
+            continued = engine.continue_operation(
+                args.command, tuple(args.check or ()), interactive=args.interactive
+            )
+            if isinstance(continued, int):
+                return continued
+            audit = continued
+        else:
+            audit = engine.run(
+                args.target,
+                args.command,
+                validation=tuple(args.check or ()),
+                merge_ff=getattr(args, "merge_ff", None),
+                onto=getattr(args, "onto", None),
+                rebase_options=(
+                    RebaseOptions(
+                        empty=args.empty,
+                        keep_empty=args.keep_empty,
+                        reapply_cherry_picks=args.reapply_cherry_picks,
+                        force_rebase=args.force_rebase,
+                        autosquash=args.autosquash,
+                        keep_base=bool(args.keep_base),
+                        fork_point=args.fork_point,
+                    )
+                    if args.command == "rebase"
+                    else None
+                ),
+                commit_options=commit_options,
+                rerere_autoupdate=args.rerere_autoupdate,
+                interactive=args.interactive,
+            )
         print(f"Audit: {safe_text(audit.directory.name)}")
         print(f"Inspect: git ez audit show {safe_text(audit.directory.name)}")
         print(f"Status: {audit.view['status']}")
@@ -279,9 +348,15 @@ def main(argv: list[str] | None = None) -> int:
                 "Resolution journal could not be saved; inspect the retained files.",
                 file=sys.stderr,
             )
-        if args.interactive and audit.view["status"] == "interrupted":
-            return 130
+        if audit.view["status"] == "interrupted":
+            _continuation_hint(engine, args)
+            if args.interactive:
+                return 130
         return 0 if audit.view["status"] == "succeeded" and audit.published else 1
+    except KeyboardInterrupt:
+        if "engine" in locals():
+            _continuation_hint(engine, args)
+        return 130
     except (EzError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"git-ez: {exc}", file=sys.stderr)
         return 2

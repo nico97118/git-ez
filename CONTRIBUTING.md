@@ -74,7 +74,7 @@ To reproduce the FreeBSD deployment/test environment:
 
 ```sh
 uv sync --locked --no-default-groups --group test --python /usr/local/bin/python3.12
-uv run --locked --no-default-groups --group test pytest -v --cov --cov-report=term-missing
+uv run --locked --no-default-groups --group test pytest -v -n 2 --cov --cov-report=term-missing
 uv build --python .venv/bin/python
 uv run --locked --no-default-groups python scripts/check_install.py dist/git_ez_ai-*.whl
 ```
@@ -145,14 +145,22 @@ complete suite in one invocation.
 # Fast isolated checks:
 uv run --locked pytest -v -m unit
 
-# Git, SDK/runtime, HTTP/TLS, and CLI integration:
-uv run --locked pytest -v -m integration
+# Git, SDK/runtime, HTTP/TLS, and CLI integration with four workers:
+uv run --locked pytest -v -n 4 -m integration
 
 # Combined line and branch coverage, including Python subprocesses:
-uv run --locked pytest --cov --cov-report=term-missing \
+uv run --locked pytest -n 4 --cov --cov-report=term-missing \
   --cov-report=html:ci-reports/coverage-html \
   --cov-report=xml:ci-reports/coverage.xml
 ```
+
+Parallel execution uses pytest-xdist's default distribution across worker processes.
+Linux/macOS CI keeps the fast unit selection sequential and runs integration tests
+with four workers. FreeBSD runs the complete suite with two workers in its 8 GiB VM.
+Local runs remain sequential unless `-n` is supplied. Use `-n 0` for sequential
+execution when debugging, or choose a worker count appropriate for the available
+CPUs and memory. Fixtures with session scope are created once per worker, not once
+for the entire parallel run.
 
 Linux/macOS CI collects coverage during the unit step, appends integration coverage,
 and uploads combined JSON/XML/HTML coverage reports plus separate JUnit results as artifacts for

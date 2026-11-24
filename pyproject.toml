@@ -21,7 +21,12 @@ dependencies = [
 git-ez = "git_ez.cli:main"
 
 [dependency-groups]
-test = ["pytest>=8.0", "pytest-cov>=7.1", "pytest-mock>=3.14"]
+test = [
+    "pytest>=8.0",
+    "pytest-cov>=7.1",
+    "pytest-mock>=3.14",
+    "pytest-xdist>=3.8",
+]
 lint = ["ruff>=0.9", "mypy>=1.14"]
 dev = [{include-group = "test"}, {include-group = "lint"}]
 

@@ -61,7 +61,7 @@ jobs:
         id: integration
         if: ${{ !cancelled() && (steps.unit.outcome == 'success' || steps.unit.outcome == 'failure') }}
         run: >-
-          uv run --locked --no-default-groups --group test pytest -v -m integration --cov --cov-append
+          uv run --locked --no-default-groups --group test pytest -v -n 4 -m integration --cov --cov-append
           --cov-report=term-missing
           --cov-report=json:ci-reports/coverage.json
           --cov-report=xml:ci-reports/coverage.xml
@@ -138,7 +138,7 @@ jobs:
             export CARGO_BUILD_JOBS=2 UV_CONCURRENT_BUILDS=2
             uv sync --locked --no-default-groups --group test --python /usr/local/bin/python3.12
             uv run --locked --no-default-groups --group test python -c 'import git_ez.agent_runtime'
-            uv run --locked --no-default-groups --group test pytest -v --cov --cov-report=term-missing --cov-report=xml:ci-reports/coverage.xml --junitxml=ci-reports/tests.xml
+            uv run --locked --no-default-groups --group test pytest -v -n 2 --cov --cov-report=term-missing --cov-report=xml:ci-reports/coverage.xml --junitxml=ci-reports/tests.xml
             uv build --python .venv/bin/python
             uv run --locked --no-default-groups python scripts/check_install.py dist/git_ez_ai-*.whl
             uv cache prune --ci

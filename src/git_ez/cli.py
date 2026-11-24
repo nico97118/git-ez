@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 git-ez contributors
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Local rebase/merge, audit consultation and model compatibility commands."""
+"""Local rebase/merge/cherry-pick, audit consultation and model compatibility commands."""
 
 import argparse
 import json
@@ -54,10 +54,10 @@ class GitArgumentParser(argparse.ArgumentParser):
                 arguments[index] = "--gpg-sign="
         parsed = super().parse_args(arguments, namespace)
         if validation is not None:
-            if getattr(parsed, "command", None) not in ("rebase", "merge"):
-                self.error("--check is only supported for rebase and merge")
+            if getattr(parsed, "command", None) not in ("rebase", "merge", "cherry-pick"):
+                self.error("--check is only supported for rebase, merge and cherry-pick")
             parsed.check = validation
-        if getattr(parsed, "command", None) in ("rebase", "merge"):
+        if getattr(parsed, "command", None) in ("rebase", "merge", "cherry-pick"):
             continuing = parsed.continue_operation
             if continuing and parsed.target is not None:
                 self.error("--continue cannot be combined with a target")
@@ -80,11 +80,12 @@ class GitArgumentParser(argparse.ArgumentParser):
 
 def parser() -> argparse.ArgumentParser:
     root = GitArgumentParser(
-        prog="git ez", description="Local Git rebase/merge with traceable AI conflict resolution"
+        prog="git ez",
+        description="Local Git rebase/merge/cherry-pick with traceable AI conflict resolution",
     )
     root.add_argument("--version", action="version", version=f"git-ez {__version__}")
     commands = root.add_subparsers(dest="command", required=True)
-    for operation in ("rebase", "merge"):
+    for operation in ("rebase", "merge", "cherry-pick"):
         run = commands.add_parser(
             operation, help=f"Run a local {operation} with AI conflict resolution"
         )
@@ -214,7 +215,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def _continuation_hint(engine: Engine, args: argparse.Namespace) -> None:
-    active = engine.git.rebase_active() if args.command == "rebase" else engine.git.merge_active()
+    active = engine.git.integration_active(args.command)
     if not active:
         return
     command = ["git", "ez", args.command, "--continue"]

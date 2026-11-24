@@ -11,6 +11,9 @@ git ez rebase main
 # On the branch that should receive feature:
 git ez merge feature
 
+# Apply one non-merge commit to the current branch:
+git ez cherry-pick <commit>
+
 # Explicit repository and final validation:
 git ez rebase origin/main --repo /path/to/project --check python -B -m pytest
 
@@ -32,7 +35,7 @@ checkout are required for new integrations.
 
 ### Checkout locking
 
-Only one `git ez rebase` or `git ez merge` can run per checkout at a time. A second
+Only one `git ez rebase`, `git ez merge` or `git ez cherry-pick` can run per checkout at a time. A second
 invocation fails immediately, before repository checks, audit creation, or model calls.
 The lock covers the entire run, including interactive review, validation, and final audit
 capture. Linked worktrees have separate locks.
@@ -49,6 +52,19 @@ Merge lets Git fast-forward or create a commit according to its configuration.
 Rebase replays the current branch onto the target. This interface supports simple
 integration, without the full set of Git options (interactive rebase, squash, octopus
 merge, etc.). Git aliases are optional: `git config --global alias.ai-rebase 'ez rebase'`.
+
+Cherry-pick applies one non-merge commit, including a root commit or a commit from
+an unrelated history. It supports the shared signing, signoff, rerere, review and
+validation options. Ranges, multiple commits, merge commits, `--no-commit`, `--ff`,
+`-x` and empty-commit policy flags are unsupported. Empty picks stop for inspection
+and native Git handling. The engine verifies that the result has the original HEAD
+as its sole parent, rather than requiring ancestry from the source commit.
+
+`git ez cherry-pick --continue` delegates a single-commit continuation to Git after
+manual resolution and staging, without calling the model. Optional `--check` runs
+after completion. Sequencer operations (ranges or multiple commits) require native
+Git continuation; git-ez rejects them before changing state. Use native Git for
+`--skip` and `--abort`.
 
 ### Validation, diagnostics, and exit codes
 
@@ -127,7 +143,7 @@ Operations started with native Git or git-ez are supported, including linked
 worktrees and both merge and apply rebase backends. Git always receives the first
 `--continue` before git-ez can stage files or call the model. Incomplete resolutions,
 unstaged edits, editor failures and hook failures retain Git's diagnostics and exit
-status. A merge continuation is entirely native.
+status. Merge and single-commit cherry-pick continuations are entirely native.
 
 For rebase, assistance resumes only with unmerged index entries at a demonstrably
 later replay step and a different replayed commit in the same operation. Missing or
@@ -150,7 +166,7 @@ assistance or `--check` runs. Prior journals remain available independently.
 
 Use git-ez for a simple integration into the currently checked-out branch. It exposes
 its own small command-line interface; it does not forward arbitrary options to
-`git rebase` or `git merge`.
+`git rebase`, `git merge` or `git cherry-pick`.
 
 | Contract | Behavior |
 | --- | --- |
@@ -158,6 +174,7 @@ its own small command-line interface; it does not forward arbitrary options to
 | Repository | New integrations require a clean checkout on a local branch with no active Git operation. Autostash is disabled. Detached HEAD and bare repositories are unsupported. |
 | Rebase | Replay the current branch using Git's merge backend. Use `--onto` for a separate new base or `--keep-base` to retain the unique common ancestor. Autostash, update-refs, and rebasing merge commits are disabled. |
 | Merge | Integrate one pinned target with `--no-edit`; Git's fast-forward policy still applies. |
+| Cherry-pick | Apply one pinned non-merge commit; ranges and multiple commits require native Git. |
 | Interaction | Git runs noninteractively with `diff3` conflict markers. Hooks and signing failures are not bypassed. |
 | Model | Valid `ez.*` model configuration is required before a new integration, even if no conflicts occur. No model call is made when Git resolves the operation without assistance. |
 | Recovery | Failed runs preserve local state. Resolve and stage manually, then use `--continue`; abort with native Git. |

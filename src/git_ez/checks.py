@@ -34,6 +34,10 @@ class WorktreeChecks:
                 changed |= git.commit_oid(pinned.reference) != pinned.oid
         if audit.operation == "rebase":
             changed |= not git.rebase_active()
+        elif audit.operation == "cherry-pick":
+            picked = git.run("rev-parse", "--verify", "CHERRY_PICK_HEAD", check=False)
+            changed |= picked.returncode != 0 or picked.stdout.decode().strip() != inputs.target.oid
+            changed |= git.sequencer_active()
         else:
             merge_head = git.run("rev-parse", "--verify", "MERGE_HEAD", check=False)
             changed |= merge_head.returncode != 0 or (

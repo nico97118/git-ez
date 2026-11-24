@@ -135,6 +135,7 @@ class ConflictState:
                 "AUTO_MERGE",
                 "REBASE_HEAD",
                 "CHERRY_PICK_HEAD",
+                "sequencer",
                 "index.lock",
             )
             control = self.directory / "control"

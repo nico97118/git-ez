@@ -14,7 +14,7 @@ from git_ez.cli import main, parser
 from git_ez.git import Git
 
 
-@pytest.mark.parametrize("operation", ["rebase", "merge"])
+@pytest.mark.parametrize("operation", ["rebase", "merge", "cherry-pick"])
 @pytest.mark.unit
 def test_git_like_syntax_defaults_to_current_directory(operation):
     args = parser().parse_args([operation, "main"])
@@ -87,6 +87,7 @@ def cli_repo(tmp_path, model_server):
     [
         ("rebase", "extension", False),
         ("merge", "extension", False),
+        ("cherry-pick", "extension", True),
         ("rebase", "extension", True),
         ("merge", "alias", True),
     ],
@@ -126,7 +127,8 @@ def test_git_extension_resolves_through_real_http_and_agent(
     assert len(model_server.calls) == 2
     assert not git.operation_active()
     assert not git.run("status", "--porcelain").stdout
-    git.run("merge-base", "--is-ancestor", "main", "HEAD")
+    if operation != "cherry-pick":
+        git.run("merge-base", "--is-ancestor", "main", "HEAD")
     audits = list((git.path / ".git/ez/runs").iterdir())
     assert len(audits) == 1
     assert "Preserve both intentions" in (audits[0] / "report.md").read_text()
@@ -333,7 +335,7 @@ def test_signing_syntax_does_not_consume_target(arguments, expected):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("operation", ["rebase", "merge"])
+@pytest.mark.parametrize("operation", ["rebase", "merge", "cherry-pick"])
 @pytest.mark.parametrize("check_option", ["--check", "--chec", "--ch", "--c"])
 @pytest.mark.parametrize("attached", [False, True])
 def test_signing_arguments_inside_check_are_untouched(operation, check_option, attached):
@@ -363,7 +365,7 @@ def test_check_is_rejected_for_non_integration_commands(arguments, capsys):
     with pytest.raises(SystemExit) as error:
         parser().parse_args(arguments)
     assert error.value.code == 2
-    assert "--check is only supported for rebase and merge" in capsys.readouterr().err
+    assert "--check is only supported for rebase, merge and cherry-pick" in capsys.readouterr().err
 
 
 @pytest.mark.integration
@@ -434,7 +436,7 @@ def test_message_file_content_is_pinned_before_integration(cli_repo, monkeypatch
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("operation", ["rebase", "merge"])
+@pytest.mark.parametrize("operation", ["rebase", "merge", "cherry-pick"])
 def test_explicit_rerere_policy_syntax(operation):
     args = parser().parse_args([operation, "main", "--rerere-autoupdate", "--no-rerere-autoupdate"])
     assert args.rerere_autoupdate is False
@@ -746,3 +748,18 @@ def test_probe_redirected_json(tmp_path, model_server, destination):
     assert b"Compatibility: failed" in result.stderr
     assert report["status"] == "failed"
     assert report["checks"][0]["ok"] is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["main", "feature"],
+        ["main", "--no-commit"],
+        ["main", "--mainline=1"],
+        ["--continue", "main"],
+    ],
+)
+def test_cherry_pick_rejects_unsupported_arguments(arguments):
+    with pytest.raises(SystemExit):
+        parser().parse_args(["cherry-pick", *arguments])
